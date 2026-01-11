@@ -97,7 +97,13 @@ def join_room(agent_name: str, role: str = "") -> str:
     return f"✅ '{agent_name}' olarak odaya katıldın. Şu an odada başka agent yok."
 
 @mcp.tool()
-def send_message(from_agent: str, content: str, to_agent: str = "all") -> str:
+def send_message(
+    from_agent: str,
+    content: str,
+    to_agent: str = "all",
+    expects_reply: bool = True,
+    priority: str = "normal"
+) -> str:
     """
     Send a message to other agents.
 
@@ -105,6 +111,8 @@ def send_message(from_agent: str, content: str, to_agent: str = "all") -> str:
         from_agent: Your agent name
         content: Message content
         to_agent: Target agent name or "all" for broadcast (default: "all")
+        expects_reply: Set False for acknowledgments/thanks to prevent infinite loops (default: True)
+        priority: "urgent", "normal", or "low" (default: "normal")
 
     Returns:
         Confirmation that message was sent
@@ -122,7 +130,9 @@ def send_message(from_agent: str, content: str, to_agent: str = "all") -> str:
         "to": to_agent,
         "content": content,
         "timestamp": datetime.now().isoformat(),
-        "type": "direct" if to_agent != "all" else "broadcast"
+        "type": "direct" if to_agent != "all" else "broadcast",
+        "expects_reply": expects_reply,
+        "priority": priority
     }
     messages.append(message)
     _write_json(MESSAGES_FILE, messages)

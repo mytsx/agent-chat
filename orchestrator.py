@@ -26,6 +26,14 @@ TMUX_SESSION = "agents"
 # Yönetici agent adı
 MANAGER_AGENT = "yonetici"
 
+# Teşekkür/onay pattern'leri - sonsuz döngüyü önlemek için
+ACK_PATTERNS = [
+    "teşekkür", "sağol", "eyvallah", "tamam", "anladım", "ok", "👍",
+    "süper", "harika", "mükemmel", "güzel", "rica ederim", "bir şey değil",
+    "thanks", "thank you", "got it", "okay", "perfect", "great",
+    "tamamdır", "oldu", "anlaşıldı", "görüşürüz", "iyi çalışmalar"
+]
+
 def is_pane_ready(pane: int, timeout: int = 60) -> bool:
     """Claude'un hazır olup olmadığını kontrol et."""
     start = time.time()
@@ -117,6 +125,54 @@ def get_agents() -> dict:
     except:
         return {}
 
+def analyze_message(msg: dict) -> dict:
+    """
+    Mesajı analiz et ve ne yapılacağına karar ver.
+
+    Returns:
+        {"action": "skip" | "notify_reply" | "notify_info", "reason": str}
+    """
+    content = msg["content"]
+    content_lower = content.lower()
+    expects_reply = msg.get("expects_reply", True)  # Eski mesajlar için default True
+
+    # Kısa ack mesajı mı?
+    is_ack = len(content) < 50 and any(p in content_lower for p in ACK_PATTERNS)
+
+    # Soru mu?
+    has_question = "?" in content
+
+    # Karar ver
+    if is_ack and not expects_reply:
+        return {"action": "skip", "reason": "Onay/teşekkür mesajı (expects_reply=False)"}
+    elif is_ack and expects_reply:
+        # Kısa ack ama expects_reply=True - yine de skip edebiliriz
+        return {"action": "skip", "reason": "Kısa onay mesajı"}
+    elif has_question or expects_reply:
+        return {"action": "notify_reply", "reason": "Cevap bekleniyor"}
+    else:
+        return {"action": "notify_info", "reason": "Bilgilendirme mesajı"}
+
+def get_notification_prompt(analysis: dict, from_agent: str, content: str, msg_type: str) -> str | None:
+    """
+    Analiz sonucuna göre bildirim metni oluştur.
+
+    Returns:
+        Bildirim metni veya None (skip durumunda)
+    """
+    if analysis["action"] == "skip":
+        return None
+
+    preview = content[:60] + "..." if len(content) > 60 else content
+
+    if analysis["action"] == "notify_reply":
+        return f'{from_agent} mesaj gönderdi (cevap bekliyor): "{preview}" - Mesajları oku ve uygun şekilde cevapla.'
+
+    elif analysis["action"] == "notify_info":
+        return f'Bilgi: {from_agent}\'den mesaj var: "{preview}" - Gerekirse mesajları oku.'
+
+    return None
+
 def process_new_messages():
     """Yeni mesajları işle - Yönetici Claude'a bildir."""
     last_id = get_last_processed_id()
@@ -140,13 +196,22 @@ def process_new_messages():
         print(f"\n📨 Mesaj #{msg_id}: {from_agent} → {to_agent}")
         print(f"   İçerik: {content[:60]}...")
 
+        # Mesajı analiz et - sonsuz döngü önleme
+        analysis = analyze_message(msg)
+        print(f"   📊 Analiz: {analysis['action']} ({analysis['reason']})")
+
+        # Skip kararı verildiyse bildirim gönderme (sonsuz döngü önleme)
+        if analysis["action"] == "skip":
+            print(f"   ⏭️  Atlandı - sonsuz döngü önlendi")
+            save_last_processed_id(msg_id)
+            continue
+
         # Yönetici'den gelen mesajlar = Talimat
         # Bu mesajlar doğrudan hedef agent'a gider
         if from_agent == MANAGER_AGENT:
             # Yönetici talimatı - hedef agent'a bildir
             if to_agent != "all" and to_agent in mapping:
                 pane = mapping[to_agent]
-                # Yönetici'nin mesajını agent'a ilet
                 prompt = f'Yönetici talimatı: "{content}" - Mesajları oku ve gereğini yap.'
                 send_to_pane(pane, prompt)
             elif to_agent == "all":

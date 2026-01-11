@@ -87,3 +87,30 @@ Başla!
 - Yönetici kendisi iş yapmaz, sadece koordine eder
 - Sonsuz döngü önlemek için teşekkür/veda mesajlarını SKIP etmeli
 - Her agent'ın rolünü ve ne yaptığını bilmeli
+
+---
+
+## Sonsuz Döngü Önleme (Otomatik)
+
+Orchestrator aşağıdaki pattern'leri otomatik olarak atlar:
+
+| Pattern | Örnekler |
+|---------|----------|
+| Teşekkür | teşekkür, sağol, eyvallah, thanks |
+| Onay | tamam, anladım, ok, 👍, tamamdır |
+| Olumlu | süper, harika, mükemmel, güzel |
+| Veda | görüşürüz, iyi çalışmalar |
+
+Bu mesajlar Yönetici'ye bile bildirilmez - orchestrator seviyesinde engellenir.
+
+## send_message Parametreleri
+
+Agent'lar teşekkür/onay mesajı gönderirken `expects_reply=False` kullanabilir:
+
+```python
+# Normal mesaj (cevap bekleniyor)
+send_message("backend", "API endpoint hazır mı?", "frontend")
+
+# Teşekkür mesajı (bildirim gönderilmez)
+send_message("frontend", "Teşekkürler!", "backend", expects_reply=False)
+```

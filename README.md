@@ -1,12 +1,19 @@
 # Agent Chat Room - MCP Server
 
-Birden fazla Claude Code agent'ının birbirleriyle haberleşmesini sağlayan MCP sunucusu. **Yönetici Claude** tüm iletişimi koordine eder.
+Birden fazla Claude Code agent'ının birbirleriyle haberleşmesini sağlayan MCP sunucusu. **Yönetici Claude** tüm iletişimi koordine eder, **akıllı analiz** sonsuz döngüleri önler.
+
+## Özellikler
+
+- ✅ Yönetici Claude ile merkezi koordinasyon
+- ✅ Otomatik sonsuz döngü önleme (teşekkür/onay mesajları atlanır)
+- ✅ `expects_reply` parametresi ile kontrollü iletişim
+- ✅ tmux ile 4 panel yönetimi
 
 ## 4 Panel Yapısı
 
 ```
 ┌──────────────┬──────────────┐
-│  Orchestrator│  Yönetici    │
+│ Orchestrator │  Yönetici    │
 │   (Pane 0)   │   Claude     │
 │   Python     │   (Pane 1)   │
 ├──────────────┼──────────────┤
@@ -19,17 +26,15 @@ Birden fazla Claude Code agent'ının birbirleriyle haberleşmesini sağlayan MC
 ## Nasıl Çalışır?
 
 ```
-Backend → Mesaj → Orchestrator → Yönetici Claude → Analiz → Karar → Talimat → Frontend
+Backend → Mesaj → Orchestrator → Analiz → Yönetici Claude → Karar → Frontend
 ```
 
 1. **Backend** bir mesaj gönderir
-2. **Python Orchestrator** yeni mesajı tespit eder
-3. **Yönetici Claude**'a bildirir
-4. **Yönetici** mesajı analiz eder, karar verir:
-   - Soru mu? → İlgili agent'a "cevap ver" talimatı
-   - Bilgi mi? → "Bilgin olsun" bildirimi
-   - Teşekkür/veda mı? → Kimseye bildirme (sonsuz döngü önleme!)
-5. **Yönetici** ilgili agent'a talimat gönderir
+2. **Orchestrator** mesajı analiz eder:
+   - Teşekkür/onay mı? → `skip` (sonsuz döngü önleme!)
+   - Değilse → Yönetici'ye bildir
+3. **Yönetici Claude** mesajı değerlendirir ve ilgili agent'a talimat gönderir
+4. **Frontend** talimatı alır ve cevap verir
 
 ## Kurulum
 
@@ -100,7 +105,7 @@ tmux attach -t agents
 claude
 ```
 
-Sonra `docs/MANAGER_PROMPT.md` içeriğini yapıştır.
+Sonra `docs/MANAGER_PROMPT.md` içeriğindeki prompt'u yapıştır.
 
 ### 4. Pane 2 (Backend Claude)
 
@@ -125,10 +130,20 @@ Sonra: `frontend olarak agent chat odasına katıl`
 | Araç | Açıklama |
 |------|----------|
 | `join_room(agent_name, role)` | Odaya katıl |
-| `send_message(from, content, to)` | Mesaj gönder |
-| `read_messages(agent_name)` | Mesajları oku |
+| `send_message(from, content, to, expects_reply, priority)` | Mesaj gönder |
+| `read_messages(agent_name)` | Sana gelen mesajları oku |
+| `read_all_messages()` | TÜM mesajları oku (admin) |
 | `list_agents()` | Agent'ları listele |
 | `leave_room(agent_name)` | Odadan ayrıl |
+| `clear_room()` | Odayı temizle |
+| `get_last_message_id()` | Son mesaj ID'sini al |
+
+### send_message Parametreleri
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `expects_reply` | `True` | `False` ise teşekkür/onay mesajı - bildirim gönderilmez |
+| `priority` | `"normal"` | `"urgent"`, `"normal"`, `"low"` |
 
 ## Dosya Yapısı
 
