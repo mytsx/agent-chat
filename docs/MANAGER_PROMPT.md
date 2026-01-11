@@ -55,10 +55,20 @@ send_message("yonetici", "@AGENT_ADI: TALİMAT", "AGENT_ADI")
 - `send_message("yonetici", "@backend: Frontend sana API endpoint'leri hakkında soru sordu. Mesajları oku ve cevapla.", "backend")`
 - `send_message("yonetici", "@frontend: Backend bilgi paylaştı. Gerekirse oku, yoksa işine devam et.", "frontend")`
 
+## ÖNEMLİ: Mesaj Okuma
+
+Normal `read_messages` sadece sana gelen mesajları gösterir!
+**`read_all_messages` kullan** - bu TÜM mesajları gösterir (mobil→backend dahil).
+
+```
+read_all_messages(since_id=0)  # Tüm mesajlar
+read_all_messages(since_id=25) # 25'ten sonrakiler
+```
+
 ## Şimdi:
 
 1. "yonetici" olarak odaya katıl
-2. Mesajları oku ve mevcut durumu anla
+2. `read_all_messages` ile TÜM mesajları oku
 3. Yeni mesajları bekle ve yönetmeye başla
 
 Başla!

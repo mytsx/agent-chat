@@ -259,6 +259,37 @@ def clear_room() -> str:
     return "🧹 Oda temizlendi. Tüm mesajlar ve agent kayıtları silindi."
 
 @mcp.tool()
+def read_all_messages(since_id: int = 0) -> str:
+    """
+    Read ALL messages in the chat room (for manager/admin use).
+
+    Args:
+        since_id: Only get messages after this ID (default: 0 for all)
+
+    Returns:
+        List of all messages formatted for reading
+    """
+    messages = _get_messages()
+
+    filtered = [m for m in messages if m["id"] > since_id]
+
+    if not filtered:
+        return "📭 Yeni mesaj yok."
+
+    result = f"📬 {len(filtered)} mesaj (tümü):\n\n"
+    for msg in filtered:
+        timestamp = msg["timestamp"].split("T")[1].split(".")[0]
+        msg_type = msg.get("type", "direct")
+
+        if msg_type == "system":
+            result += f"[{timestamp}] SYSTEM: {msg['content']}\n"
+        else:
+            result += f"[{timestamp}] #{msg['id']} {msg['from']} → {msg['to']}: {msg['content'][:100]}\n"
+        result += "\n"
+
+    return result
+
+@mcp.tool()
 def get_last_message_id(agent_name: str = "") -> int:
     """
     Get the ID of the last message. Useful for polling new messages.
