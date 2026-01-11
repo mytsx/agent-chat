@@ -56,6 +56,12 @@ brew install tmux
 
 ### 4. Claude Code'a MCP Ekle
 
+**Yöntem 1 - CLI ile (önerilen):**
+```bash
+claude mcp add agent-chat -- /FULL/PATH/TO/agent-chat/venv/bin/python /FULL/PATH/TO/agent-chat/server.py
+```
+
+**Yöntem 2 - Manuel:**
 `~/.claude/claude_code_config.json`:
 
 ```json
