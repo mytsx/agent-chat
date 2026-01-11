@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Agent Chat Orchestrator
-Mesaj kuyruğunu izler ve ilgili terminal'e komut gönderir.
+Agent Chat Orchestrator - Yönetici Claude Destekli
+Mesaj kuyruğunu izler ve Yönetici Claude'a bildirir.
 
-Kullanım:
-1. tmux session başlat: tmux new-session -s agents
-2. 3 pane oluştur (Ctrl+B %)
-3. Pane 0: orchestrator.py çalıştır
-4. Pane 1: claude code başlat (backend)
-5. Pane 2: claude code başlat (frontend)
-
-Veya: ./orchestrator.py --setup ile otomatik kurulum
+4 Pane Yapısı:
+- Pane 0: Bu orchestrator
+- Pane 1: Yönetici Claude
+- Pane 2: Backend Claude
+- Pane 3: Frontend/Mobil Claude
 """
 
 import json
@@ -18,44 +15,34 @@ import time
 import subprocess
 import argparse
 from pathlib import Path
-from datetime import datetime
 
 CHAT_DIR = Path("/tmp/agent-chat-room")
 MESSAGES_FILE = CHAT_DIR / "messages.json"
 AGENTS_FILE = CHAT_DIR / "agents.json"
 STATE_FILE = CHAT_DIR / "orchestrator_state.json"
 
-# tmux session ve pane mapping
 TMUX_SESSION = "agents"
 
-def run_tmux(cmd: str) -> str:
-    """tmux komutu çalıştır."""
-    result = subprocess.run(
-        ["tmux"] + cmd.split(),
-        capture_output=True,
-        text=True
-    )
-    return result.stdout.strip()
+# Yönetici agent adı
+MANAGER_AGENT = "yonetici"
 
 def is_pane_ready(pane: int, timeout: int = 60) -> bool:
-    """Claude'un hazır olup olmadığını kontrol et (prompt bekliyor mu?)."""
+    """Claude'un hazır olup olmadığını kontrol et."""
     start = time.time()
     while time.time() - start < timeout:
-        # Son birkaç satırı al
         result = subprocess.run(
-            ["tmux", "capture-pane", "-t", f"{TMUX_SESSION}:{0}.{pane}", "-p", "-S", "-5"],
+            ["tmux", "capture-pane", "-t", f"{TMUX_SESSION}:0.{pane}", "-p", "-S", "-5"],
             capture_output=True,
             text=True
         )
         last_lines = result.stdout.strip()
 
-        # Meşgul işaretleri: spinner veya işlem yapıyor
+        # Meşgul işaretleri
         busy_indicators = [
-            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",  # Spinner
-            "Working", "Thinking", "Running",  # İşlem yapıyor
+            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+            "Working", "Thinking", "Running",
         ]
 
-        # Meşgul mu kontrol et
         is_busy = any(indicator in last_lines for indicator in busy_indicators)
 
         if is_busy:
@@ -63,42 +50,38 @@ def is_pane_ready(pane: int, timeout: int = 60) -> bool:
             time.sleep(2)
             continue
 
-        # Meşgul değilse hazır demektir
         return True
 
     print(f"  ⚠️ Pane {pane} timeout - yine de gönderiliyor")
-    return True  # Timeout sonrası yine de gönder
+    return True
 
 def send_to_pane(pane: int, text: str):
-    """Belirli bir pane'e metin gönder (Claude hazır olduğunda)."""
-    # Önce Claude'un hazır olmasını bekle
+    """Belirli bir pane'e metin gönder."""
     is_pane_ready(pane)
 
     target = f"{TMUX_SESSION}:0.{pane}"
 
-    # Metni yaz (-l = literal, özel karakterleri yorumlama)
     result1 = subprocess.run(["tmux", "send-keys", "-t", target, "-l", "--", text],
                              capture_output=True)
     time.sleep(0.3)
 
-    # Enter tuşuna bas (C-m = Ctrl+M = Enter)
     result2 = subprocess.run(["tmux", "send-keys", "-t", target, "C-m"],
                              capture_output=True)
 
     if result1.returncode != 0 or result2.returncode != 0:
         print(f"  ❌ Hata! tmux send-keys başarısız")
     else:
-        print(f"  → Pane {pane}'e gönderildi: {text[:50]}...")
+        print(f"  → Pane {pane}'e gönderildi: {text[:60]}...")
 
 def get_agent_pane_mapping() -> dict:
-    """Agent -> Pane mapping dosyasını oku."""
+    """Agent -> Pane mapping."""
     mapping_file = CHAT_DIR / "agent_panes.json"
     if mapping_file.exists():
         return json.loads(mapping_file.read_text())
     return {}
 
 def set_agent_pane(agent_name: str, pane: int):
-    """Agent'ı bir pane'e ata."""
+    """Agent'ı pane'e ata."""
     mapping = get_agent_pane_mapping()
     mapping[agent_name] = pane
     mapping_file = CHAT_DIR / "agent_panes.json"
@@ -106,18 +89,18 @@ def set_agent_pane(agent_name: str, pane: int):
     print(f"✓ {agent_name} → Pane {pane}")
 
 def get_last_processed_id() -> int:
-    """Son işlenen mesaj ID'sini al."""
+    """Son işlenen mesaj ID."""
     if STATE_FILE.exists():
         state = json.loads(STATE_FILE.read_text())
         return state.get("last_processed_id", 0)
     return 0
 
 def save_last_processed_id(msg_id: int):
-    """Son işlenen mesaj ID'sini kaydet."""
+    """Son işlenen mesaj ID kaydet."""
     STATE_FILE.write_text(json.dumps({"last_processed_id": msg_id}))
 
 def get_messages() -> list:
-    """Tüm mesajları al."""
+    """Tüm mesajlar."""
     if not MESSAGES_FILE.exists():
         return []
     try:
@@ -126,7 +109,7 @@ def get_messages() -> list:
         return []
 
 def get_agents() -> dict:
-    """Aktif agent'ları al."""
+    """Aktif agent'lar."""
     if not AGENTS_FILE.exists():
         return {}
     try:
@@ -135,7 +118,7 @@ def get_agents() -> dict:
         return {}
 
 def process_new_messages():
-    """Yeni mesajları işle ve ilgili agent'lara bildir."""
+    """Yeni mesajları işle - Yönetici Claude'a bildir."""
     last_id = get_last_processed_id()
     messages = get_messages()
     mapping = get_agent_pane_mapping()
@@ -143,93 +126,63 @@ def process_new_messages():
     new_messages = [m for m in messages if m["id"] > last_id]
 
     for msg in new_messages:
-        if msg["type"] == "system":
-            # Sistem mesajlarını atla
-            save_last_processed_id(msg["id"])
-            continue
-
+        msg_id = msg["id"]
         from_agent = msg["from"]
         to_agent = msg["to"]
         content = msg["content"][:100]
+        msg_type = msg.get("type", "direct")
 
-        print(f"\n📨 Yeni mesaj #{msg['id']}: {from_agent} → {to_agent}")
-        print(f"   İçerik: {content}")
+        # Sistem mesajlarını atla
+        if msg_type == "system":
+            save_last_processed_id(msg_id)
+            continue
 
-        # Hedef agent'ı belirle
-        if to_agent == "all":
-            # Broadcast - gönderen hariç herkese bildir
-            targets = [a for a in mapping.keys() if a != from_agent]
-        else:
-            targets = [to_agent] if to_agent in mapping else []
+        print(f"\n📨 Mesaj #{msg_id}: {from_agent} → {to_agent}")
+        print(f"   İçerik: {content[:60]}...")
 
-        for target in targets:
-            pane = mapping.get(target)
-            if pane is not None:
-                # Claude Code'a mesaj oku komutu gönder
-                prompt = f'{target} olarak mesajları oku ve "{from_agent}" mesajına uygun şekilde cevap ver'
+        # Yönetici'den gelen mesajlar = Talimat
+        # Bu mesajlar doğrudan hedef agent'a gider
+        if from_agent == MANAGER_AGENT:
+            # Yönetici talimatı - hedef agent'a bildir
+            if to_agent != "all" and to_agent in mapping:
+                pane = mapping[to_agent]
+                # Yönetici'nin mesajını agent'a ilet
+                prompt = f'Yönetici talimatı: "{content}" - Mesajları oku ve gereğini yap.'
                 send_to_pane(pane, prompt)
-                time.sleep(0.5)  # Rate limiting
+            elif to_agent == "all":
+                # Broadcast talimat - yönetici hariç herkese
+                for agent, pane in mapping.items():
+                    if agent != MANAGER_AGENT:
+                        prompt = f'Yönetici talimatı: "{content}" - Mesajları oku.'
+                        send_to_pane(pane, prompt)
+                        time.sleep(0.5)
+        else:
+            # Normal mesaj - Yönetici'ye bildir (analiz etsin)
+            if MANAGER_AGENT in mapping:
+                manager_pane = mapping[MANAGER_AGENT]
+                prompt = f'Yeni mesaj var ({from_agent} → {to_agent}). Mesajları kontrol et ve gerekli yönlendirmeleri yap.'
+                send_to_pane(manager_pane, prompt)
 
-        save_last_processed_id(msg["id"])
-
-def setup_tmux_session():
-    """tmux session'ı otomatik kur."""
-    print("🚀 tmux session kuruluyor...")
-
-    # Mevcut session'ı kapat
-    subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION],
-                   capture_output=True)
-
-    # Yeni session oluştur (3 pane)
-    subprocess.run([
-        "tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "chat"
-    ])
-
-    # Dikey split - 2 pane daha
-    subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-    subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-
-    # Layout düzenle
-    subprocess.run(["tmux", "select-layout", "-t", f"{TMUX_SESSION}:0", "even-horizontal"])
-
-    print("""
-✅ tmux session hazır!
-
-Şimdi:
-1. Yeni terminal aç ve şunu çalıştır:
-   tmux attach -t agents
-
-2. 3 pane göreceksin:
-   - Pane 0 (sol): Orchestrator için
-   - Pane 1 (orta): Backend agent için
-   - Pane 2 (sağ): Frontend agent için
-
-3. Pane 1'de: cd /proje/backend && claude
-4. Pane 2'de: cd /proje/frontend && claude
-
-5. Her Claude'da odaya katıl:
-   - Pane 1: "backend olarak agent chat odasına katıl"
-   - Pane 2: "frontend olarak agent chat odasına katıl"
-
-6. Agent'ları pane'lere ata (bu terminalde):
-   ./orchestrator.py --assign backend 1
-   ./orchestrator.py --assign frontend 2
-
-7. Orchestrator'ı başlat:
-   ./orchestrator.py --watch
-""")
+        save_last_processed_id(msg_id)
 
 def watch_loop():
     """Ana izleme döngüsü."""
+    mapping = get_agent_pane_mapping()
+
     print("👀 Mesaj kuyruğu izleniyor... (Ctrl+C ile çık)")
     print(f"   Mesaj dosyası: {MESSAGES_FILE}")
-    print(f"   Agent mapping: {get_agent_pane_mapping()}")
+    print(f"   Agent mapping: {mapping}")
+
+    if MANAGER_AGENT not in mapping:
+        print(f"\n⚠️  UYARI: '{MANAGER_AGENT}' pane'e atanmamış!")
+        print(f"   Çalıştır: ./orchestrator.py --assign {MANAGER_AGENT} 1")
+
     print()
 
     while True:
         try:
             process_new_messages()
-            time.sleep(1)  # 1 saniyede bir kontrol
+            time.sleep(1)
         except KeyboardInterrupt:
             print("\n👋 Orchestrator durduruluyor...")
             break
@@ -237,8 +190,49 @@ def watch_loop():
             print(f"❌ Hata: {e}")
             time.sleep(2)
 
+def setup_tmux_session():
+    """tmux session kur (4 pane)."""
+    print("🚀 tmux session (4 pane) kuruluyor...")
+
+    subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION], capture_output=True)
+
+    subprocess.run(["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "chat"])
+
+    # 4 pane (2x2 grid)
+    subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
+    subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.0"])
+    subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.1"])
+
+    # Mouse desteği
+    subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "mouse", "on"])
+
+    print("""
+✅ tmux session hazır! (4 pane)
+
+┌──────────────┬──────────────┐
+│  Pane 0      │  Pane 1      │
+│ Orchestrator │  Yönetici    │
+├──────────────┼──────────────┤
+│  Pane 2      │  Pane 3      │
+│  Backend     │  Frontend    │
+└──────────────┴──────────────┘
+
+Şimdi:
+  tmux attach -t agents
+
+Sonra:
+  1. Pane 0: ./orchestrator.py --assign yonetici 1
+  2. Pane 0: ./orchestrator.py --assign backend 2
+  3. Pane 0: ./orchestrator.py --assign frontend 3
+  4. Pane 0: ./orchestrator.py --watch
+
+  5. Pane 1: claude → Yönetici prompt yapıştır
+  6. Pane 2: claude → "backend olarak odaya katıl"
+  7. Pane 3: claude → "frontend olarak odaya katıl"
+""")
+
 def clear_state():
-    """State'i temizle."""
+    """State temizle."""
     CHAT_DIR.mkdir(parents=True, exist_ok=True)
     for f in [MESSAGES_FILE, AGENTS_FILE, STATE_FILE, CHAT_DIR / "agent_panes.json"]:
         if f.exists():
@@ -246,12 +240,11 @@ def clear_state():
     print("🧹 Tüm state temizlendi.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Agent Chat Orchestrator")
-    parser.add_argument("--setup", action="store_true", help="tmux session kur")
+    parser = argparse.ArgumentParser(description="Agent Chat Orchestrator (Yönetici Claude Destekli)")
+    parser.add_argument("--setup", action="store_true", help="tmux session kur (4 pane)")
     parser.add_argument("--watch", action="store_true", help="Mesaj kuyruğunu izle")
-    parser.add_argument("--assign", nargs=2, metavar=("AGENT", "PANE"),
-                        help="Agent'ı pane'e ata")
-    parser.add_argument("--clear", action="store_true", help="State'i temizle")
+    parser.add_argument("--assign", nargs=2, metavar=("AGENT", "PANE"), help="Agent'ı pane'e ata")
+    parser.add_argument("--clear", action="store_true", help="State temizle")
     parser.add_argument("--status", action="store_true", help="Durum göster")
 
     args = parser.parse_args()
