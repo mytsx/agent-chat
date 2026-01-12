@@ -86,6 +86,10 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
     # Enable mouse
     subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "mouse", "on"])
 
+    # Enable pane titles
+    subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "pane-border-status", "top"])
+    subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "pane-border-format", " #{pane_index}: #{pane_title} "])
+
     return total_panes
 
 
@@ -122,6 +126,22 @@ def get_base_prompt() -> str:
     if BASE_PROMPT_FILE.exists():
         return BASE_PROMPT_FILE.read_text()
     return ""
+
+
+def set_pane_titles(with_manager: bool, agent_names: list):
+    """Pane basliklarini ayarla."""
+    # Pane 0 her zaman orchestrator
+    subprocess.run(["tmux", "select-pane", "-t", f"{TMUX_SESSION}:0.0", "-T", "ORCHESTRATOR"])
+
+    if with_manager:
+        subprocess.run(["tmux", "select-pane", "-t", f"{TMUX_SESSION}:0.1", "-T", "YONETICI"])
+        for i, name in enumerate(agent_names):
+            pane_num = i + 2
+            subprocess.run(["tmux", "select-pane", "-t", f"{TMUX_SESSION}:0.{pane_num}", "-T", name.upper()])
+    else:
+        for i, name in enumerate(agent_names):
+            pane_num = i + 1
+            subprocess.run(["tmux", "select-pane", "-t", f"{TMUX_SESSION}:0.{pane_num}", "-T", name.upper()])
 
 
 def print_instructions(num_agents: int, with_manager: bool, agent_names: list, mapping: dict):
@@ -249,6 +269,10 @@ Ornekler:
 
     # Save config
     mapping = save_config(args.num_agents, args.manager, agent_names)
+
+    # Set pane titles
+    print("  Pane basliklari ayarlaniyor...")
+    set_pane_titles(args.manager, agent_names)
 
     # Print instructions
     print_instructions(args.num_agents, args.manager, agent_names, mapping)
