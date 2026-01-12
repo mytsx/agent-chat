@@ -55,6 +55,22 @@ brew install tmux
 claude mcp add agent-chat -- /FULL/PATH/TO/agent-chat/venv/bin/python /FULL/PATH/TO/agent-chat/server.py
 ```
 
+### 5. Global Erisim (Opsiyonel)
+
+Herhangi bir dizinden `agent-setup` ve `agent-orch` komutlarini kullanmak icin:
+
+```bash
+# Symlink olustur
+sudo ln -sf /FULL/PATH/TO/agent-chat/setup.py /usr/local/bin/agent-setup
+sudo ln -sf /FULL/PATH/TO/agent-chat/orchestrator.py /usr/local/bin/agent-orch
+```
+
+Artik herhangi bir yerden:
+```bash
+agent-setup 3 --names backend,mobile,web
+agent-orch --watch
+```
+
 ## Kullanim Senaryolari
 
 ### Senaryo 1: Yonetici Olmadan (2 Agent)
