@@ -47,7 +47,7 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
 
     # Kill existing session
     subprocess.run(["tmux", "kill-session", "-t", TMUX_SESSION],
-                   capture_output=True, stderr=subprocess.DEVNULL)
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Create new session
     subprocess.run(["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "chat"])
