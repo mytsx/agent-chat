@@ -21,6 +21,7 @@ Thumbs.db
 
 # Project specific
 claude_code_config.json
+mcp_add_command.txt
 
 # Temp files
 *.log
