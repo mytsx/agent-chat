@@ -142,7 +142,7 @@ def send_message(
     return f"📤 Mesaj '{to_agent}' agent'ına gönderildi (ID: {message['id']})"
 
 @mcp.tool()
-def read_messages(agent_name: str, since_id: int = 0, unread_only: bool = True) -> str:
+def read_messages(agent_name: str, since_id: int = 0, unread_only: bool = True, limit: int = 10) -> str:
     """
     Read messages from the chat room.
 
@@ -150,6 +150,7 @@ def read_messages(agent_name: str, since_id: int = 0, unread_only: bool = True) 
         agent_name: Your agent name (to filter relevant messages)
         since_id: Only get messages after this ID (default: 0 for all)
         unread_only: If True, only show messages not from yourself (default: True)
+        limit: Maximum number of messages to return (default: 10, 0 for unlimited)
 
     Returns:
         List of messages formatted for reading
@@ -176,9 +177,17 @@ def read_messages(agent_name: str, since_id: int = 0, unread_only: bool = True) 
     if not filtered:
         return "📭 Yeni mesaj yok."
 
-    result = f"📬 {len(filtered)} mesaj:\n\n"
+    total_count = len(filtered)
+
+    # Apply limit (get last N messages)
+    if limit > 0 and len(filtered) > limit:
+        filtered = filtered[-limit:]
+        result = f"📬 Son {limit} mesaj (toplam {total_count}):\n\n"
+    else:
+        result = f"📬 {len(filtered)} mesaj:\n\n"
+
     for msg in filtered:
-        timestamp = msg["timestamp"].split("T")[1].split(".")[0]  # HH:MM:SS
+        timestamp = datetime.fromisoformat(msg["timestamp"]).strftime('%H:%M:%S')  # HH:MM:SS
         if msg["type"] == "system":
             result += f"[{timestamp}] {msg['content']}\n"
         elif msg["to"] == "all":
@@ -269,12 +278,13 @@ def clear_room() -> str:
     return "🧹 Oda temizlendi. Tüm mesajlar ve agent kayıtları silindi."
 
 @mcp.tool()
-def read_all_messages(since_id: int = 0) -> str:
+def read_all_messages(since_id: int = 0, limit: int = 15) -> str:
     """
     Read ALL messages in the chat room (for manager/admin use).
 
     Args:
         since_id: Only get messages after this ID (default: 0 for all)
+        limit: Maximum number of messages to return (default: 15, 0 for unlimited)
 
     Returns:
         List of all messages formatted for reading
@@ -286,9 +296,17 @@ def read_all_messages(since_id: int = 0) -> str:
     if not filtered:
         return "📭 Yeni mesaj yok."
 
-    result = f"📬 {len(filtered)} mesaj (tümü):\n\n"
+    total_count = len(filtered)
+
+    # Apply limit (get last N messages)
+    if limit > 0 and len(filtered) > limit:
+        filtered = filtered[-limit:]
+        result = f"📬 Son {limit} mesaj (toplam {total_count}):\n\n"
+    else:
+        result = f"📬 {len(filtered)} mesaj (tümü):\n\n"
+
     for msg in filtered:
-        timestamp = msg["timestamp"].split("T")[1].split(".")[0]
+        timestamp = datetime.fromisoformat(msg["timestamp"]).strftime('%H:%M:%S')
         msg_type = msg.get("type", "direct")
 
         if msg_type == "system":

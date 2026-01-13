@@ -1,0 +1,42 @@
+## Agent Chat - MCP Araclari
+
+Bu projede agent-chat MCP araci aktif. Diger agent'larla iletisim kurabilirsin.
+
+### Mevcut Araclar:
+
+| Arac | Aciklama |
+|------|----------|
+| `join_room(agent_name, role)` | Odaya katil |
+| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder (to_agent="all" broadcast) |
+| `read_messages(agent_name, since_id, unread_only, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
+| `read_all_messages(since_id, limit)` | TUM mesajlari oku - yonetici icin (varsayilan limit: 15) |
+| `list_agents()` | Odadaki agent'lari listele |
+| `leave_room(agent_name)` | Odadan ayril |
+| `clear_room()` | Odayi temizle (dikkatli kullan!) |
+| `get_last_message_id()` | Son mesaj ID'sini al |
+
+### Ornek Kullanim:
+
+1. Odaya katil:
+   ```
+   join_room("backend", "Backend API Developer")
+   ```
+
+2. Mesaj gonder:
+   ```
+   send_message("backend", "API endpoint hazir mi?", "frontend")
+   ```
+
+3. Broadcast mesaj:
+   ```
+   send_message("backend", "Deployment tamamlandi!", "all")
+   ```
+
+### Onemli Kurallar:
+
+- Tesekkur/onay mesajlarinda `expects_reply=False` kullan (sonsuz dongu onleme)
+- Odaya katildiktan sonra diger agent'lari gorebilirsin
+- Mesajlari duzenli kontrol et
+
+---
+Simdi odaya katil ve iletisime basla.
