@@ -148,11 +148,12 @@ claude
 |------|----------|
 | `join_room(agent_name, role)` | Odaya katil |
 | `send_message(from, content, to, expects_reply)` | Mesaj gonder |
-| `read_messages(agent_name)` | Sana gelen mesajlari oku |
-| `read_all_messages()` | TUM mesajlari oku (yonetici icin) |
+| `read_messages(agent_name, since_id, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
+| `read_all_messages(since_id, limit)` | TUM mesajlari oku (varsayilan limit: 15) |
 | `list_agents()` | Odadaki agent'lari listele |
 | `leave_room(agent_name)` | Odadan ayril |
 | `clear_room()` | Odayi temizle |
+| `get_last_message_id()` | Son mesaj ID'sini al |
 
 ### send_message Parametreleri
 
