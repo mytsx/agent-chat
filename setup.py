@@ -246,6 +246,10 @@ Ornekler:
         print("Hata: Agent sayisi 1-8 arasi olmali")
         sys.exit(1)
 
+    if args.manager and args.num_agents > 7:
+        print("Hata: Yonetici modu ile en fazla 7 agent desteklenmektedir (toplam 9 pane limiti).")
+        sys.exit(1)
+
     # Agent names
     if args.names:
         agent_names = [n.strip() for n in args.names.split(",")]

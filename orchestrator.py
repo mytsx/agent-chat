@@ -196,12 +196,12 @@ def process_message_with_manager(msg: dict, mapping: dict):
     if from_agent == MANAGER_AGENT:
         if to_agent != "all" and to_agent in mapping:
             pane = mapping[to_agent]
-            prompt = f'Yonetici talimat gonderdi. Mesajlari oku ve geregi yap.'
+            prompt = f'Yonetici talimati: "{content}" - Mesajlari oku ve geregini yap.'
             send_to_pane(pane, prompt)
         elif to_agent == "all":
             for agent, pane in mapping.items():
                 if agent != MANAGER_AGENT:
-                    prompt = f'Yonetici talimat gonderdi. Mesajlari oku.'
+                    prompt = f'Yonetici talimati (herkese): "{content}" - Mesajlari oku.'
                     send_to_pane(pane, prompt)
                     time.sleep(0.5)
     else:

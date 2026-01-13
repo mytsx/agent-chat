@@ -147,7 +147,7 @@ claude
 | Arac | Aciklama |
 |------|----------|
 | `join_room(agent_name, role)` | Odaya katil |
-| `send_message(from, content, to, expects_reply)` | Mesaj gonder |
+| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder |
 | `read_messages(agent_name, since_id, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
 | `read_all_messages(since_id, limit)` | TUM mesajlari oku (varsayilan limit: 15) |
 | `list_agents()` | Odadaki agent'lari listele |
@@ -159,6 +159,8 @@ claude
 
 | Parametre | Varsayilan | Aciklama |
 |-----------|------------|----------|
+| `from_agent` | (zorunlu) | Gonderen agent adi |
+| `content` | (zorunlu) | Mesaj icerigi |
 | `to_agent` | `"all"` | Hedef agent veya "all" (broadcast) |
 | `expects_reply` | `True` | `False` = tesekkur/onay mesaji (bildirim gonderilmez) |
 | `priority` | `"normal"` | `"urgent"`, `"normal"`, `"low"` |
