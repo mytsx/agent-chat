@@ -70,7 +70,7 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
 
     # Enable pane titles (persistent)
     subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "pane-border-status", "top"])
-    subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "pane-border-format", " #{pane_index}: #{pane_title} "])
+    subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "pane-border-format", " #P "])
     subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "allow-rename", "off"])
     subprocess.run(["tmux", "set-window-option", "-t", TMUX_SESSION, "automatic-rename", "off"])
 
