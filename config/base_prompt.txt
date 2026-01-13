@@ -7,7 +7,7 @@ Bu projede agent-chat MCP araci aktif. Diger agent'larla iletisim kurabilirsin.
 | Arac | Aciklama |
 |------|----------|
 | `join_room(agent_name, role)` | Odaya katil |
-| `send_message(from_agent, content, to_agent, expects_reply)` | Mesaj gonder (to_agent="all" broadcast) |
+| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder (to_agent="all" broadcast) |
 | `read_messages(agent_name, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
 | `list_agents()` | Odadaki agent'lari listele |
 | `leave_room(agent_name)` | Odadan ayril |

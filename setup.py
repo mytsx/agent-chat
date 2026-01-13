@@ -26,7 +26,7 @@ DEFAULT_AGENT_NAMES = ["backend", "frontend", "mobile", "web", "devops", "qa", "
 def clear_state():
     """Onceki state'i temizle."""
     CHAT_DIR.mkdir(parents=True, exist_ok=True)
-    for f in ["messages.json", "agents.json", "orchestrator_state.json", "agent_panes.json"]:
+    for f in ["messages.json", "agents.json", "orchestrator_state.json", "agent_panes.json", "setup_config.json"]:
         filepath = CHAT_DIR / f
         if filepath.exists():
             filepath.unlink()
@@ -147,7 +147,7 @@ def print_instructions(num_agents: int, with_manager: bool, agent_names: list, m
         for i in range(0, len(agent_names), 2):
             left = f"Pane {i+2}: {agent_names[i]}" if i < len(agent_names) else ""
             right = f"Pane {i+3}: {agent_names[i+1]}" if i+1 < len(agent_names) else ""
-            print(f"| {left:<18} | {right:<18} |")
+            print(f"| {left:<20} | {right:<20} |")
         print("+" + "-"*20 + "+" + "-"*20 + "+")
     else:
         print("Pane Yapisi:")
@@ -158,7 +158,7 @@ def print_instructions(num_agents: int, with_manager: bool, agent_names: list, m
         for i in range(0, len(agent_names), 2):
             left = f"Pane {i+1}: {agent_names[i]}" if i < len(agent_names) else ""
             right = f"Pane {i+2}: {agent_names[i+1]}" if i+1 < len(agent_names) else ""
-            print(f"| {left:<18} | {right:<18} |")
+            print(f"| {left:<20} | {right:<20} |")
         print("+" + "-"*20 + "+" + "-"*20 + "+")
 
     print(f"\nAgent-Pane Mapping: {mapping}")
