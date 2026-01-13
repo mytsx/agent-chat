@@ -172,6 +172,7 @@ agent-chat/
 ├── server.py           # MCP sunucusu
 ├── orchestrator.py     # Mesaj yonlendirici
 ├── setup.py            # Dinamik tmux setup
+├── requirements.txt    # Python bagimliliklari
 ├── config/
 │   └── base_prompt.txt # Temel MCP tanimi
 ├── docs/

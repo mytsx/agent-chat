@@ -190,7 +190,6 @@ def process_message_with_manager(msg: dict, mapping: dict):
     from_agent = msg["from"]
     to_agent = msg["to"]
     content = msg["content"][:MANAGER_MSG_LIMIT]
-    msg_id = msg["id"]
 
     # Yoneticiden gelen mesajlar = Talimat, dogrudan hedefe git
     if from_agent == MANAGER_AGENT:
@@ -219,7 +218,6 @@ def process_message_direct(msg: dict, mapping: dict):
     from_agent = msg["from"]
     to_agent = msg["to"]
     content = msg["content"][:ACK_MSG_MAX_LENGTH]
-    msg_id = msg["id"]
 
     preview = content[:DIRECT_MSG_PREVIEW_LIMIT] + "..." if len(content) > DIRECT_MSG_PREVIEW_LIMIT else content
 
