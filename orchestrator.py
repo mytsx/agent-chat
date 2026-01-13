@@ -140,7 +140,7 @@ def get_messages() -> list:
         return []
     try:
         return json.loads(MESSAGES_FILE.read_text())
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, OSError):
         return []
 
 
@@ -150,7 +150,7 @@ def get_agents() -> dict:
         return {}
     try:
         return json.loads(AGENTS_FILE.read_text())
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, OSError):
         return {}
 
 

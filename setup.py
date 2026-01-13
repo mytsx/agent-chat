@@ -218,18 +218,18 @@ Ornekler:
 
     # Validate
     if args.num_agents < 1 or args.num_agents > 8:
-        print("Hata: Agent sayisi 1-8 arasi olmali")
+        print("Hata: Agent sayisi 1-8 arasi olmali", file=sys.stderr)
         sys.exit(1)
 
     if args.manager and args.num_agents > 7:
-        print("Hata: Yonetici modu ile en fazla 7 agent desteklenmektedir (toplam 9 pane limiti).")
+        print("Hata: Yonetici modu ile en fazla 7 agent desteklenmektedir (toplam 9 pane limiti).", file=sys.stderr)
         sys.exit(1)
 
     # Agent names
     if args.names:
         agent_names = [n.strip() for n in args.names.split(",")]
         if len(agent_names) != args.num_agents:
-            print(f"Hata: {args.num_agents} agent icin {len(agent_names)} isim verildi")
+            print(f"Hata: {args.num_agents} agent icin {len(agent_names)} isim verildi", file=sys.stderr)
             sys.exit(1)
     else:
         agent_names = DEFAULT_AGENT_NAMES[:args.num_agents]

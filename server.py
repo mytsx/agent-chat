@@ -187,7 +187,7 @@ def read_messages(agent_name: str, since_id: int = 0, unread_only: bool = True, 
         result = f"📬 {len(filtered)} mesaj:\n\n"
 
     for msg in filtered:
-        timestamp = msg["timestamp"].split("T")[1].split(".")[0]  # HH:MM:SS
+        timestamp = datetime.fromisoformat(msg["timestamp"]).strftime('%H:%M:%S')  # HH:MM:SS
         if msg["type"] == "system":
             result += f"[{timestamp}] {msg['content']}\n"
         elif msg["to"] == "all":
@@ -306,7 +306,7 @@ def read_all_messages(since_id: int = 0, limit: int = 15) -> str:
         result = f"📬 {len(filtered)} mesaj (tümü):\n\n"
 
     for msg in filtered:
-        timestamp = msg["timestamp"].split("T")[1].split(".")[0]
+        timestamp = datetime.fromisoformat(msg["timestamp"]).strftime('%H:%M:%S')
         msg_type = msg.get("type", "direct")
 
         if msg_type == "system":

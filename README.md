@@ -155,7 +155,7 @@ claude
 |------|----------|
 | `join_room(agent_name, role)` | Odaya katil |
 | `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder |
-| `read_messages(agent_name, since_id, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
+| `read_messages(agent_name, since_id, unread_only, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
 | `read_all_messages(since_id, limit)` | TUM mesajlari oku (varsayilan limit: 15) |
 | `list_agents()` | Odadaki agent'lari listele |
 | `leave_room(agent_name)` | Odadan ayril |
