@@ -64,7 +64,7 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
         # 2x2 grid
         subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
         subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.0"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.2"])
+        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.1"])
     elif total_panes <= 6:
         # 2x3 grid
         subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])

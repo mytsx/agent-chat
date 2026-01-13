@@ -28,6 +28,12 @@ TMUX_SESSION = "agents"
 # Yonetici agent adi
 MANAGER_AGENT = "yonetici"
 
+# Mesaj analiz limitleri
+ACK_MSG_MAX_LENGTH = 80          # Kisa onay mesaji limiti
+CONTENT_PREVIEW_LIMIT = 60       # Genel onizleme limiti
+MANAGER_MSG_LIMIT = 100          # Yonetici mesaj limiti
+DIRECT_MSG_PREVIEW_LIMIT = 50    # Dogrudan mesaj onizleme
+
 # Tesekkur/onay pattern'leri - sonsuz donguyu onlemek icin
 ACK_PATTERNS = [
     "tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
@@ -91,7 +97,7 @@ def send_to_pane(pane: int, text: str):
     if result1.returncode != 0 or result2.returncode != 0:
         print(f"  Hata! tmux send-keys basarisiz")
     else:
-        preview = text[:60] + "..." if len(text) > 60 else text
+        preview = text[:CONTENT_PREVIEW_LIMIT] + "..." if len(text) > CONTENT_PREVIEW_LIMIT else text
         print(f"  -> Pane {pane}'e gonderildi: {preview}")
 
 
@@ -160,7 +166,7 @@ def analyze_message(msg: dict) -> dict:
     is_question = any(p in content_lower for p in QUESTION_PATTERNS)
 
     # Kisa ack mesaji mi?
-    is_short = len(content) < 80
+    is_short = len(content) < ACK_MSG_MAX_LENGTH
     has_ack = any(p in content_lower for p in ACK_PATTERNS)
     is_ack = is_short and has_ack and not is_question
 
@@ -183,7 +189,7 @@ def process_message_with_manager(msg: dict, mapping: dict):
     """
     from_agent = msg["from"]
     to_agent = msg["to"]
-    content = msg["content"][:100]
+    content = msg["content"][:MANAGER_MSG_LIMIT]
     msg_id = msg["id"]
 
     # Yoneticiden gelen mesajlar = Talimat, dogrudan hedefe git
@@ -212,10 +218,10 @@ def process_message_direct(msg: dict, mapping: dict):
     """
     from_agent = msg["from"]
     to_agent = msg["to"]
-    content = msg["content"][:80]
+    content = msg["content"][:ACK_MSG_MAX_LENGTH]
     msg_id = msg["id"]
 
-    preview = content[:50] + "..." if len(content) > 50 else content
+    preview = content[:DIRECT_MSG_PREVIEW_LIMIT] + "..." if len(content) > DIRECT_MSG_PREVIEW_LIMIT else content
 
     if to_agent == "all":
         # Broadcast - herkese bildir (gonderen haric)
@@ -243,7 +249,7 @@ def process_new_messages(with_manager: bool):
         msg_id = msg["id"]
         from_agent = msg["from"]
         to_agent = msg["to"]
-        content = msg["content"][:100]
+        content = msg["content"][:MANAGER_MSG_LIMIT]
         msg_type = msg.get("type", "direct")
 
         # Sistem mesajlarini atla
@@ -252,7 +258,7 @@ def process_new_messages(with_manager: bool):
             continue
 
         print(f"\n Mesaj #{msg_id}: {from_agent} -> {to_agent}")
-        print(f"   Icerik: {content[:60]}...")
+        print(f"   Icerik: {content[:CONTENT_PREVIEW_LIMIT]}...")
 
         # Mesaji analiz et
         analysis = analyze_message(msg)
