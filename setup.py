@@ -48,7 +48,7 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Create new session
-    subprocess.run(["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "chat"])
+    subprocess.run(["tmux", "new-session", "-d", "-s", TMUX_SESSION, "-n", "chat"], check=True)
 
     # Calculate grid layout
     # For 2-4 panes: 2x2 grid

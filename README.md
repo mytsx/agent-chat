@@ -52,15 +52,22 @@ brew install tmux
 ### 4. Claude Code'a MCP Ekle
 
 ```bash
-claude mcp add agent-chat -- /FULL/PATH/TO/agent-chat/venv/bin/python /FULL/PATH/TO/agent-chat/server.py
+# agent-chat dizinindeyken:
+claude mcp add agent-chat -- "$(pwd)/venv/bin/python" "$(pwd)/server.py"
 ```
 
 ### 5. Global Erisim (Opsiyonel)
 
 Herhangi bir dizinden `agent-setup` ve `agent-orch` komutlarini kullanmak icin:
 
+**Yontem 1 - PATH'e ekle (onerilen):**
 ```bash
-# Symlink olustur
+# .bashrc veya .zshrc dosyasina ekle:
+export PATH="/FULL/PATH/TO/agent-chat:$PATH"
+```
+
+**Yontem 2 - Symlink (sudo gerektirir):**
+```bash
 sudo ln -sf /FULL/PATH/TO/agent-chat/setup.py /usr/local/bin/agent-setup
 sudo ln -sf /FULL/PATH/TO/agent-chat/orchestrator.py /usr/local/bin/agent-orch
 ```

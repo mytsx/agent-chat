@@ -34,6 +34,9 @@ CONTENT_PREVIEW_LIMIT = 60       # Genel onizleme limiti
 MANAGER_MSG_LIMIT = 100          # Yonetici mesaj limiti
 DIRECT_MSG_PREVIEW_LIMIT = 50    # Dogrudan mesaj onizleme
 
+# Broadcast mesaj gecikmesi (saniye) - tmux'u asiri yuklemekten kacinmak icin
+BROADCAST_DELAY = 0.5
+
 # Tesekkur/onay pattern'leri - sonsuz donguyu onlemek icin
 ACK_PATTERNS = [
     "tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
@@ -202,7 +205,7 @@ def process_message_with_manager(msg: dict, mapping: dict):
                 if agent != MANAGER_AGENT:
                     prompt = f'Yonetici talimati (herkese): "{content}" - Mesajlari oku.'
                     send_to_pane(pane, prompt)
-                    time.sleep(0.5)
+                    time.sleep(BROADCAST_DELAY)
     else:
         # Normal mesaj - Yoneticiye bildir
         if MANAGER_AGENT in mapping:
@@ -227,7 +230,7 @@ def process_message_direct(msg: dict, mapping: dict):
             if agent != from_agent:
                 prompt = f'{from_agent} mesaj gonderdi: "{preview}" - Mesajlari oku.'
                 send_to_pane(pane, prompt)
-                time.sleep(0.5)
+                time.sleep(BROADCAST_DELAY)
     elif to_agent in mapping:
         # Direkt mesaj - sadece hedefe bildir
         pane = mapping[to_agent]
