@@ -58,30 +58,14 @@ def setup_tmux_session(num_agents: int, with_manager: bool):
     # For 7-9 panes: 3x3 grid
 
     if total_panes <= 2:
-        # Split horizontal
+        # 2 pane - yatay bol
         subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-    elif total_panes <= 4:
-        # 2x2 grid
-        subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.0"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.1"])
-    elif total_panes <= 6:
-        # 2x3 grid
-        subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-        subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0.1"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.0"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.2"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.4"])
     else:
-        # 3x3 grid
-        subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0"])
-        subprocess.run(["tmux", "split-window", "-h", "-t", f"{TMUX_SESSION}:0.1"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.0"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.2"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.4"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.1"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.3"])
-        subprocess.run(["tmux", "split-window", "-v", "-t", f"{TMUX_SESSION}:0.5"])
+        # 3+ pane - tum panelleri olustur ve tmux'a otomatik duzenlettir
+        for _ in range(total_panes - 1):
+            subprocess.run(["tmux", "split-window", "-t", f"{TMUX_SESSION}:0.0"])
+        # Panelleri grid seklinde duzenle
+        subprocess.run(["tmux", "select-layout", "-t", f"{TMUX_SESSION}:0", "tiled"])
 
     # Enable mouse
     subprocess.run(["tmux", "set-option", "-t", TMUX_SESSION, "mouse", "on"])
