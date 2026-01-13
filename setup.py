@@ -17,8 +17,6 @@ from pathlib import Path
 
 CHAT_DIR = Path("/tmp/agent-chat-room")
 TMUX_SESSION = "agents"
-CONFIG_DIR = Path(__file__).parent / "config"
-BASE_PROMPT_FILE = CONFIG_DIR / "base_prompt.txt"
 
 DEFAULT_AGENT_NAMES = ["backend", "frontend", "mobile", "web", "devops", "qa", "design", "data"]
 
@@ -105,13 +103,6 @@ def save_config(num_agents: int, with_manager: bool, agent_names: list):
     mapping_file.write_text(json.dumps(mapping, indent=2))
 
     return mapping
-
-
-def get_base_prompt() -> str:
-    """Base prompt'u oku."""
-    if BASE_PROMPT_FILE.exists():
-        return BASE_PROMPT_FILE.read_text()
-    return ""
 
 
 def set_pane_titles(with_manager: bool, agent_names: list):
