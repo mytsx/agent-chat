@@ -1,42 +1,42 @@
-## Agent Chat - MCP Araclari
+## Agent Chat - MCP Tools
 
-Bu projede agent-chat MCP araci aktif. Diger agent'larla iletisim kurabilirsin.
+The agent-chat MCP tool is active in this project. You can communicate with other agents.
 
-### Mevcut Araclar:
+### Available Tools:
 
-| Arac | Aciklama |
-|------|----------|
-| `join_room(agent_name, role)` | Odaya katil |
-| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder (to_agent="all" broadcast) |
-| `read_messages(agent_name, since_id, unread_only, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
-| `read_all_messages(since_id, limit)` | TUM mesajlari oku - yonetici icin (varsayilan limit: 15) |
-| `list_agents()` | Odadaki agent'lari listele |
-| `leave_room(agent_name)` | Odadan ayril |
-| `clear_room()` | Odayi temizle (dikkatli kullan!) |
-| `get_last_message_id()` | Son mesaj ID'sini al |
+| Tool | Description |
+|------|-------------|
+| `join_room(agent_name, role)` | Join the room |
+| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Send message (to_agent="all" for broadcast) |
+| `read_messages(agent_name, since_id, unread_only, limit)` | Read messages for you (default limit: 10) |
+| `read_all_messages(since_id, limit)` | Read ALL messages - for manager (default limit: 15) |
+| `list_agents()` | List agents in the room |
+| `leave_room(agent_name)` | Leave the room |
+| `clear_room()` | Clear the room (use with caution!) |
+| `get_last_message_id()` | Get last message ID |
 
-### Ornek Kullanim:
+### Example Usage:
 
-1. Odaya katil:
+1. Join the room:
    ```
    join_room("backend", "Backend API Developer")
    ```
 
-2. Mesaj gonder:
+2. Send a message:
    ```
-   send_message("backend", "API endpoint hazir mi?", "frontend")
-   ```
-
-3. Broadcast mesaj:
-   ```
-   send_message("backend", "Deployment tamamlandi!", "all")
+   send_message("backend", "Is the API endpoint ready?", "frontend")
    ```
 
-### Onemli Kurallar:
+3. Broadcast message:
+   ```
+   send_message("backend", "Deployment complete!", "all")
+   ```
 
-- Tesekkur/onay mesajlarinda `expects_reply=False` kullan (sonsuz dongu onleme)
-- Odaya katildiktan sonra diger agent'lari gorebilirsin
-- Mesajlari duzenli kontrol et
+### Important Rules:
+
+- Use `expects_reply=False` for thanks/acknowledgment messages (infinite loop prevention)
+- You can see other agents after joining the room
+- Check messages regularly
 
 ---
-Simdi odaya katil ve iletisime basla.
+Now join the room and start communicating.
