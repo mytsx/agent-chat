@@ -1,41 +1,82 @@
-# Agent Chat Room - MCP Server
+# Agent Chat Room
 
-Birden fazla Claude Code agent'inin birbirleriyle haberlesmesinisaglayan MCP sunucusu.
+**Multi-agent communication system for Claude Code instances via MCP (Model Context Protocol)**
 
-## Ozellikler
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 
-- Dinamik agent sayisi (1-8 agent)
-- Opsiyonel Yonetici Claude (--manager flag)
-- Otomatik sonsuz dongu onleme
-- `expects_reply` parametresi ile kontrollu iletisim
-- tmux ile dinamik panel yonetimi
+---
 
-## Calisma Modlari
+## What is this?
 
-### 1. Dogrudan Mod (Varsayilan)
-Agent'lar birbirleriyle dogrudan mesajlasir. Yonetici yok.
+Agent Chat Room enables multiple Claude Code agents to communicate with each other in real-time. Think of it as a **chat room for AI agents** - they can collaborate on complex tasks, share information, and coordinate their work.
 
 ```
-Backend <---> Mobile <---> Web
+┌─────────────────────────────────────────────────────────────┐
+│                    AGENT CHAT ROOM                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   Backend Agent  ←──────→  Frontend Agent                   │
+│        ↑                         ↑                          │
+│        │                         │                          │
+│        └────────→ Mobile ←───────┘                          │
+│                   Agent                                     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 2. Yonetici Modu (--manager)
-Tum mesajlar yoneticiye bildirilir, o koordine eder.
+## Features
 
+- **Multi-Agent Messaging** - Agents can send direct or broadcast messages
+- **Dynamic Agent Count** - Support 1-8 concurrent agents
+- **Optional Manager Mode** - Centralized coordination with a manager agent
+- **Infinite Loop Prevention** - Smart detection of acknowledgment messages
+- **tmux Integration** - Visual multi-pane workspace
+- **Real-time Orchestration** - Automatic message routing and notifications
+
+## Use Cases
+
+- **Parallel Development** - Backend, frontend, and mobile agents working together
+- **Code Review** - One agent writes code, another reviews it
+- **Complex Refactoring** - Multiple agents handling different parts of a codebase
+- **Research & Implementation** - One agent researches, another implements
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Protocol | [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) |
+| Runtime | Python 3.10+ |
+| MCP Framework | [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (via mcp package) |
+| Terminal Multiplexer | tmux |
+| Data Storage | JSON files (ephemeral, in `/tmp`) |
+| IPC | File-based with `fcntl` locking |
+
+## Prerequisites
+
+- **Python 3.10+**
+- **tmux** - Terminal multiplexer
+- **Claude Code CLI** - Anthropic's CLI tool
+
+```bash
+# Install tmux (macOS)
+brew install tmux
+
+# Install tmux (Ubuntu/Debian)
+sudo apt install tmux
 ```
-Backend --> Yonetici --> Mobile
-```
 
-## Kurulum
+## Installation
 
-### 1. Repoyu Klonla
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/mytsx/agent-chat.git
 cd agent-chat
 ```
 
-### 2. Python Ortamini Kur
+### 2. Set up Python environment
 
 ```bash
 python3 -m venv venv
@@ -43,182 +84,187 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. tmux Kur (macOS)
+### 3. Add MCP server to Claude Code
 
 ```bash
-brew install tmux
-```
-
-### 4. Claude Code'a MCP Ekle
-
-```bash
-# agent-chat dizinindeyken:
 claude mcp add agent-chat -- "$(pwd)/venv/bin/python" "$(pwd)/server.py"
 ```
 
-### 5. Global Erisim (Opsiyonel)
+## Quick Start
 
-Herhangi bir dizinden `agent-setup` ve `agent-orch` komutlarini kullanmak icin:
-
-**Yontem 1 - PATH'e ekle (onerilen):**
-```bash
-# .bashrc veya .zshrc dosyasina ekle:
-export PATH="/FULL/PATH/TO/agent-chat:$PATH"
-```
-
-**Yontem 2 - Symlink (sudo gerektirir):**
-```bash
-sudo ln -sf /FULL/PATH/TO/agent-chat/setup.py /usr/local/bin/agent-setup
-sudo ln -sf /FULL/PATH/TO/agent-chat/orchestrator.py /usr/local/bin/agent-orch
-```
-
-Artik herhangi bir yerden:
-```bash
-agent-setup 3 --names backend,mobile,web
-agent-orch --watch
-```
-
-## Kullanim Senaryolari
-
-### Senaryo 1: Yonetici Olmadan (2 Agent)
+### Two Agents (Direct Mode)
 
 ```bash
-# 1. Setup
-./setup.py 2 --names backend,mobile
-
-# 2. tmux'a baglan
+# Terminal 1: Setup and start orchestrator
+./setup.py 2 --names backend,frontend
 tmux attach -t agents
 
-# 3. Pane 0: Orchestrator
+# In Pane 0: Start orchestrator
 ./orchestrator.py --watch
 
-# 4. Pane 1: Backend
+# In Pane 1: Start first agent
 claude
-# "Sen backend developer'sin. agent-chat'e 'backend' olarak katil."
+# → "Join agent-chat as 'backend', you're a Backend Developer"
 
-# 5. Pane 2: Mobile
+# In Pane 2: Start second agent
 claude
-# "Sen mobile developer'sin. agent-chat'e 'mobile' olarak katil."
+# → "Join agent-chat as 'frontend', you're a Frontend Developer"
 ```
 
-**Sonuc:** backend <--> mobile dogrudan konusur
-
-### Senaryo 2: Yonetici Ile (3 Agent)
+### Three Agents with Manager
 
 ```bash
-# 1. Setup
+# Setup with manager mode
 ./setup.py 3 --manager --names backend,mobile,web
 
-# 2. tmux'a baglan
-tmux attach -t agents
-
-# 3. Pane 0: Orchestrator
+# In Pane 0: Orchestrator with manager flag
 ./orchestrator.py --watch --manager
 
-# 4. Pane 1: Yonetici
-claude
-# Yonetici prompt'unu yapistir (docs/MANAGER_PROMPT.md)
-
-# 5. Pane 2-4: Agent'lar
-claude
-# "Sen [ROL]'sun. agent-chat'e '[ISIM]' olarak katil."
+# In Pane 1: Manager agent (see docs/MANAGER_PROMPT.md)
+# In Pane 2-4: Worker agents
 ```
 
-**Sonuc:** Tum mesajlar yoneticiye bildirilir, o koordine eder
+## MCP Tools Reference
 
-## Setup Komutlari
+| Tool | Description |
+|------|-------------|
+| `join_room(agent_name, role)` | Join the chat room |
+| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Send a message |
+| `read_messages(agent_name, since_id, unread_only, limit)` | Read messages for you |
+| `read_all_messages(since_id, limit)` | Read ALL messages (manager use, limit default: 15) |
+| `list_agents(agent_name)` | List active agents |
+| `leave_room(agent_name)` | Leave the chat room |
+| `clear_room()` | Clear all messages and agents |
+| `get_last_message_id(agent_name)` | Get last message ID |
+
+### send_message Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `from_agent` | required | Sender agent name |
+| `content` | required | Message content |
+| `to_agent` | `"all"` | Target agent or "all" for broadcast |
+| `expects_reply` | `True` | Set `False` for acks to prevent loops |
+| `priority` | `"normal"` | `"urgent"`, `"normal"`, or `"low"` |
+
+## CLI Commands
+
+### setup.py
 
 ```bash
-# Temel kullanim
-./setup.py AGENT_SAYISI [--manager] [--names isim1,isim2,...]
+./setup.py <num_agents> [--manager] [--names name1,name2,...]
 
-# Ornekler
-./setup.py 2                              # 2 agent (backend, frontend)
-./setup.py 3 --names backend,mobile,web   # 3 agent ozel isimlerle
-./setup.py 3 --manager                    # 3 agent + yonetici
-./setup.py 4 --manager --names a,b,c,d    # 4 agent + yonetici, ozel isimler
+# Examples
+./setup.py 2                              # 2 agents with default names
+./setup.py 3 --names backend,mobile,web   # 3 agents with custom names
+./setup.py 3 --manager                    # 3 agents + manager
 ```
 
-## Orchestrator Komutlari
+### orchestrator.py
 
 ```bash
-./orchestrator.py --watch              # Dogrudan mod (yonetici yok)
-./orchestrator.py --watch --manager    # Yonetici modu
-./orchestrator.py --clear              # State temizle
-./orchestrator.py --status             # Durum goster
-./orchestrator.py --assign backend 2   # Manuel pane atama
+./orchestrator.py --watch              # Direct mode (no manager)
+./orchestrator.py --watch --manager    # Manager mode
+./orchestrator.py --clear              # Clear all state
+./orchestrator.py --status             # Show current status
+./orchestrator.py --assign <agent> <pane>  # Manual pane assignment
 ```
 
-## MCP Araclari
+## Architecture
 
-| Arac | Aciklama |
-|------|----------|
-| `join_room(agent_name, role)` | Odaya katil |
-| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Mesaj gonder |
-| `read_messages(agent_name, since_id, unread_only, limit)` | Sana gelen mesajlari oku (varsayilan limit: 10) |
-| `read_all_messages(since_id, limit)` | TUM mesajlari oku (varsayilan limit: 15) |
-| `list_agents()` | Odadaki agent'lari listele |
-| `leave_room(agent_name)` | Odadan ayril |
-| `clear_room()` | Odayi temizle |
-| `get_last_message_id()` | Son mesaj ID'sini al |
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      tmux session                           │
+├────────────────┬────────────────┬────────────────┬──────────┤
+│    Pane 0      │    Pane 1      │    Pane 2      │  Pane 3  │
+│  Orchestrator  │    Agent 1     │    Agent 2     │ Agent 3  │
+│   (Python)     │  (Claude Code) │  (Claude Code) │  (...)   │
+└───────┬────────┴───────┬────────┴───────┬────────┴──────────┘
+        │                │                │
+        │    ┌───────────┴────────────────┴───────────┐
+        │    │         MCP Server (server.py)         │
+        │    │  ┌─────────────────────────────────┐   │
+        │    │  │  /tmp/agent-chat-room/          │   │
+        │    │  │  ├── messages.json              │   │
+        │    │  │  ├── agents.json                │   │
+        │    │  │  └── agent_panes.json           │   │
+        │    │  └─────────────────────────────────┘   │
+        │    └────────────────────────────────────────┘
+        │                        │
+        └────────────────────────┘
+              watches & notifies
+```
 
-### send_message Parametreleri
-
-| Parametre | Varsayilan | Aciklama |
-|-----------|------------|----------|
-| `from_agent` | (zorunlu) | Gonderen agent adi |
-| `content` | (zorunlu) | Mesaj icerigi |
-| `to_agent` | `"all"` | Hedef agent veya "all" (broadcast) |
-| `expects_reply` | `True` | `False` = tesekkur/onay mesaji (bildirim gonderilmez) |
-| `priority` | `"normal"` | `"urgent"`, `"normal"`, `"low"` |
-
-## Dosya Yapisi
+## Project Structure
 
 ```
 agent-chat/
-├── server.py           # MCP sunucusu
-├── orchestrator.py     # Mesaj yonlendirici
-├── setup.py            # Dinamik tmux setup
-├── requirements.txt    # Python bagimliliklari
+├── server.py           # MCP server with chat tools
+├── orchestrator.py     # Message routing & tmux integration
+├── setup.py            # Dynamic tmux session setup
+├── start.sh            # Legacy 4-pane starter script
+├── requirements.txt    # Python dependencies
 ├── config/
-│   └── base_prompt.txt # Temel MCP tanimi
+│   └── base_prompt.txt # Base prompt for agents
 ├── docs/
-│   ├── ARCHITECTURE.md
-│   └── MANAGER_PROMPT.md
+│   ├── ARCHITECTURE.md # Detailed architecture docs
+│   └── MANAGER_PROMPT.md # Manager agent prompt
 └── README.md
 ```
 
-## Veri Dosyalari
+## Known Limitations
 
+### Token Usage Warning
+
+This system can consume significant tokens because:
+- Each agent reads messages frequently
+- Message history accumulates over time
+- Broadcast messages are sent to all agents
+
+**Recommendations:**
+- Use `expects_reply=False` for acknowledgments
+- Clear the room periodically with `clear_room()`
+- Use direct messages instead of broadcasts when possible
+- Keep conversations focused and concise
+
+### Other Limitations
+
+- Messages are stored in `/tmp` (cleared on reboot)
+- Requires tmux for multi-pane orchestration
+- macOS/Linux only (no Windows support)
+
+## Infinite Loop Prevention
+
+The orchestrator automatically skips notification for:
+- Thank you messages: "thanks", "thank you", "got it"
+- Acknowledgments: "ok", "okay", "understood"
+- Short positive responses: "great", "perfect", "nice"
+
+Agents can also use `expects_reply=False`:
+```python
+send_message("backend", "Thanks!", "frontend", expects_reply=False)
 ```
-/tmp/agent-chat-room/
-├── messages.json           # Mesajlar
-├── agents.json             # Aktif agent'lar
-├── agent_panes.json        # Agent -> Pane mapping
-├── setup_config.json       # Setup konfigurasyonu
-└── orchestrator_state.json # Son islenen mesaj ID
-```
 
-## Sonsuz Dongu Onleme
+## Contributing
 
-Orchestrator su mesajlari otomatik atlar:
-- Tesekkur: "tesekkurler", "sagol", "thanks"
-- Onay: "tamam", "anladim", "ok", "oldu"
-- Olumlu: "super", "harika", "mukemmel"
-- Veda: "gorusuruz", "iyi calismalar"
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-Agent'lar `expects_reply=False` kullanarak da donguyu onleyebilir:
-```
-send_message("backend", "Tesekkurler!", "mobile", expects_reply=False)
-```
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## Gereksinimler
+## License
 
-- Python 3.10+
-- tmux
-- Claude Code CLI
-- macOS veya Linux
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Lisans
+## Acknowledgments
 
-MIT
+- [Anthropic](https://anthropic.com/) for Claude and Claude Code
+- [Model Context Protocol](https://modelcontextprotocol.io/) for the MCP specification
+- [FastMCP](https://github.com/jlowin/fastmcp) for the Python MCP framework
+
+---
+
+**Made with Claude Code**
