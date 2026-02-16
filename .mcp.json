@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "agent-chat": {
-      "command": "python3",
-      "args": ["/Users/myerli/Developer/agent-chat/server.py"]
-    }
-  }
-}

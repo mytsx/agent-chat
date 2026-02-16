@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,9 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+//go:embed prompts/*.md
+var promptsFS embed.FS
 
 // App struct
 type App struct {
@@ -106,17 +110,8 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) seedPrompts() {
-	// Try to read seed files from project root
-	projectDir := filepath.Join(filepath.Dir(os.Args[0]), "..")
-	basePrompt, _ := os.ReadFile(filepath.Join(projectDir, "config", "base_prompt.txt"))
-	managerPrompt, _ := os.ReadFile(filepath.Join(projectDir, "docs", "MANAGER_PROMPT.md"))
-
-	if len(basePrompt) == 0 {
-		basePrompt = []byte(defaultBasePrompt)
-	}
-	if len(managerPrompt) == 0 {
-		managerPrompt = []byte(defaultManagerPrompt)
-	}
+	basePrompt, _ := promptsFS.ReadFile("prompts/base_prompt.md")
+	managerPrompt, _ := promptsFS.ReadFile("prompts/manager_prompt.md")
 
 	a.promptStore.Seed(string(basePrompt), string(managerPrompt))
 }
@@ -310,48 +305,3 @@ func (a *App) WatchChatDir(chatDir string) error {
 	return a.watcher.WatchDir(chatDir)
 }
 
-// ===================== Default Prompts =====================
-
-const defaultBasePrompt = `## Agent Chat - MCP Tools
-
-The agent-chat MCP tool is active in this project. You can communicate with other agents.
-
-### Available Tools:
-
-| Tool | Description |
-|------|-------------|
-| join_room(agent_name, role) | Join the room |
-| send_message(from_agent, content, to_agent, expects_reply, priority) | Send message |
-| read_messages(agent_name, since_id, unread_only, limit) | Read messages |
-| list_agents() | List agents in the room |
-
-### Important Rules:
-
-- Use expects_reply=False for thanks/acknowledgment messages
-- Check messages regularly
-`
-
-const defaultManagerPrompt = `You are the MANAGER of this chat room. You will coordinate communication between agents.
-
-## Your Tasks:
-
-1. Join the room as "manager"
-2. Continuously monitor messages
-3. For each new message, decide who should respond
-4. Send instructions to the relevant agent
-
-## Decision Rules:
-
-### REQUIRES RESPONSE:
-- Messages containing question mark (?)
-- Technical questions, bug reports
-- Messages waiting for approval/decision
-
-### SKIP (don't notify!):
-- Thank you messages
-- Acknowledgments: OK, Understood
-- Short positive reactions
-
-## Message Format:
-send_message("manager", "@AGENT_NAME: INSTRUCTION", "AGENT_NAME")
-`
