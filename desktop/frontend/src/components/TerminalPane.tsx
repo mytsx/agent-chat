@@ -8,9 +8,11 @@ import { WriteToTerminal, ResizeTerminal } from "../../wailsjs/go/main/App";
 interface Props {
   sessionID: string;
   agentName: string;
+  isFocused?: boolean;
+  onToggleFocus?: () => void;
 }
 
-export default function TerminalPane({ sessionID, agentName }: Props) {
+export default function TerminalPane({ sessionID, agentName, isFocused, onToggleFocus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -111,6 +113,17 @@ export default function TerminalPane({ sessionID, agentName }: Props) {
     <div className="terminal-pane">
       <div className="terminal-header">
         <span className="terminal-agent-name">{agentName || "Terminal"}</span>
+        <div className="terminal-header-actions">
+          {onToggleFocus && (
+            <button
+              className="terminal-btn-focus"
+              onClick={onToggleFocus}
+              title={isFocused ? "Restore" : "Maximize"}
+            >
+              {isFocused ? "\u229F" : "\u229E"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="terminal-container" ref={containerRef} />
     </div>

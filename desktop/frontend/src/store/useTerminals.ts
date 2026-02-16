@@ -9,6 +9,9 @@ import {
 
 interface TerminalsState {
   sessions: Record<string, TerminalSession[]>; // teamID -> sessions
+  focusedSessionID: string | null;
+  setFocusedSession: (id: string | null) => void;
+  toggleFocusSession: (id: string) => void;
   addTerminal: (
     teamID: string,
     agentName: string,
@@ -27,6 +30,14 @@ interface TerminalsState {
 
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
+  focusedSessionID: null,
+
+  setFocusedSession: (id) => set({ focusedSessionID: id }),
+
+  toggleFocusSession: (id) =>
+    set((s) => ({
+      focusedSessionID: s.focusedSessionID === id ? null : id,
+    })),
 
   addTerminal: async (teamID, agentName, workDir) => {
     const sessionID = await CreateTerminal(teamID, agentName, workDir);

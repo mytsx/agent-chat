@@ -91,7 +91,7 @@ func AnalyzeMessage(msg watcher.Message) AnalysisResult {
 	}
 
 	// Is it a short acknowledgment?
-	isShort := len(content) < AckMsgMaxLength
+	isShort := len([]rune(content)) < AckMsgMaxLength
 	hasAck := false
 	for _, p := range ACKPatterns {
 		if strings.Contains(contentLower, p) {
@@ -144,8 +144,9 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
 	fromAgent := msg.From
 	toAgent := msg.To
 	content := msg.Content
-	if len(content) > DirectMsgPreviewLimit {
-		content = content[:DirectMsgPreviewLimit] + "..."
+	runes := []rune(content)
+	if len(runes) > DirectMsgPreviewLimit {
+		content = string(runes[:DirectMsgPreviewLimit]) + "..."
 	}
 
 	if toAgent == "all" {

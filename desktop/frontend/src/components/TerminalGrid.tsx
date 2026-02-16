@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import { parseGrid, gridCapacity } from "../lib/types";
@@ -7,11 +8,23 @@ import GridSelector from "./GridSelector";
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, addTerminal, removeTerminal } = useTerminals();
+  const { sessions, addTerminal, removeTerminal, focusedSessionID, toggleFocusSession, setFocusedSession } = useTerminals();
   const [addingAgent, setAddingAgent] = useState(false);
   const [agentName, setAgentName] = useState("");
 
   const team = teams.find((t) => t.id === activeTeamID);
+
+  // ESC to unfocus
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && focusedSessionID) {
+        setFocusedSession(null);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focusedSessionID, setFocusedSession]);
+
   if (!team) return <div className="terminal-grid-empty">No team selected</div>;
 
   const teamSessions = sessions[team.id] ?? [];
@@ -30,8 +43,64 @@ export default function TerminalGrid() {
     setAddingAgent(false);
   };
 
-  const handleRemoveTerminal = async (sessionID: string) => {
-    await removeTerminal(team.id, sessionID);
+  // Build rows of sessions for the grid
+  const sessionRows: (typeof teamSessions)[] = [];
+  for (let r = 0; r < rows; r++) {
+    const rowSessions = teamSessions.slice(r * cols, (r + 1) * cols);
+    if (rowSessions.length > 0) {
+      sessionRows.push(rowSessions);
+    }
+  }
+
+  // Count empty slots
+  const emptyCount = capacity - teamSessions.length;
+
+  const renderFocusedMode = () => {
+    const focused = teamSessions.find((s) => s.sessionID === focusedSessionID);
+    if (!focused) return null;
+
+    return (
+      <div className="terminal-grid-focused">
+        {/* Render all panes but hide non-focused ones to keep them mounted */}
+        {teamSessions.map((s) => (
+          <div
+            key={s.sessionID}
+            style={{
+              display: s.sessionID === focusedSessionID ? "flex" : "none",
+              flex: 1,
+            }}
+          >
+            <TerminalPane
+              sessionID={s.sessionID}
+              agentName={s.agentName}
+              isFocused={s.sessionID === focusedSessionID}
+              onToggleFocus={() => toggleFocusSession(s.sessionID)}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderResizablePanels = () => {
+    return (
+      <PanelGroup orientation="vertical" className="terminal-panel-group">
+        {sessionRows.map((rowSessions, rowIdx) => (
+          <PanelGroupRow key={rowIdx} rowIdx={rowIdx} totalRows={sessionRows.length}>
+            {rowSessions.map((s, colIdx) => (
+              <PanelItem key={s.sessionID} colIdx={colIdx} totalCols={rowSessions.length}>
+                <TerminalPane
+                  sessionID={s.sessionID}
+                  agentName={s.agentName}
+                  isFocused={false}
+                  onToggleFocus={() => toggleFocusSession(s.sessionID)}
+                />
+              </PanelItem>
+            ))}
+          </PanelGroupRow>
+        ))}
+      </PanelGroup>
+    );
   };
 
   return (
@@ -65,35 +134,71 @@ export default function TerminalGrid() {
         </div>
       </div>
 
-      <div
-        className="terminal-grid"
-        style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${cols}, 1fr)`,
-          gridTemplateRows: `repeat(${rows}, 1fr)`,
-          gap: "2px",
-          flex: 1,
-        }}
-      >
-        {teamSessions.map((s) => (
-          <TerminalPane
-            key={s.sessionID}
-            sessionID={s.sessionID}
-            agentName={s.agentName}
-          />
-        ))}
-        {teamSessions.length < capacity &&
-          Array.from({ length: capacity - teamSessions.length }).map((_, i) => (
-            <div key={`empty-${i}`} className="terminal-empty">
-              <button
-                className="terminal-empty-add"
-                onClick={() => setAddingAgent(true)}
-              >
-                + Add Terminal
-              </button>
+      {focusedSessionID && teamSessions.some((s) => s.sessionID === focusedSessionID) ? (
+        renderFocusedMode()
+      ) : (
+        <div className="terminal-grid-content">
+          {teamSessions.length > 0 && renderResizablePanels()}
+          {emptyCount > 0 && !focusedSessionID && (
+            <div className="terminal-empty-slots">
+              {Array.from({ length: emptyCount }).map((_, i) => (
+                <div key={`empty-${i}`} className="terminal-empty">
+                  <button
+                    className="terminal-empty-add"
+                    onClick={() => setAddingAgent(true)}
+                  >
+                    + Add Terminal
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
-      </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+// Helper: a row in the vertical PanelGroup
+function PanelGroupRow({
+  children,
+  rowIdx,
+  totalRows,
+}: {
+  children: React.ReactNode;
+  rowIdx: number;
+  totalRows: number;
+}) {
+  return (
+    <>
+      {rowIdx > 0 && (
+        <PanelResizeHandle className="resize-handle resize-handle-horizontal" />
+      )}
+      <Panel minSize="10%">
+        <PanelGroup orientation="horizontal" className="terminal-panel-row">
+          {children}
+        </PanelGroup>
+      </Panel>
+    </>
+  );
+}
+
+// Helper: a column item in the horizontal PanelGroup
+function PanelItem({
+  children,
+  colIdx,
+  totalCols,
+}: {
+  children: React.ReactNode;
+  colIdx: number;
+  totalCols: number;
+}) {
+  return (
+    <>
+      {colIdx > 0 && (
+        <PanelResizeHandle className="resize-handle resize-handle-vertical" />
+      )}
+      <Panel minSize="10%">{children}</Panel>
+    </>
   );
 }

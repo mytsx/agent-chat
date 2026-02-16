@@ -162,9 +162,54 @@ html, body, #root {
   gap: 8px;
 }
 
-.terminal-grid {
+.terminal-grid-content {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg-primary);
+}
+
+.terminal-grid-focused {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.terminal-panel-group {
+  flex: 1;
+}
+
+.terminal-panel-row {
+  height: 100%;
+}
+
+.terminal-empty-slots {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+}
+
+/* ============ Resize Handles ============ */
+.resize-handle {
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.resize-handle-horizontal {
+  height: 4px;
+  cursor: row-resize;
+}
+
+.resize-handle-vertical {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.resize-handle:hover,
+.resize-handle:active,
+.resize-handle[data-state="dragging"] {
+  background: var(--accent);
 }
 
 .terminal-grid-empty {
@@ -228,6 +273,8 @@ html, body, #root {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
+  width: 100%;
+  height: 100%;
 }
 
 .terminal-header {
@@ -243,6 +290,27 @@ html, body, #root {
 .terminal-agent-name {
   color: var(--accent);
   font-weight: 500;
+}
+
+.terminal-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.terminal-btn-focus {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.terminal-btn-focus:hover {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
 }
 
 .terminal-container {
