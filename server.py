@@ -13,7 +13,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 # Chat data directory - shared between all instances
-CHAT_DIR = Path("/tmp/agent-chat-room")
+CHAT_DIR = Path(os.environ.get("AGENT_CHAT_DIR", "/tmp/agent-chat-room"))
 MESSAGES_FILE = CHAT_DIR / "messages.json"
 AGENTS_FILE = CHAT_DIR / "agents.json"
 
