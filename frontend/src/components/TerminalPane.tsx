@@ -116,11 +116,12 @@ export default function TerminalPane({ sessionID, agentName, isFocused, onToggle
         <div className="terminal-header-actions">
           {onToggleFocus && (
             <button
+              type="button"
               className="terminal-btn-focus"
               onClick={onToggleFocus}
               title={isFocused ? "Restore" : "Maximize"}
             >
-              {isFocused ? "\u229F" : "\u229E"}
+              {isFocused ? "\u25A3" : "\u25A1"}
             </button>
           )}
         </div>

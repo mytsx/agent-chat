@@ -86,9 +86,9 @@ export default function TerminalGrid() {
     return (
       <PanelGroup orientation="vertical" className="terminal-panel-group">
         {sessionRows.map((rowSessions, rowIdx) => (
-          <PanelGroupRow key={rowIdx} rowIdx={rowIdx} totalRows={sessionRows.length}>
+          <PanelGroupRow key={rowIdx} rowIdx={rowIdx}>
             {rowSessions.map((s, colIdx) => (
-              <PanelItem key={s.sessionID} colIdx={colIdx} totalCols={rowSessions.length}>
+              <PanelItem key={s.sessionID} colIdx={colIdx}>
                 <TerminalPane
                   sessionID={s.sessionID}
                   agentName={s.agentName}
@@ -144,6 +144,7 @@ export default function TerminalGrid() {
               {Array.from({ length: emptyCount }).map((_, i) => (
                 <div key={`empty-${i}`} className="terminal-empty">
                   <button
+                    type="button"
                     className="terminal-empty-add"
                     onClick={() => setAddingAgent(true)}
                   >
@@ -163,11 +164,9 @@ export default function TerminalGrid() {
 function PanelGroupRow({
   children,
   rowIdx,
-  totalRows,
 }: {
   children: React.ReactNode;
   rowIdx: number;
-  totalRows: number;
 }) {
   return (
     <>
@@ -187,11 +186,9 @@ function PanelGroupRow({
 function PanelItem({
   children,
   colIdx,
-  totalCols,
 }: {
   children: React.ReactNode;
   colIdx: number;
-  totalCols: number;
 }) {
   return (
     <>

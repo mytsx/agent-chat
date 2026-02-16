@@ -2,12 +2,16 @@ package orchestrator
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/watcher"
 )
+
+// shellMetaChars matches shell metacharacters that could enable command injection
+var shellMetaChars = regexp.MustCompile("[;|&$`\\\\\"'\\n\\r]")
 
 const (
 	AckMsgMaxLength       = 80
@@ -143,7 +147,7 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
 
 	fromAgent := msg.From
 	toAgent := msg.To
-	content := msg.Content
+	content := sanitizeContent(msg.Content)
 	runes := []rune(content)
 	if len(runes) > DirectMsgPreviewLimit {
 		content = string(runes[:DirectMsgPreviewLimit]) + "..."
@@ -163,6 +167,12 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
 		prompt := fmt.Sprintf("%s sent you a message: \"%s\" - Read messages and respond.", fromAgent, content)
 		o.sendToTerminal(sessionID, prompt)
 	}
+}
+
+// sanitizeContent removes shell metacharacters from message content
+// to prevent command injection when content is sent to terminal sessions
+func sanitizeContent(content string) string {
+	return shellMetaChars.ReplaceAllString(content, "")
 }
 
 // HandleNewMessages is the callback for the file watcher
