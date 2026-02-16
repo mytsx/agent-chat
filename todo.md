@@ -1,0 +1,3 @@
+-- panellerin genişliğini ayarlayabilmeliyiz, tek bir panele odaklan diğer panelleri küçült gibi şeylerde olabilmeli.
+-- agent-chat o odaya özel olmalı mcp'yi güncellememiz gerekli
+-- bazen ???? gibi ifadeler yazıyor o neden mesaj gönderiminde fln
