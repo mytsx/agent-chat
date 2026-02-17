@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -38,7 +39,9 @@ func EnsureMCPConfig(cliType CLIType, dataDir, roomName string) error {
 	return upsertMCPConfig(configPath, entry, true)
 }
 
-// ResetMCPConfig forces re-writing the MCP config entry (for migration from uvx to local).
+// ResetMCPConfig deletes and recreates the MCP config entry with the current binary path.
+// Called at startup to ensure all CLIs point to the Go binary (not stale Python venv).
+// Also cleans up per-project MCP overrides that shadow the global config.
 func ResetMCPConfig(cliType CLIType, dataDir string) error {
 	if cliType == CLIShell {
 		return nil
@@ -61,8 +64,8 @@ func buildMCPEntry(dataDir, roomName string) mcpServerEntry {
 		env["AGENT_CHAT_ROOM"] = roomName
 	}
 	return mcpServerEntry{
-		Command: GetMCPPythonPath(dataDir),
-		Args:    []string{"-m", "agent_chat_mcp"},
+		Command: GetMCPBinaryPath(dataDir),
+		Args:    []string{},
 		Env:     env,
 	}
 }
@@ -96,28 +99,27 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 		}
 	}
 
-	// Get or create mcpServers section
+	// --- 1. Update global mcpServers ---
 	mcpServers, ok := config["mcpServers"].(map[string]any)
 	if !ok {
 		mcpServers = make(map[string]any)
 	}
 
-	// Don't overwrite if already exists (unless force update)
-	if _, exists := mcpServers["agent-chat"]; exists && !forceUpdate {
-		return nil
+	if !forceUpdate {
+		if _, exists := mcpServers["agent-chat"]; exists {
+			return nil
+		}
 	}
 
-	// Add agent-chat entry
+	// Delete old entry, write fresh
+	delete(mcpServers, "agent-chat")
 	mcpServers["agent-chat"] = entry
 	config["mcpServers"] = mcpServers
 
-	// Backup existing file before writing
-	if _, err := os.Stat(configPath); err == nil {
-		data, _ := os.ReadFile(configPath)
-		if len(data) > 0 {
-			os.WriteFile(configPath+".bak", data, 0644)
-		}
-	}
+	// --- 2. Clean per-project "agent-chat" overrides ---
+	// Claude Code stores per-project MCP configs under projects[path].mcpServers.
+	// Old agent-chat entries there shadow our global config, so remove them.
+	cleanProjectMCPOverrides(config)
 
 	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -130,4 +132,31 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	return os.WriteFile(configPath, out, 0644)
+}
+
+// cleanProjectMCPOverrides removes "agent-chat" from all per-project mcpServers
+// sections in the config. This prevents stale project-level overrides from
+// shadowing the correct global MCP entry.
+func cleanProjectMCPOverrides(config map[string]any) {
+	projects, ok := config["projects"].(map[string]any)
+	if !ok {
+		return
+	}
+
+	for projectPath, projectData := range projects {
+		project, ok := projectData.(map[string]any)
+		if !ok {
+			continue
+		}
+		projectMCP, ok := project["mcpServers"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := projectMCP["agent-chat"]; exists {
+			delete(projectMCP, "agent-chat")
+			project["mcpServers"] = projectMCP
+			projects[projectPath] = project
+			log.Printf("Cleaned stale agent-chat MCP override from project: %s", projectPath)
+		}
+	}
 }

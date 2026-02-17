@@ -17,6 +17,7 @@ go.work.sum
 
 # Wails build output
 build/bin
+build/mcp-server-bin
 
 # Frontend
 node_modules

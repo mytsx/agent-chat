@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"embed"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,8 +21,8 @@ import (
 //go:embed prompts/*.md
 var promptsFS embed.FS
 
-//go:embed all:mcp-server
-var mcpServerFS embed.FS
+//go:embed build/mcp-server-bin
+var mcpServerBin []byte
 
 // App struct
 type App struct {
@@ -94,22 +93,16 @@ func (a *App) startup(ctx context.Context) {
 	// Watch existing teams' chat directories
 	a.watchExistingTeams()
 
-	// Setup local MCP server in background (extract + venv + pip install)
-	go func() {
-		subFS, err := fs.Sub(mcpServerFS, "mcp-server")
-		if err != nil {
-			log.Printf("MCP server embed error: %v", err)
-			return
-		}
-		if err := cli.EnsureMCPServer(subFS, a.dataDir); err != nil {
-			log.Printf("MCP server setup error: %v", err)
-			return
-		}
-		// Migrate existing CLI configs from uvx to local python
+	// Setup MCP server binary synchronously — must complete before any terminal starts.
+	// This extracts the embedded binary and force-writes MCP config for all CLIs,
+	// ensuring every agent (regardless of working directory) has an up-to-date config.
+	if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
+		log.Printf("MCP server setup error: %v", err)
+	} else {
 		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot} {
 			cli.ResetMCPConfig(ct, a.dataDir)
 		}
-	}()
+	}
 }
 
 // watchExistingTeams starts file watchers for all previously saved teams
@@ -204,11 +197,10 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		a.watcher.WatchDir(roomDir)
 	}
 
-	// Ensure local MCP server is ready and configured for the selected CLI
+	// Ensure MCP server binary is ready and configured for the selected CLI
 	ct := cli.CLIType(cliType)
 	if ct != cli.CLIShell && cliType != "" {
-		subFS, _ := fs.Sub(mcpServerFS, "mcp-server")
-		if err := cli.EnsureMCPServer(subFS, a.dataDir); err != nil {
+		if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
 			log.Printf("MCP server setup failed: %v", err)
 		}
 		if err := cli.EnsureMCPConfig(ct, a.dataDir, teamName); err != nil {
@@ -319,9 +311,14 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 
 // WriteToTerminal writes data to a terminal
 func (a *App) WriteToTerminal(sessionID, data string) error {
-	// Debug: log user input to see what xterm.js sends for key presses
 	session := a.ptyManager.GetSession(sessionID)
 	if session != nil && session.CLIType == "copilot" {
+		// Filter Focus Out events — Copilot's Ink TUI stops processing input
+		// when it thinks the terminal lost focus, which prevents the orchestrator
+		// from delivering notifications to background terminals.
+		if data == "\x1b[O" {
+			return nil
+		}
 		raw := []byte(data)
 		log.Printf("[USER-INPUT] copilot agent=%s len=%d hex=%x ascii=%q",
 			session.AgentName, len(raw), raw, data)

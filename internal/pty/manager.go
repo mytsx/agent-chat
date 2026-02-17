@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,8 +64,19 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdNam
 		cmd.Dir = workDir
 	}
 
-	// Merge environment, filtering out vars that cause nested session issues
-	baseEnv := filterEnv(os.Environ(), "CLAUDECODE")
+	// Merge environment, filtering out vars that cause nested session issues.
+	// VSCODE_* and ELECTRON_* prevent child processes from communicating
+	// with the parent VS Code instance (which can steal window focus).
+	baseEnv := filterEnv(os.Environ(),
+		"CLAUDECODE",
+		"NODE_OPTIONS",
+		"NODE_INSPECT_RESUME_ON_START",
+		"VSCODE_*",
+		"ELECTRON_*",
+		"TERM_PROGRAM",
+		"TERM_PROGRAM_VERSION",
+		"GIT_ASKPASS",
+	)
 	cmd.Env = append(baseEnv, env...)
 
 	ptmx, err := pty.Start(cmd)
@@ -289,13 +301,21 @@ func (m *Manager) GetSessionsByTeam(teamID string) []*PTYSession {
 	return result
 }
 
-// filterEnv removes specified keys from an environment variable slice
+// filterEnv removes specified keys from an environment variable slice.
+// Keys ending with "*" are treated as prefix filters (e.g. "VSCODE_*" removes
+// all variables starting with "VSCODE_").
 func filterEnv(env []string, keys ...string) []string {
 	result := make([]string, 0, len(env))
 	for _, e := range env {
 		skip := false
 		for _, key := range keys {
-			if len(e) > len(key) && e[:len(key)+1] == key+"=" {
+			if strings.HasSuffix(key, "*") {
+				prefix := key[:len(key)-1]
+				if strings.HasPrefix(e, prefix) {
+					skip = true
+					break
+				}
+			} else if len(e) > len(key) && e[:len(key)+1] == key+"=" {
 				skip = true
 				break
 			}
