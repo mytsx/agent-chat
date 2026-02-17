@@ -1,13 +1,32 @@
-# Python
-venv/
-__pycache__/
-*.py[cod]
-*$py.class
+# Go binaries
+*.exe
+*.exe~
+*.dll
 *.so
-.Python
-*.egg-info/
-dist/
-build/
+*.dylib
+*.test
+
+# Go coverage & test artifacts
+*.out
+*.coverprofile
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Wails build output
+build/bin
+build/mcp-server-bin
+
+# Frontend
+node_modules
+frontend/dist
+frontend/package-lock.json
+frontend/.vite/
+
+# Environment
+.env
 
 # IDE
 .idea/
@@ -18,10 +37,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
-
-# Project specific
-claude_code_config.json
-mcp_add_command.txt
 
 # Temp files
 *.log

@@ -1,270 +1,183 @@
-# Agent Chat Room
+<div align="center">
 
-**Multi-agent communication system for Claude Code instances via MCP (Model Context Protocol)**
+# Agent Chat
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![MCP](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
+**AI agent'larınızı tek bir masaüstü uygulamasından yönetin ve birbirleriyle konuşturn.**
+
+[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Wails](https://img.shields.io/badge/Wails-v2-412991?logo=webassembly&logoColor=white)](https://wails.io)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-green?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48L3N2Zz4=)](https://modelcontextprotocol.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+<br />
+
+<!-- Screenshot placeholder: Replace with actual screenshot -->
+<!-- <img src="docs/screenshot.png" alt="Agent Chat Desktop" width="800" /> -->
+
+</div>
 
 ---
 
-## What is this?
+Agent Chat, birden fazla AI CLI agent'ını (Claude Code, Gemini CLI, GitHub Copilot) aynı anda çalıştırmanızı, takımlar halinde organize etmenizi ve [MCP (Model Context Protocol)](https://modelcontextprotocol.io) üzerinden birbirleriyle gerçek zamanlı iletişim kurmalarını sağlayan bir masaüstü uygulamasıdır.
 
-Agent Chat Room enables multiple Claude Code agents to communicate with each other in real-time. Think of it as a **chat room for AI agents** - they can collaborate on complex tasks, share information, and coordinate their work.
+## Özellikler
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    AGENT CHAT ROOM                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   Backend Agent  ←──────→  Frontend Agent                   │
-│        ↑                         ↑                          │
-│        │                         │                          │
-│        └────────→ Mobile ←───────┘                          │
-│                   Agent                                     │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+- **Çoklu Agent Yönetimi** — Tek ekrandan birden fazla AI agent'ı başlatın ve izleyin
+- **Agent-Arası İletişim** — Agent'lar MCP araçları ile birbirine mesaj gönderir, soru sorar, koordine olur
+- **Takım Sistemi** — Agent'ları takımlar halinde gruplayın, her takıma özel oda ve prompt atayın
+- **Çoklu CLI Desteği** — Claude Code, Gemini CLI, GitHub Copilot ve Shell aynı anda
+- **Otomatik MCP Kurulumu** — MCP server binary'si uygulama içine gömülüdür, kurulum gerektirmez
+- **Akıllı Orkestrasyon** — Mesaj analizi, bildirim cooldown'u ve toplu iletim
+- **Gerçek Zamanlı Terminal** — xterm.js ile native PTY terminal yönetimi
 
-## Features
+## Nasıl Çalışır
 
-- **Multi-Agent Messaging** - Agents can send direct or broadcast messages
-- **Dynamic Agent Count** - Support 1-8 concurrent agents
-- **Optional Manager Mode** - Centralized coordination with a manager agent
-- **Infinite Loop Prevention** - Smart detection of acknowledgment messages
-- **tmux Integration** - Visual multi-pane workspace
-- **Real-time Orchestration** - Automatic message routing and notifications
-
-## Use Cases
-
-- **Parallel Development** - Backend, frontend, and mobile agents working together
-- **Code Review** - One agent writes code, another reviews it
-- **Complex Refactoring** - Multiple agents handling different parts of a codebase
-- **Research & Implementation** - One agent researches, another implements
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Protocol | [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) |
-| Runtime | Python 3.10+ |
-| MCP Framework | [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (via mcp package) |
-| Terminal Multiplexer | tmux |
-| Data Storage | JSON files (ephemeral, in `/tmp`) |
-| IPC | File-based with `fcntl` locking |
-
-## Prerequisites
-
-- **Python 3.10+**
-- **tmux** - Terminal multiplexer
-- **Claude Code CLI** - Anthropic's CLI tool
-
-```bash
-# Install tmux (macOS)
-brew install tmux
-
-# Install tmux (Ubuntu/Debian)
-sudo apt install tmux
+```mermaid
+graph LR
+    A[Claude Code] -->|stdio JSON-RPC| M[MCP Server]
+    B[Gemini CLI] -->|stdio JSON-RPC| M
+    C[Copilot CLI] -->|stdio JSON-RPC| M
+    M -->|JSON dosya yazma| D[(rooms/*.json)]
+    D -->|fsnotify| W[File Watcher]
+    W --> O[Orchestrator]
+    O -->|PTY write| A
+    O -->|PTY write| B
+    O -->|PTY write| C
 ```
 
-## Installation
+Her AI CLI kendi MCP server instance'ını stdio üzerinden başlatır. Agent'lar `join_room`, `send_message`, `read_messages` gibi MCP araçlarıyla iletişim kurar. Masaüstü uygulaması dosya değişikliklerini izleyerek mesajları ilgili terminallere yönlendirir.
 
-### 1. Clone the repository
+## Gereksinimler
+
+| Araç | Versiyon |
+|------|----------|
+| [Go](https://go.dev/dl/) | 1.23+ |
+| [Node.js](https://nodejs.org/) | 18+ |
+| [Wails CLI](https://wails.io/docs/gettingstarted/installation) | v2 |
+
+En az bir AI CLI kurulu olmalıdır:
+
+| CLI | Kurulum |
+|-----|---------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm install -g @anthropic-ai/gemini-cli` |
+| [GitHub Copilot](https://githubnext.com/projects/copilot-cli) | `gh extension install github/gh-copilot` |
+
+## Kurulum
 
 ```bash
 git clone https://github.com/mytsx/agent-chat.git
 cd agent-chat
 ```
 
-### 2. Set up Python environment
+## Kullanım
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# Geliştirme (hot reload)
+make dev
+
+# Production build
+make build
 ```
 
-### 3. Add MCP server to Claude Code
+Uygulama açıldığında:
 
-```bash
-claude mcp add agent-chat -- "$(pwd)/venv/bin/python" "$(pwd)/server.py"
-```
+1. Bir **takım** oluşturun ve agent'larınızı ekleyin
+2. Her agent için CLI tipini seçin (Claude, Gemini, Copilot, Shell)
+3. Agent'ları başlatın — MCP konfigürasyonu otomatik yapılır
+4. Agent'lar otomatik olarak takım odasına katılır ve birbirleriyle iletişim kurabilir
 
-## Quick Start
+## MCP Araçları
 
-### Two Agents (Direct Mode)
+Uygulamaya gömülü MCP server 9 araç sunar:
 
-```bash
-# Terminal 1: Setup and start orchestrator
-./setup.py 2 --names backend,frontend
-tmux attach -t agents
+| Araç | Açıklama |
+|------|----------|
+| `join_room` | Odaya katıl |
+| `send_message` | Mesaj gönder (broadcast veya direkt) |
+| `read_messages` | Mesajları oku |
+| `list_agents` | Odadaki agent'ları listele |
+| `leave_room` | Odadan ayrıl |
+| `clear_room` | Odayı temizle |
+| `read_all_messages` | Tüm mesajları oku (yönetici) |
+| `get_last_message_id` | Son mesaj ID'sini al |
+| `list_rooms` | Mevcut odaları listele |
 
-# In Pane 0: Start orchestrator
-./orchestrator.py --watch
-
-# In Pane 1: Start first agent
-claude
-# → "Join agent-chat as 'backend', you're a Backend Developer"
-
-# In Pane 2: Start second agent
-claude
-# → "Join agent-chat as 'frontend', you're a Frontend Developer"
-```
-
-### Three Agents with Manager
-
-```bash
-# Setup with manager mode
-./setup.py 3 --manager --names backend,mobile,web
-
-# In Pane 0: Orchestrator with manager flag
-./orchestrator.py --watch --manager
-
-# In Pane 1: Manager agent (see docs/MANAGER_PROMPT.md)
-# In Pane 2-4: Worker agents
-```
-
-## MCP Tools Reference
-
-| Tool | Description |
-|------|-------------|
-| `join_room(agent_name, role)` | Join the chat room |
-| `send_message(from_agent, content, to_agent, expects_reply, priority)` | Send a message |
-| `read_messages(agent_name, since_id, unread_only, limit)` | Read messages for you |
-| `read_all_messages(since_id, limit)` | Read ALL messages (manager use, limit default: 15) |
-| `list_agents(agent_name)` | List active agents |
-| `leave_room(agent_name)` | Leave the chat room |
-| `clear_room()` | Clear all messages and agents |
-| `get_last_message_id(agent_name)` | Get last message ID |
-
-### send_message Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `from_agent` | required | Sender agent name |
-| `content` | required | Message content |
-| `to_agent` | `"all"` | Target agent or "all" for broadcast |
-| `expects_reply` | `True` | Set `False` for acks to prevent loops |
-| `priority` | `"normal"` | `"urgent"`, `"normal"`, or `"low"` |
-
-## CLI Commands
-
-### setup.py
-
-```bash
-./setup.py <num_agents> [--manager] [--names name1,name2,...]
-
-# Examples
-./setup.py 2                              # 2 agents with default names
-./setup.py 3 --names backend,mobile,web   # 3 agents with custom names
-./setup.py 3 --manager                    # 3 agents + manager
-```
-
-### orchestrator.py
-
-```bash
-./orchestrator.py --watch              # Direct mode (no manager)
-./orchestrator.py --watch --manager    # Manager mode
-./orchestrator.py --clear              # Clear all state
-./orchestrator.py --status             # Show current status
-./orchestrator.py --assign <agent> <pane>  # Manual pane assignment
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      tmux session                           │
-├────────────────┬────────────────┬────────────────┬──────────┤
-│    Pane 0      │    Pane 1      │    Pane 2      │  Pane 3  │
-│  Orchestrator  │    Agent 1     │    Agent 2     │ Agent 3  │
-│   (Python)     │  (Claude Code) │  (Claude Code) │  (...)   │
-└───────┬────────┴───────┬────────┴───────┬────────┴──────────┘
-        │                │                │
-        │    ┌───────────┴────────────────┴───────────┐
-        │    │         MCP Server (server.py)         │
-        │    │  ┌─────────────────────────────────┐   │
-        │    │  │  /tmp/agent-chat-room/          │   │
-        │    │  │  ├── messages.json              │   │
-        │    │  │  ├── agents.json                │   │
-        │    │  │  └── agent_panes.json           │   │
-        │    │  └─────────────────────────────────┘   │
-        │    └────────────────────────────────────────┘
-        │                        │
-        └────────────────────────┘
-              watches & notifies
-```
-
-## Project Structure
+## Mimari
 
 ```
 agent-chat/
-├── server.py           # MCP server with chat tools
-├── orchestrator.py     # Message routing & tmux integration
-├── setup.py            # Dynamic tmux session setup
-├── start.sh            # Legacy 4-pane starter script
-├── requirements.txt    # Python dependencies
-├── config/
-│   └── base_prompt.txt # Base prompt for agents
-├── docs/
-│   ├── ARCHITECTURE.md # Detailed architecture docs
-│   └── MANAGER_PROMPT.md # Manager agent prompt
-└── README.md
+├── app.go                      # Wails uygulama giriş noktası
+├── cmd/mcp-server/             # Gömülü MCP server binary'si
+├── internal/
+│   ├── mcpserver/              # MCP araç implementasyonları + JSON storage
+│   ├── orchestrator/           # Mesaj yönlendirme, cooldown, batching
+│   ├── pty/                    # PTY yönetimi, CLI başlatma
+│   ├── watcher/                # fsnotify dosya izleme
+│   ├── cli/                    # CLI tespiti, MCP config yönetimi
+│   ├── team/                   # Takım CRUD operasyonları
+│   └── prompt/                 # Prompt şablonlama
+├── frontend/                   # React + TypeScript + xterm.js
+└── Makefile
 ```
 
-## Known Limitations
+<details>
+<summary><strong>Veri Dizini Yapısı</strong></summary>
 
-### Token Usage Warning
-
-This system can consume significant tokens because:
-- Each agent reads messages frequently
-- Message history accumulates over time
-- Broadcast messages are sent to all agents
-
-**Recommendations:**
-- Use `expects_reply=False` for acknowledgments
-- Clear the room periodically with `clear_room()`
-- Use direct messages instead of broadcasts when possible
-- Keep conversations focused and concise
-
-### Other Limitations
-
-- Messages are stored in `/tmp` (cleared on reboot)
-- Requires tmux for multi-pane orchestration
-- macOS/Linux only (no Windows support)
-
-## Infinite Loop Prevention
-
-The orchestrator automatically skips notification for:
-- Thank you messages: "thanks", "thank you", "got it"
-- Acknowledgments: "ok", "okay", "understood"
-- Short positive responses: "great", "perfect", "nice"
-
-Agents can also use `expects_reply=False`:
-```python
-send_message("backend", "Thanks!", "frontend", expects_reply=False)
+```
+~/.agent-chat/
+├── mcp-server-bin              # Gömülü binary (otomatik çıkarılır)
+├── mcp-server.log              # MCP server logları
+├── teams.json                  # Takım konfigürasyonları
+├── prompts.json                # Prompt kütüphanesi
+├── global_prompt.md            # Global sistem prompt'u
+└── rooms/
+    └── {takım-adı}/
+        ├── messages.json       # Mesajlar (flock ile kilitli)
+        └── agents.json         # Aktif agent'lar
 ```
 
-## Contributing
+</details>
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+<details>
+<summary><strong>Teknik Detaylar</strong></summary>
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- **İletişim:** Stdio JSON-RPC (ağ sunucusu yok)
+- **Persistence:** JSON dosyaları + `syscall.Flock` (POSIX file locking)
+- **Terminal:** Native PTY allocation (`github.com/creack/pty`)
+- **Dosya İzleme:** `fsnotify` ile anlık değişiklik algılama
+- **Prompt Gönderimi:** ANSI bracketed paste mode (`ESC[200~...ESC[201~`)
+- **Agent Temizliği:** 5 dakika idle olan agent'lar otomatik kaldırılır
+- **MCP Config:** Startup'ta global config yazılır, eski per-project override'lar temizlenir
 
-## License
+</details>
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## Geliştirme
 
-## Acknowledgments
+```bash
+# Sadece MCP server binary
+make mcp-server
 
-- [Anthropic](https://anthropic.com/) for Claude and Claude Code
-- [Model Context Protocol](https://modelcontextprotocol.io/) for the MCP specification
-- [FastMCP](https://github.com/jlowin/fastmcp) for the Python MCP framework
+# Sadece frontend
+cd frontend && npm run build
 
----
+# Testler
+go test ./...
 
-**Made with Claude Code**
+# Tek paket testi
+go test ./internal/orchestrator/ -v
+```
+
+> **Not:** `app.go` içinde `//go:embed build/mcp-server-bin` kullanıldığından, `go build` öncesinde `make mcp-server` çalıştırılmalıdır.
+
+## Katkıda Bulunma
+
+1. Fork yapın
+2. Feature branch oluşturun (`git checkout -b feature/amazing-feature`)
+3. Değişikliklerinizi commit edin (`git commit -m 'feat: Add amazing feature'`)
+4. Branch'inizi push edin (`git push origin feature/amazing-feature`)
+5. Pull Request açın
+
+## Lisans
+
+[MIT](LICENSE)
