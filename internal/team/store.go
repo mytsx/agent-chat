@@ -17,16 +17,18 @@ type AgentConfig struct {
 	Role     string `json:"role"`
 	PromptID string `json:"prompt_id"`
 	WorkDir  string `json:"work_dir"`
+	CLIType  string `json:"cli_type"`
 }
 
 // Team represents a tab/team configuration
 type Team struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	Agents     []AgentConfig `json:"agents"`
-	GridLayout string        `json:"grid_layout"` // "1x1", "2x2", "2x3", etc.
-	ChatDir    string        `json:"chat_dir"`
-	CreatedAt  string        `json:"created_at"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Agents       []AgentConfig `json:"agents"`
+	GridLayout   string        `json:"grid_layout"` // "1x1", "2x2", "2x3", etc.
+	ChatDir      string        `json:"chat_dir"`
+	CustomPrompt string        `json:"custom_prompt"`
+	CreatedAt    string        `json:"created_at"`
 }
 
 // Store manages team/tab persistence
@@ -96,7 +98,8 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	defer s.mu.Unlock()
 
 	id := uuid.New().String()
-	chatDir := filepath.Join(os.TempDir(), fmt.Sprintf("agent-chat-room-%s", id[:8]))
+	// All teams share the same rooms base dir; team name is used as room name
+	chatDir := filepath.Join(filepath.Dir(s.filePath), "rooms")
 
 	t := Team{
 		ID:         id,

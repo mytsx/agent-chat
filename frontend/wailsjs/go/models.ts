@@ -1,3 +1,28 @@
+export namespace cli {
+	
+	export class CLIInfo {
+	    type: string;
+	    name: string;
+	    binary: string;
+	    available: boolean;
+	    binary_path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CLIInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.name = source["name"];
+	        this.binary = source["binary"];
+	        this.available = source["available"];
+	        this.binary_path = source["binary_path"];
+	    }
+	}
+
+}
+
 export namespace prompt {
 	
 	export class Prompt {
@@ -36,6 +61,7 @@ export namespace team {
 	    role: string;
 	    prompt_id: string;
 	    work_dir: string;
+	    cli_type: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AgentConfig(source);
@@ -47,6 +73,7 @@ export namespace team {
 	        this.role = source["role"];
 	        this.prompt_id = source["prompt_id"];
 	        this.work_dir = source["work_dir"];
+	        this.cli_type = source["cli_type"];
 	    }
 	}
 	export class Team {
@@ -55,6 +82,7 @@ export namespace team {
 	    agents: AgentConfig[];
 	    grid_layout: string;
 	    chat_dir: string;
+	    custom_prompt: string;
 	    created_at: string;
 	
 	    static createFrom(source: any = {}) {
@@ -68,6 +96,7 @@ export namespace team {
 	        this.agents = this.convertValues(source["agents"], AgentConfig);
 	        this.grid_layout = source["grid_layout"];
 	        this.chat_dir = source["chat_dir"];
+	        this.custom_prompt = source["custom_prompt"];
 	        this.created_at = source["created_at"];
 	    }
 	

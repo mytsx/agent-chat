@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__agent-chat__join_room",
+      "mcp__agent-chat__read_messages",
+      "mcp__agent-chat__send_message"
+    ]
+  }
+}

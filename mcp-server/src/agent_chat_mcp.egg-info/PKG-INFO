@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: agent-chat-mcp
+Version: 1.0.0
+Summary: Agent Chat Room MCP server - Allows multiple AI agents to communicate with each other
+License: MIT
+Requires-Python: >=3.10
+Requires-Dist: mcp[cli]>=1.0.0

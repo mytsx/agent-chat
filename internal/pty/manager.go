@@ -1,11 +1,14 @@
 package pty
 
 import (
+	"encoding/hex"
 	"fmt"
-	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/google/uuid"
@@ -13,12 +16,14 @@ import (
 
 // PTYSession represents a single pseudo-terminal session
 type PTYSession struct {
-	ID        string
-	Cmd       *exec.Cmd
-	PTY       *os.File
-	TeamID    string
-	AgentName string
-	done      chan struct{}
+	ID             string
+	Cmd            *exec.Cmd
+	PTY            *os.File
+	TeamID         string
+	AgentName      string
+	CLIType        string
+	done           chan struct{}
+	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
 }
 
 // OutputHandler is called when PTY produces output
@@ -39,22 +44,28 @@ func NewManager(onOutput OutputHandler) *Manager {
 	}
 }
 
-// Create creates a new PTY session and returns its ID
-func (m *Manager) Create(teamID, agentName, workDir string, env []string) (string, error) {
+// Create creates a new PTY session and returns its ID.
+// If cmdName is empty, falls back to the user's login shell.
+func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdName string, cmdArgs []string, cliType string) (string, error) {
 	id := uuid.New().String()
 
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
+	// Fallback to login shell
+	if cmdName == "" {
+		cmdName = os.Getenv("SHELL")
+		if cmdName == "" {
+			cmdName = "/bin/zsh"
+		}
+		cmdArgs = []string{"-l"}
 	}
 
-	cmd := exec.Command(shell, "-l")
+	cmd := exec.Command(cmdName, cmdArgs...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
 
-	// Merge environment
-	cmd.Env = append(os.Environ(), env...)
+	// Merge environment, filtering out vars that cause nested session issues
+	baseEnv := filterEnv(os.Environ(), "CLAUDECODE")
+	cmd.Env = append(baseEnv, env...)
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -67,6 +78,7 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string) (strin
 		PTY:       ptmx,
 		TeamID:    teamID,
 		AgentName: agentName,
+		CLIType:   cliType,
 		done:      make(chan struct{}),
 	}
 
@@ -80,25 +92,94 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string) (strin
 	return id, nil
 }
 
-// readLoop continuously reads from PTY and calls the output handler
+// readLoop continuously reads from PTY and calls the output handler.
+// It buffers incomplete UTF-8 sequences across reads to prevent garbled output.
 func (m *Manager) readLoop(session *PTYSession) {
 	defer close(session.done)
 
 	buf := make([]byte, 8192)
+	var carry []byte // incomplete UTF-8 bytes from previous read
+
 	for {
 		n, err := session.PTY.Read(buf)
+		if n > 0 {
+			session.lastOutputNano.Store(time.Now().UnixNano())
+		}
 		if n > 0 && m.onOutput != nil {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-			m.onOutput(session.ID, data)
+			// Prepend any carried-over bytes from previous read
+			var chunk []byte
+			if len(carry) > 0 {
+				chunk = append(carry, buf[:n]...)
+				carry = nil
+			} else {
+				chunk = buf[:n]
+			}
+
+			// Find the last valid UTF-8 boundary
+			sendLen := validUTF8Len(chunk)
+			if sendLen < len(chunk) {
+				carry = make([]byte, len(chunk)-sendLen)
+				copy(carry, chunk[sendLen:])
+			}
+
+			if sendLen > 0 {
+				data := make([]byte, sendLen)
+				copy(data, chunk[:sendLen])
+				m.onOutput(session.ID, data)
+			}
 		}
 		if err != nil {
-			if err != io.EOF {
-				// PTY closed
+			// Flush any remaining carry bytes before exiting
+			if len(carry) > 0 && m.onOutput != nil {
+				m.onOutput(session.ID, carry)
 			}
 			return
 		}
 	}
+}
+
+// validUTF8Len returns the length of b that ends on a complete UTF-8 boundary.
+// Any trailing incomplete multi-byte sequence is excluded.
+func validUTF8Len(b []byte) int {
+	n := len(b)
+	if n == 0 {
+		return 0
+	}
+
+	// Scan backwards from the end (up to 3 bytes) looking for
+	// a leading byte that starts an incomplete multi-byte sequence.
+	end := n - 1
+	start := n - 4
+	if start < 0 {
+		start = 0
+	}
+
+	for i := end; i >= start; i-- {
+		c := b[i]
+		if c < 0x80 {
+			// ASCII byte — everything up to n is on a valid boundary
+			return n
+		}
+		if c >= 0xC0 {
+			// Leading byte: determine expected sequence length
+			var seqLen int
+			switch {
+			case c < 0xE0:
+				seqLen = 2
+			case c < 0xF0:
+				seqLen = 3
+			default:
+				seqLen = 4
+			}
+			if n-i >= seqLen {
+				return n // sequence is complete
+			}
+			return i // incomplete — exclude from this send
+		}
+		// 0x80–0xBF: continuation byte, keep scanning backward
+	}
+	// Only continuation bytes in the trailing window — send everything
+	return n
 }
 
 // Write writes data to a PTY session's stdin
@@ -111,8 +192,41 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	// Debug logging for CLI sessions
+	if session.CLIType != "" {
+		preview := data
+		if len(preview) > 120 {
+			preview = preview[:120]
+		}
+		log.Printf("[PTY-WRITE] session=%s cli=%s agent=%s len=%d hex=%s",
+			sessionID[:8], session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
+	}
+
 	_, err := session.PTY.Write(data)
 	return err
+}
+
+// WaitForIdle waits until `idleDuration` has passed since the last PTY output,
+// or until `maxWait` is exceeded. Returns true if idle was reached.
+func (m *Manager) WaitForIdle(sessionID string, idleDuration, maxWait time.Duration) bool {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		m.mu.RLock()
+		session, ok := m.sessions[sessionID]
+		m.mu.RUnlock()
+		if !ok {
+			return false
+		}
+		nano := session.lastOutputNano.Load()
+		if nano > 0 {
+			lastOut := time.Unix(0, nano)
+			if time.Since(lastOut) >= idleDuration {
+				return true
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
 }
 
 // Resize resizes a PTY session
@@ -170,6 +284,24 @@ func (m *Manager) GetSessionsByTeam(teamID string) []*PTYSession {
 	for _, s := range m.sessions {
 		if s.TeamID == teamID {
 			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// filterEnv removes specified keys from an environment variable slice
+func filterEnv(env []string, keys ...string) []string {
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		skip := false
+		for _, key := range keys {
+			if len(e) > len(key) && e[:len(key)+1] == key+"=" {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			result = append(result, e)
 		}
 	}
 	return result

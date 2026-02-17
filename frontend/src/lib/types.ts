@@ -1,10 +1,21 @@
 // Go struct mirrors
 
+export type CLIType = "claude" | "gemini" | "copilot" | "shell";
+
+export interface CLIInfo {
+  type: CLIType;
+  name: string;
+  binary: string;
+  available: boolean;
+  binary_path: string;
+}
+
 export interface AgentConfig {
   name: string;
   role: string;
   prompt_id: string;
   work_dir: string;
+  cli_type: string;
 }
 
 export interface Team {
@@ -13,6 +24,7 @@ export interface Team {
   agents: AgentConfig[];
   grid_layout: string;
   chat_dir: string;
+  custom_prompt: string;
   created_at: string;
 }
 
@@ -48,6 +60,7 @@ export interface TerminalSession {
   sessionID: string;
   teamID: string;
   agentName: string;
+  cliType: CLIType;
   index: number;
 }
 

@@ -69,11 +69,13 @@ func (w *Watcher) WatchDir(chatDir string) error {
 	os.MkdirAll(chatDir, 0755)
 
 	w.mu.Lock()
-	w.dirs[chatDir] = 0
+	if _, exists := w.dirs[chatDir]; !exists {
+		// First time watching: set lastID to current max so old messages are skipped
+		w.dirs[chatDir] = w.peekMaxMessageID(chatDir)
+	}
 	w.mu.Unlock()
 
-	// Do initial read
-	w.readMessages(chatDir)
+	// Read current agents (no harm in emitting current state)
 	w.readAgents(chatDir)
 
 	return w.fsWatcher.Add(chatDir)
@@ -216,4 +218,19 @@ func (w *Watcher) GetAllAgents(chatDir string) map[string]Agent {
 	var agents map[string]Agent
 	json.Unmarshal(data, &agents)
 	return agents
+}
+
+// peekMaxMessageID reads the messages file and returns the highest message ID
+// without triggering any handlers. Returns 0 if file doesn't exist or is empty.
+func (w *Watcher) peekMaxMessageID(chatDir string) int {
+	path := filepath.Join(chatDir, "messages.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var messages []Message
+	if err := json.Unmarshal(data, &messages); err != nil || len(messages) == 0 {
+		return 0
+	}
+	return messages[len(messages)-1].ID
 }

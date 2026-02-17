@@ -1,21 +1,26 @@
 import { create } from "zustand";
-import { TerminalSession } from "../lib/types";
+import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
 import {
   CreateTerminal,
   CloseTerminal,
   ResizeTerminal,
   WriteToTerminal,
+  DetectCLIs,
 } from "../../wailsjs/go/main/App";
 
 interface TerminalsState {
   sessions: Record<string, TerminalSession[]>; // teamID -> sessions
   focusedSessionID: string | null;
+  availableCLIs: CLIInfo[];
   setFocusedSession: (id: string | null) => void;
   toggleFocusSession: (id: string) => void;
+  loadCLIs: () => Promise<void>;
   addTerminal: (
     teamID: string,
     agentName: string,
-    workDir: string
+    workDir: string,
+    cliType: CLIType,
+    promptId?: string
   ) => Promise<string>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
@@ -31,6 +36,7 @@ interface TerminalsState {
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   focusedSessionID: null,
+  availableCLIs: [],
 
   setFocusedSession: (id) => set({ focusedSessionID: id }),
 
@@ -39,13 +45,23 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       focusedSessionID: s.focusedSessionID === id ? null : id,
     })),
 
-  addTerminal: async (teamID, agentName, workDir) => {
-    const sessionID = await CreateTerminal(teamID, agentName, workDir);
+  loadCLIs: async () => {
+    try {
+      const clis = await DetectCLIs();
+      set({ availableCLIs: clis as unknown as CLIInfo[] });
+    } catch {
+      // ignore
+    }
+  },
+
+  addTerminal: async (teamID, agentName, workDir, cliType, promptId) => {
+    const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "");
     const session: TerminalSession = {
       sessionID,
       teamID,
       agentName,
-      index: (get().sessions[teamID]?.length ?? 0),
+      cliType,
+      index: get().sessions[teamID]?.length ?? 0,
     };
 
     set((s) => ({

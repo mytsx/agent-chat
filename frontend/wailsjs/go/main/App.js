@@ -14,8 +14,8 @@ export function CreateTeam(arg1, arg2, arg3) {
   return window['go']['main']['App']['CreateTeam'](arg1, arg2, arg3);
 }
 
-export function CreateTerminal(arg1, arg2, arg3) {
-  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3);
+export function CreateTerminal(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function DeletePrompt(arg1) {
@@ -26,8 +26,16 @@ export function DeleteTeam(arg1) {
   return window['go']['main']['App']['DeleteTeam'](arg1);
 }
 
+export function DetectCLIs() {
+  return window['go']['main']['App']['DetectCLIs']();
+}
+
 export function GetAgents(arg1) {
   return window['go']['main']['App']['GetAgents'](arg1);
+}
+
+export function GetGlobalPrompt() {
+  return window['go']['main']['App']['GetGlobalPrompt']();
 }
 
 export function GetMessages(arg1) {
@@ -54,12 +62,20 @@ export function ListTeams() {
   return window['go']['main']['App']['ListTeams']();
 }
 
+export function OpenDirectoryDialog() {
+  return window['go']['main']['App']['OpenDirectoryDialog']();
+}
+
 export function ResizeTerminal(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResizeTerminal'](arg1, arg2, arg3);
 }
 
 export function SendPromptToAgent(arg1, arg2, arg3) {
   return window['go']['main']['App']['SendPromptToAgent'](arg1, arg2, arg3);
+}
+
+export function SetGlobalPrompt(arg1) {
+  return window['go']['main']['App']['SetGlobalPrompt'](arg1);
 }
 
 export function UpdatePrompt(arg1, arg2, arg3, arg4, arg5) {

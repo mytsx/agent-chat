@@ -1,18 +1,26 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
-import { parseGrid, gridCapacity } from "../lib/types";
+import { parseGrid, gridCapacity, TerminalSession } from "../lib/types";
 import TerminalPane from "./TerminalPane";
+import SetupWizard from "./SetupWizard";
 import GridSelector from "./GridSelector";
+
+type GridSlot =
+  | { type: "terminal"; session: TerminalSession }
+  | { type: "wizard"; slotIndex: number };
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, addTerminal, removeTerminal, focusedSessionID, toggleFocusSession, setFocusedSession } = useTerminals();
-  const [addingAgent, setAddingAgent] = useState(false);
-  const [agentName, setAgentName] = useState("");
+  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs } = useTerminals();
 
   const team = teams.find((t) => t.id === activeTeamID);
+
+  // Load available CLIs on mount
+  useEffect(() => {
+    loadCLIs();
+  }, [loadCLIs]);
 
   // ESC to unfocus
   useEffect(() => {
@@ -35,25 +43,24 @@ export default function TerminalGrid() {
     await updateTeam(team.id, team.name, layout, team.agents);
   };
 
-  const handleAddTerminal = async () => {
-    if (teamSessions.length >= capacity) return;
-    const name = agentName.trim() || `agent-${teamSessions.length + 1}`;
-    await addTerminal(team.id, name, "");
-    setAgentName("");
-    setAddingAgent(false);
-  };
-
-  // Build rows of sessions for the grid
-  const sessionRows: (typeof teamSessions)[] = [];
-  for (let r = 0; r < rows; r++) {
-    const rowSessions = teamSessions.slice(r * cols, (r + 1) * cols);
-    if (rowSessions.length > 0) {
-      sessionRows.push(rowSessions);
+  // Build slot array: terminals first, then wizards for empty slots
+  const slots: GridSlot[] = [];
+  for (let i = 0; i < capacity; i++) {
+    if (i < teamSessions.length) {
+      slots.push({ type: "terminal", session: teamSessions[i] });
+    } else {
+      slots.push({ type: "wizard", slotIndex: i });
     }
   }
 
-  // Count empty slots
-  const emptyCount = capacity - teamSessions.length;
+  // Build row groups
+  const slotRows: GridSlot[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row = slots.slice(r * cols, (r + 1) * cols);
+    if (row.length > 0) {
+      slotRows.push(row);
+    }
+  }
 
   const renderFocusedMode = () => {
     const focused = teamSessions.find((s) => s.sessionID === focusedSessionID);
@@ -61,7 +68,6 @@ export default function TerminalGrid() {
 
     return (
       <div className="terminal-grid-focused">
-        {/* Render all panes but hide non-focused ones to keep them mounted */}
         {teamSessions.map((s) => (
           <div
             key={s.sessionID}
@@ -73,6 +79,7 @@ export default function TerminalGrid() {
             <TerminalPane
               sessionID={s.sessionID}
               agentName={s.agentName}
+              cliType={s.cliType}
               isFocused={s.sessionID === focusedSessionID}
               onToggleFocus={() => toggleFocusSession(s.sessionID)}
             />
@@ -82,21 +89,43 @@ export default function TerminalGrid() {
     );
   };
 
+  const renderSlot = (slot: GridSlot) => {
+    if (slot.type === "terminal") {
+      return (
+        <TerminalPane
+          sessionID={slot.session.sessionID}
+          agentName={slot.session.agentName}
+          cliType={slot.session.cliType}
+          isFocused={false}
+          onToggleFocus={() => toggleFocusSession(slot.session.sessionID)}
+        />
+      );
+    }
+    return (
+      <SetupWizard
+        slotIndex={slot.slotIndex}
+        teamID={team.id}
+        onCreated={() => {}}
+      />
+    );
+  };
+
   const renderResizablePanels = () => {
     return (
       <PanelGroup orientation="vertical" className="terminal-panel-group">
-        {sessionRows.map((rowSessions, rowIdx) => (
+        {slotRows.map((rowSlots, rowIdx) => (
           <PanelGroupRow key={rowIdx} rowIdx={rowIdx}>
-            {rowSessions.map((s, colIdx) => (
-              <PanelItem key={s.sessionID} colIdx={colIdx}>
-                <TerminalPane
-                  sessionID={s.sessionID}
-                  agentName={s.agentName}
-                  isFocused={false}
-                  onToggleFocus={() => toggleFocusSession(s.sessionID)}
-                />
-              </PanelItem>
-            ))}
+            {rowSlots.map((slot, colIdx) => {
+              const key =
+                slot.type === "terminal"
+                  ? slot.session.sessionID
+                  : `wizard-${slot.slotIndex}`;
+              return (
+                <PanelItem key={key} colIdx={colIdx}>
+                  {renderSlot(slot)}
+                </PanelItem>
+              );
+            })}
           </PanelGroupRow>
         ))}
       </PanelGroup>
@@ -107,53 +136,16 @@ export default function TerminalGrid() {
     <div className="terminal-grid-wrapper">
       <div className="terminal-grid-toolbar">
         <GridSelector current={team.grid_layout} onChange={handleLayoutChange} />
-        <div className="terminal-grid-actions">
-          {addingAgent ? (
-            <div className="add-agent-input">
-              <input
-                autoFocus
-                value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleAddTerminal();
-                  if (e.key === "Escape") setAddingAgent(false);
-                }}
-                placeholder="Agent name..."
-              />
-              <button onClick={handleAddTerminal}>Add</button>
-            </div>
-          ) : (
-            <button
-              className="btn-add-terminal"
-              onClick={() => setAddingAgent(true)}
-              disabled={teamSessions.length >= capacity}
-            >
-              + Terminal ({teamSessions.length}/{capacity})
-            </button>
-          )}
-        </div>
+        <span className="terminal-count">
+          {teamSessions.length}/{capacity}
+        </span>
       </div>
 
       {focusedSessionID && teamSessions.some((s) => s.sessionID === focusedSessionID) ? (
         renderFocusedMode()
       ) : (
         <div className="terminal-grid-content">
-          {teamSessions.length > 0 && renderResizablePanels()}
-          {emptyCount > 0 && !focusedSessionID && (
-            <div className="terminal-empty-slots">
-              {Array.from({ length: emptyCount }).map((_, i) => (
-                <div key={`empty-${i}`} className="terminal-empty">
-                  <button
-                    type="button"
-                    className="terminal-empty-add"
-                    onClick={() => setAddingAgent(true)}
-                  >
-                    + Add Terminal
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          {renderResizablePanels()}
         </div>
       )}
     </div>

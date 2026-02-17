@@ -91,13 +91,16 @@ function AppContent() {
     if (!activeTeamID) return;
     const team = useTeams.getState().teams.find((t) => t.id === activeTeamID);
     if (team?.chat_dir) {
-      loadMessages(team.chat_dir).catch(() => {});
-      loadAgents(team.chat_dir).catch(() => {});
+      const roomDir = team.chat_dir + "/" + (team.name || "default");
+      loadMessages(roomDir).catch(() => {});
+      loadAgents(roomDir).catch(() => {});
     }
   }, [activeTeamID]);
 
   const activeTeam = teams.find((t) => t.id === activeTeamID);
-  const chatDir = activeTeam?.chat_dir ?? "/tmp/agent-chat-room";
+  const chatDir = activeTeam
+    ? activeTeam.chat_dir + "/" + (activeTeam.name || "default")
+    : "/tmp/agent-chat-room/default";
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch(() => {});

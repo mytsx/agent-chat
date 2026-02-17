@@ -4,15 +4,17 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { WriteToTerminal, ResizeTerminal } from "../../wailsjs/go/main/App";
+import { CLIType } from "../lib/types";
 
 interface Props {
   sessionID: string;
   agentName: string;
+  cliType?: CLIType;
   isFocused?: boolean;
   onToggleFocus?: () => void;
 }
 
-export default function TerminalPane({ sessionID, agentName, isFocused, onToggleFocus }: Props) {
+export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -113,6 +115,9 @@ export default function TerminalPane({ sessionID, agentName, isFocused, onToggle
     <div className="terminal-pane">
       <div className="terminal-header">
         <span className="terminal-agent-name">{agentName || "Terminal"}</span>
+        {cliType && cliType !== "shell" && (
+          <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
+        )}
         <div className="terminal-header-actions">
           {onToggleFocus && (
             <button
