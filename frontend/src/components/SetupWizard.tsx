@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { CLIType, Prompt } from "../lib/types";
+import { CLIType } from "../lib/types";
 import { useTerminals } from "../store/useTerminals";
-import { OpenDirectoryDialog, ListPrompts } from "../../wailsjs/go/main/App";
+import { usePrompts } from "../store/usePrompts";
+import { OpenDirectoryDialog } from "../../wailsjs/go/main/App";
 import CLISelector from "./CLISelector";
 
 interface Props {
@@ -12,11 +13,11 @@ interface Props {
 
 export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const { availableCLIs, addTerminal } = useTerminals();
+  const prompts = usePrompts((s) => s.prompts);
   const [agentName, setAgentName] = useState("");
   const [selectedCLI, setSelectedCLI] = useState<CLIType>("shell");
   const [workDir, setWorkDir] = useState("");
   const [promptID, setPromptID] = useState("");
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [creating, setCreating] = useState(false);
 
   // Set default CLI to first available AI CLI
@@ -26,13 +27,6 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       setSelectedCLI(firstAI ? (firstAI.type as CLIType) : "shell");
     }
   }, [availableCLIs]);
-
-  // Load available prompts
-  useEffect(() => {
-    ListPrompts()
-      .then((p) => setPrompts((p as unknown as Prompt[]) ?? []))
-      .catch(() => {});
-  }, []);
 
   const handleBrowse = async () => {
     try {
