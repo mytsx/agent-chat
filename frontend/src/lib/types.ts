@@ -62,17 +62,37 @@ export interface TerminalSession {
   agentName: string;
   cliType: CLIType;
   index: number;
+  slotIndex: number;
 }
 
-// Grid layout type: "1x1" | "1x2" | "2x1" | "2x2" | "2x3" | "3x2" | "3x3" | "3x4" | "4x3"
+// Wails event payload types
+export interface MessagesNewEvent {
+  chatDir: string;
+  messages: Message[];
+}
+
+export interface AgentsUpdatedEvent {
+  chatDir: string;
+  agents: Record<string, Agent>;
+}
+
+// Grid layout type: "1x1" | "1x2" | "2x1" | "2x2" | "2x3" | "3x2" | "3x3" | "3x4" | "4x3" | "custom"
 export type GridLayout = string;
 
+export const CUSTOM_LAYOUT = "custom";
+
+export function isCustomLayout(layout: string): boolean {
+  return layout === CUSTOM_LAYOUT;
+}
+
 export function parseGrid(layout: string): { cols: number; rows: number } {
+  if (isCustomLayout(layout)) return { cols: 1, rows: 1 };
   const [cols, rows] = layout.split("x").map(Number);
   return { cols: cols || 1, rows: rows || 1 };
 }
 
 export function gridCapacity(layout: string): number {
+  if (isCustomLayout(layout)) return Infinity;
   const { cols, rows } = parseGrid(layout);
   return cols * rows;
 }

@@ -1,3 +1,5 @@
+import { CUSTOM_LAYOUT } from "../lib/types";
+
 const LAYOUTS = [
   { label: "1x1", cols: 1, rows: 1 },
   { label: "1x2", cols: 1, rows: 2 },
@@ -42,6 +44,14 @@ export default function GridSelector({ current, onChange }: Props) {
           <span className="grid-label">{l.label}</span>
         </button>
       ))}
+      <button
+        className={`grid-option ${current === CUSTOM_LAYOUT ? "grid-option-active" : ""}`}
+        onClick={() => onChange(CUSTOM_LAYOUT)}
+        title="Custom (unlimited terminals)"
+      >
+        <span style={{ fontSize: "14px", lineHeight: 1 }}>+</span>
+        <span className="grid-label">Custom</span>
+      </button>
     </div>
   );
 }

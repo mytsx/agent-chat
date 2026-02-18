@@ -23,6 +23,8 @@ type PTYSession struct {
 	TeamID         string
 	AgentName      string
 	CLIType        string
+	WorkDir        string // stored for restart
+	PromptID       string // stored for restart
 	done           chan struct{}
 	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
 }
@@ -91,6 +93,7 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdNam
 		TeamID:    teamID,
 		AgentName: agentName,
 		CLIType:   cliType,
+		WorkDir:   workDir,
 		done:      make(chan struct{}),
 	}
 

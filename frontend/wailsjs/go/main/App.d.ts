@@ -39,6 +39,8 @@ export function OpenDirectoryDialog():Promise<string>;
 
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 
+export function RestartTerminal(arg1:string):Promise<string>;
+
 export function SendPromptToAgent(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
 
 export function SetGlobalPrompt(arg1:string):Promise<void>;

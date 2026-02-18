@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -18,9 +20,12 @@ func EnsureMCPServerBinary(binaryData []byte, dataDir string) error {
 
 	binPath := GetMCPBinaryPath(dataDir)
 
-	// Quick check: if file exists and content matches, skip
+	// Quick check: if file exists and content matches, just ensure signing
 	if existing, err := os.ReadFile(binPath); err == nil {
 		if bytes.Equal(existing, binaryData) {
+			if runtime.GOOS == "darwin" {
+				ensureSigned(binPath)
+			}
 			return nil
 		}
 	}
@@ -35,8 +40,35 @@ func EnsureMCPServerBinary(binaryData []byte, dataDir string) error {
 		return err
 	}
 
+	// On macOS, clear quarantine/provenance attributes and re-sign the binary.
+	// When extracted from a .app bundle, the binary inherits com.apple.provenance
+	// which causes Gatekeeper to silently block execution by child processes.
+	if runtime.GOOS == "darwin" {
+		clearMacOSQuarantine(binPath)
+	}
+
 	log.Println("MCP server binary installed")
 	return nil
+}
+
+// clearMacOSQuarantine removes quarantine/provenance xattrs and ad-hoc signs the binary
+// so that macOS Gatekeeper allows child processes (like Claude Code) to spawn it.
+func clearMacOSQuarantine(binPath string) {
+	// Remove quarantine and provenance attributes
+	for _, attr := range []string{"com.apple.quarantine", "com.apple.provenance"} {
+		exec.Command("xattr", "-d", attr, binPath).Run()
+	}
+	// Ad-hoc codesign so Gatekeeper accepts it
+	if err := exec.Command("codesign", "--force", "--sign", "-", binPath).Run(); err != nil {
+		log.Printf("codesign warning: %v", err)
+	}
+}
+
+// ensureSigned checks if the binary passes Gatekeeper and signs it if not.
+func ensureSigned(binPath string) {
+	if exec.Command("spctl", "--assess", "--type", "execute", binPath).Run() != nil {
+		clearMacOSQuarantine(binPath)
+	}
 }
 
 // GetMCPBinaryPath returns the path to the MCP server binary.

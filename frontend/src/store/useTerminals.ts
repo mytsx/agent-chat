@@ -3,6 +3,7 @@ import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
 import {
   CreateTerminal,
   CloseTerminal,
+  RestartTerminal,
   ResizeTerminal,
   WriteToTerminal,
   DetectCLIs,
@@ -20,7 +21,8 @@ interface TerminalsState {
     agentName: string,
     workDir: string,
     cliType: CLIType,
-    promptId?: string
+    promptId?: string,
+    slotIndex?: number
   ) => Promise<string>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
@@ -30,6 +32,7 @@ interface TerminalsState {
     cols: number,
     rows: number
   ) => Promise<void>;
+  restartTerminal: (teamID: string, sessionID: string) => Promise<string>;
   getTeamSessions: (teamID: string) => TerminalSession[];
 }
 
@@ -49,19 +52,22 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     try {
       const clis = await DetectCLIs();
       set({ availableCLIs: clis as unknown as CLIInfo[] });
-    } catch {
-      // ignore
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("CLI detection failed:", e);
     }
   },
 
-  addTerminal: async (teamID, agentName, workDir, cliType, promptId) => {
+  addTerminal: async (teamID, agentName, workDir, cliType, promptId, slotIndex) => {
     const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "");
+    const currentSessions = get().sessions[teamID] ?? [];
+    const resolvedSlotIndex = slotIndex ?? currentSessions.length;
     const session: TerminalSession = {
       sessionID,
       teamID,
       agentName,
       cliType,
-      index: get().sessions[teamID]?.length ?? 0,
+      index: currentSessions.length,
+      slotIndex: resolvedSlotIndex,
     };
 
     set((s) => ({
@@ -91,8 +97,8 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     for (const s of teamSessions) {
       try {
         await CloseTerminal(s.sessionID);
-      } catch {
-        // ignore
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn("CloseTerminal failed:", e);
       }
     }
     set((s) => {
@@ -108,6 +114,28 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   resizeTerminal: async (sessionID, cols, rows) => {
     await ResizeTerminal(sessionID, cols, rows);
+  },
+
+  restartTerminal: async (teamID, sessionID) => {
+    const teamSessions = get().sessions[teamID] ?? [];
+    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
+    if (!oldSession) throw new Error("Session not found");
+
+    const newSessionID = await RestartTerminal(sessionID);
+
+    // Replace old session with new one, preserving slotIndex
+    set((s) => ({
+      sessions: {
+        ...s.sessions,
+        [teamID]: (s.sessions[teamID] ?? []).map((t) =>
+          t.sessionID === sessionID
+            ? { ...t, sessionID: newSessionID }
+            : t
+        ),
+      },
+    }));
+
+    return newSessionID;
   },
 
   getTeamSessions: (teamID) => {

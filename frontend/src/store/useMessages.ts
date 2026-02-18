@@ -47,8 +47,8 @@ export const useMessages = create<MessagesState>((set) => ({
       set((s) => ({
         messages: { ...s.messages, [chatDir]: msgs || EMPTY_MESSAGES },
       }));
-    } catch {
-      // ignore
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("Failed to load messages:", e);
     }
   },
 
@@ -58,8 +58,8 @@ export const useMessages = create<MessagesState>((set) => ({
       set((s) => ({
         agents: { ...s.agents, [chatDir]: agents || EMPTY_AGENTS },
       }));
-    } catch {
-      // ignore
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("Failed to load agents:", e);
     }
   },
 }));

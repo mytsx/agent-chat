@@ -1,6 +1,8 @@
-import { useEffect, useState, Component, ReactNode } from "react";
+import { useEffect, useState, useRef, Component, ReactNode } from "react";
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, type PanelImperativeHandle } from "react-resizable-panels";
 import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
+import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
 // useTerminals imported by PromptLibrary for target picker
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
@@ -38,6 +40,18 @@ function AppContent() {
   const createTeam = useTeams((s) => s.createTeam);
   const { addMessages, setAgents, loadMessages, loadAgents } = useMessages();
   const [ready, setReady] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarRef = useRef<PanelImperativeHandle>(null);
+
+  const toggleSidebar = () => {
+    if (sidebarRef.current) {
+      if (sidebarCollapsed) {
+        sidebarRef.current.expand();
+      } else {
+        sidebarRef.current.collapse();
+      }
+    }
+  };
 
   // Load teams on startup (runs once)
   useEffect(() => {
@@ -65,12 +79,12 @@ function AppContent() {
     let cleanupFn = () => {};
 
     import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
-      EventsOn("messages:new", (data: any) => {
+      EventsOn("messages:new", (data: MessagesNewEvent) => {
         if (data?.chatDir && data?.messages) {
           addMessages(data.chatDir, data.messages);
         }
       });
-      EventsOn("agents:updated", (data: any) => {
+      EventsOn("agents:updated", (data: AgentsUpdatedEvent) => {
         if (data?.chatDir && data?.agents) {
           setAgents(data.chatDir, data.agents);
         }
@@ -79,9 +93,13 @@ function AppContent() {
         try {
           EventsOff("messages:new");
           EventsOff("agents:updated");
-        } catch {}
+        } catch (e) {
+          if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
+        }
       };
-    }).catch(() => {});
+    }).catch((e) => {
+      if (import.meta.env.DEV) console.warn("Failed to load Wails runtime:", e);
+    });
 
     return () => cleanupFn();
   }, [ready]);
@@ -92,8 +110,12 @@ function AppContent() {
     const team = useTeams.getState().teams.find((t) => t.id === activeTeamID);
     if (team?.chat_dir) {
       const roomDir = team.chat_dir + "/" + (team.name || "default");
-      loadMessages(roomDir).catch(() => {});
-      loadAgents(roomDir).catch(() => {});
+      loadMessages(roomDir).catch((e) => {
+        if (import.meta.env.DEV) console.warn("Failed to load messages:", e);
+      });
+      loadAgents(roomDir).catch((e) => {
+        if (import.meta.env.DEV) console.warn("Failed to load agents:", e);
+      });
     }
   }, [activeTeamID]);
 
@@ -103,15 +125,40 @@ function AppContent() {
     : "/tmp/agent-chat-room/default";
 
   const handleSendPrompt = (sessionID: string, content: string) => {
-    SendPromptToAgent(sessionID, content, {}).catch(() => {});
+    SendPromptToAgent(sessionID, content, {}).catch((e) => {
+      if (import.meta.env.DEV) console.warn("SendPromptToAgent failed:", e);
+    });
   };
 
   return (
     <div className="app">
       <TabBar />
       <div className="app-body">
-        <TerminalGrid />
-        <Sidebar chatDir={chatDir} onSendPrompt={handleSendPrompt} />
+        <PanelGroup orientation="horizontal" className="app-panel-group">
+          <Panel minSize="30%">
+            <TerminalGrid />
+          </Panel>
+          <PanelResizeHandle className="resize-handle-sidebar">
+            <button
+              type="button"
+              className="sidebar-toggle-btn"
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            >
+              {sidebarCollapsed ? "\u25C0" : "\u25B6"}
+            </button>
+          </PanelResizeHandle>
+          <Panel
+            panelRef={sidebarRef}
+            collapsible
+            defaultSize="20%"
+            minSize="15%"
+            maxSize="35%"
+            onResize={(size) => setSidebarCollapsed(size.asPercentage === 0)}
+          >
+            <Sidebar chatDir={chatDir} onSendPrompt={handleSendPrompt} />
+          </Panel>
+        </PanelGroup>
       </div>
     </div>
   );

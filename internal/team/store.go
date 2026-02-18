@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"desktop/internal/validation"
+
 	"github.com/google/uuid"
 )
 
@@ -94,6 +96,10 @@ func (s *Store) Get(id string) (Team, error) {
 
 // Create creates a new team
 func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if err := validation.ValidateName(name); err != nil {
+		return Team{}, fmt.Errorf("invalid team name: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -123,6 +129,10 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 
 // Update updates a team
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if err := validation.ValidateName(name); err != nil {
+		return Team{}, fmt.Errorf("invalid team name: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

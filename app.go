@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/team"
+	"desktop/internal/validation"
 	"desktop/internal/watcher"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -147,8 +149,12 @@ func (a *App) clearAllRooms() {
 			continue
 		}
 		roomDir := filepath.Join(roomsDir, e.Name())
-		os.Remove(filepath.Join(roomDir, "messages.json"))
-		os.Remove(filepath.Join(roomDir, "agents.json"))
+		if err := os.Remove(filepath.Join(roomDir, "messages.json")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[STARTUP] Failed to remove messages.json in %s: %v", e.Name(), err)
+		}
+		if err := os.Remove(filepath.Join(roomDir, "agents.json")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[STARTUP] Failed to remove agents.json in %s: %v", e.Name(), err)
+		}
 		log.Printf("[STARTUP] Cleared room: %s", e.Name())
 	}
 }
@@ -171,6 +177,10 @@ func (a *App) OpenDirectoryDialog() (string, error) {
 
 // CreateTerminal creates a new terminal and returns its session ID
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string) (string, error) {
+	if err := validation.ValidateName(agentName); err != nil {
+		return "", fmt.Errorf("invalid agent name: %w", err)
+	}
+
 	// Get team info for chat dir and room name
 	var chatDir string
 	var teamName string
@@ -232,6 +242,11 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", err
 	}
 
+	// Store promptID for restart
+	if s := a.ptyManager.GetSession(sessionID); s != nil {
+		s.PromptID = promptID
+	}
+
 	// Register agent session for orchestrator (using roomDir)
 	if agentName != "" {
 		a.orchestrator.RegisterAgent(roomDir, agentName, sessionID)
@@ -241,6 +256,32 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID)
 
 	return sessionID, nil
+}
+
+// RestartTerminal closes a terminal and creates a new one with the same parameters.
+// Returns the new session ID.
+func (a *App) RestartTerminal(sessionID string) (string, error) {
+	session := a.ptyManager.GetSession(sessionID)
+	if session == nil {
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Capture restart params before closing
+	teamID := session.TeamID
+	agentName := session.AgentName
+	workDir := session.WorkDir
+	cliType := session.CLIType
+	promptID := session.PromptID
+
+	// Close old terminal (unregisters from orchestrator)
+	if err := a.CloseTerminal(sessionID); err != nil {
+		log.Printf("[RESTART] Failed to close old session %s: %v", sessionID[:8], err)
+	}
+
+	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
+
+	// Create new terminal with same params
+	return a.CreateTerminal(teamID, agentName, workDir, cliType, promptID)
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it

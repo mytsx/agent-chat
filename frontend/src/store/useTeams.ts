@@ -41,7 +41,8 @@ export const useTeams = create<TeamsState>((set, get) => ({
       if (teams && teams.length > 0 && !get().activeTeamID) {
         set({ activeTeamID: teams[0].id });
       }
-    } catch {
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("Failed to load teams:", e);
       set({ loading: false });
     }
   },

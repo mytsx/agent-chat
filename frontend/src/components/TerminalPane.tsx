@@ -12,9 +12,11 @@ interface Props {
   cliType?: CLIType;
   isFocused?: boolean;
   onToggleFocus?: () => void;
+  onRemove?: () => void;
+  onRestart?: () => void;
 }
 
-export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus }: Props) {
+export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus, onRemove, onRestart }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -65,47 +67,69 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     setTimeout(() => {
       try {
         fitAddon.fit();
-        ResizeTerminal(sessionID, term.cols, term.rows).catch(() => {});
-      } catch {}
+        ResizeTerminal(sessionID, term.cols, term.rows).catch((e) => {
+          if (import.meta.env.DEV) console.warn("Initial ResizeTerminal failed:", e);
+        });
+      } catch (e) {
+        if (import.meta.env.DEV) console.warn("Terminal fit failed:", e);
+      }
     }, 100);
 
     // Handle user input -> send to PTY
     term.onData((data: string) => {
-      WriteToTerminal(sessionID, data).catch(() => {});
+      WriteToTerminal(sessionID, data).catch((e) => {
+        if (import.meta.env.DEV) console.warn("WriteToTerminal failed:", e);
+      });
     });
 
     // Handle PTY output -> write to terminal
     const eventName = "pty:output:" + sessionID;
+    let cancelled = false;
     let eventCleanup = () => {};
 
     import("../../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      if (cancelled) return;
       EventsOn(eventName, (data: string) => {
         term.write(data);
       });
       eventCleanup = () => {
-        try { EventsOff(eventName); } catch {}
-      };
-    }).catch(() => {});
-
-    // Handle resize
-    const resizeObserver = new ResizeObserver(() => {
-      if (fitRef.current) {
-        try {
-          fitRef.current.fit();
-        } catch {}
-        if (termRef.current) {
-          ResizeTerminal(
-            sessionID,
-            termRef.current.cols,
-            termRef.current.rows
-          ).catch(() => {});
+        try { EventsOff(eventName); } catch (e) {
+          if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
-      }
+      };
+    }).catch((e) => {
+      if (import.meta.env.DEV) console.warn("Failed to load Wails runtime:", e);
+    });
+
+    // Handle resize with debounce
+    let resizeTimer: ReturnType<typeof setTimeout>;
+    const resizeObserver = new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (fitRef.current) {
+          try {
+            fitRef.current.fit();
+          } catch (e) {
+            if (import.meta.env.DEV) console.warn("Terminal fit failed:", e);
+          }
+          if (termRef.current) {
+            ResizeTerminal(
+              sessionID,
+              termRef.current.cols,
+              termRef.current.rows
+            ).catch((e) => {
+              if (import.meta.env.DEV) console.warn("ResizeTerminal failed:", e);
+            });
+          }
+        }
+      }, 50);
     });
     resizeObserver.observe(containerRef.current);
 
     return () => {
+      cancelled = true;
       eventCleanup();
+      clearTimeout(resizeTimer);
       resizeObserver.disconnect();
       term.dispose();
     };
@@ -119,6 +143,16 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
           <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
         )}
         <div className="terminal-header-actions">
+          {onRestart && (
+            <button
+              type="button"
+              className="terminal-btn-restart"
+              onClick={onRestart}
+              title="Restart terminal"
+            >
+              {"\u21BB"}
+            </button>
+          )}
           {onToggleFocus && (
             <button
               type="button"
@@ -127,6 +161,16 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               title={isFocused ? "Restore" : "Maximize"}
             >
               {isFocused ? "\u25A3" : "\u25A1"}
+            </button>
+          )}
+          {onRemove && (
+            <button
+              type="button"
+              className="terminal-btn-remove"
+              onClick={onRemove}
+              title="Close terminal"
+            >
+              {"\u00D7"}
             </button>
           )}
         </div>
