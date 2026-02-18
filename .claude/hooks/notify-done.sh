@@ -1,7 +1,7 @@
 #!/bin/bash
 # Notification hook: Claude input beklerken macOS bildirimi gönder
 
-LOG="/tmp/claude-hooks.log"
+LOG="${HOME}/.agent-chat/claude-hooks.log"
 log() { echo "[$(date '+%H:%M:%S')] [notify-done] $*" >> "$LOG"; }
 
 log "Hook tetiklendi"

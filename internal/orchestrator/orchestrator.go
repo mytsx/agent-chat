@@ -83,11 +83,11 @@ func New(ptyManager *ptymgr.Manager) *Orchestrator {
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	if o.agentSessions[chatDir] == nil {
 		o.agentSessions[chatDir] = make(map[string]string)
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
+	o.mu.Unlock()
 	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, ptymgr.ShortID(sessionID))
 }
 

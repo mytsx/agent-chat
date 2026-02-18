@@ -5,7 +5,7 @@
 # Exit codes: 0 = always (non-blocking, informational only).
 set -uo pipefail
 
-LOG="/tmp/claude-hooks.log"
+LOG="${HOME}/.agent-chat/claude-hooks.log"
 log() { echo "[$(date '+%H:%M:%S')] [gemini-review] $*" >> "$LOG"; }
 
 INPUT=$(cat)
@@ -56,7 +56,7 @@ fi
 # Get current branch
 BRANCH=$(git branch --show-current 2>/dev/null)
 log "BRANCH=$BRANCH"
-if [ -z "$BRANCH" ] || [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ] || [ "$BRANCH" = "development" ]; then
+if [[ -z "$BRANCH" || "$BRANCH" =~ ^(main|master|development)$ ]]; then
   log "Korunan branch, cikis"
   exit 0
 fi

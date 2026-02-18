@@ -149,12 +149,8 @@ func (a *App) clearAllRooms() {
 			continue
 		}
 		roomDir := filepath.Join(roomsDir, e.Name())
-		if err := os.Remove(filepath.Join(roomDir, "messages.json")); err != nil && !os.IsNotExist(err) {
-			log.Printf("[STARTUP] Failed to remove messages.json in %s: %v", e.Name(), err)
-		}
-		if err := os.Remove(filepath.Join(roomDir, "agents.json")); err != nil && !os.IsNotExist(err) {
-			log.Printf("[STARTUP] Failed to remove agents.json in %s: %v", e.Name(), err)
-		}
+		removeIfExists(roomDir, "messages.json", e.Name())
+		removeIfExists(roomDir, "agents.json", e.Name())
 		log.Printf("[STARTUP] Cleared room: %s", e.Name())
 	}
 }
@@ -533,5 +529,12 @@ func (a *App) GetAgents(chatDir string) map[string]watcher.Agent {
 // WatchChatDir starts watching a chat directory
 func (a *App) WatchChatDir(chatDir string) error {
 	return a.watcher.WatchDir(chatDir)
+}
+
+// removeIfExists removes a file, logging non-NotExist errors.
+func removeIfExists(dir, fileName, roomName string) {
+	if err := os.Remove(filepath.Join(dir, fileName)); err != nil && !os.IsNotExist(err) {
+		log.Printf("[STARTUP] Failed to remove %s in %s: %v", fileName, roomName, err)
+	}
 }
 

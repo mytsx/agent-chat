@@ -16,7 +16,7 @@
         ]
       }
     ],
-      "Notification": [
+    "Notification": [
       {
         "matcher": "",
         "hooks": [
