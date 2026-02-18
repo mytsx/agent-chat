@@ -41,7 +41,7 @@ func TestValidateName(t *testing.T) {
 		{"null byte", "agent\x00name", true},
 		{"newline", "agent\nname", true},
 		{"tab", "agent\tname", true},
-		{"leading dot", ".hidden", false},
+		{"leading dot", ".hidden", true},
 		{"colon", "foo:bar", true},
 		{"semicolon", "foo;bar", true},
 		{"angle bracket", "foo<bar>", true},

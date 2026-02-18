@@ -19,5 +19,8 @@ func ValidateName(name string) error {
 	if strings.Contains(name, "..") {
 		return fmt.Errorf("invalid name %q: '..' not allowed", name)
 	}
+	if strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid name %q: leading dot not allowed", name)
+	}
 	return nil
 }

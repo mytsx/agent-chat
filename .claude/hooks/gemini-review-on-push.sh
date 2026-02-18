@@ -46,7 +46,7 @@ fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 # Detect GitHub repo from push URLs (origin fetch URL might be GitLab)
-REPO=$(git remote get-url --push --all origin 2>/dev/null | grep -o 'github\.com[:/][^.]*' | sed 's|github\.com[:/]||' | head -1)
+REPO=$(git remote get-url --push --all origin 2>/dev/null | grep -o 'github\.com[:/].*' | sed -e 's|github\.com[:/]||' -e 's/\.git$//' | head -1)
 log "REPO=$REPO"
 if [ -z "$REPO" ]; then
   log "GitHub repo bulunamadi, cikis"

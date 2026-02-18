@@ -247,11 +247,11 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			fmt.Fprintf(&sb, "[%s] %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s\n", ts, sanitize(msg.Content))
 		} else if msg.To == "all" {
-			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, msg.From, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, sanitize(msg.From), sanitize(msg.Content))
 		} else {
-			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, msg.From, msg.To, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.Content))
 		}
 		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
@@ -296,15 +296,15 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 	h.logger.Printf("list_agents: room=%q count=%d", roomLabel, len(agents))
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", roomLabel, len(agents))
+	fmt.Fprintf(&sb, "\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", sanitize(roomLabel), len(agents))
 	for name, info := range agents {
 		marker := ""
 		if name == agentName {
 			marker = " (sen)"
 		}
-		fmt.Fprintf(&sb, "  \u2022 %s%s", name, marker)
+		fmt.Fprintf(&sb, "  \u2022 %s%s", sanitize(name), marker)
 		if info.Role != "" {
-			fmt.Fprintf(&sb, " - %s", info.Role)
+			fmt.Fprintf(&sb, " - %s", sanitize(info.Role))
 		}
 		joined := strings.Split(info.JoinedAt, "T")[0]
 		fmt.Fprintf(&sb, "\n    Katılım: %s\n", joined)
@@ -409,13 +409,13 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			fmt.Fprintf(&sb, "[%s] SYSTEM: %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] SYSTEM: %s\n", ts, sanitize(msg.Content))
 		} else {
 			contentPreview := msg.Content
 			if len(contentPreview) > 100 {
 				contentPreview = contentPreview[:100]
 			}
-			fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, msg.From, msg.To, contentPreview)
+			fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
 		}
 		sb.WriteString("\n")
 	}
@@ -519,6 +519,63 @@ func (h *toolHandlers) listRooms(_ context.Context, _ mcp.CallToolRequest) (*mcp
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// sanitize strips ANSI escape sequences and control characters from untrusted
+// text to prevent terminal injection when tool output is displayed.
+func sanitize(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		b := s[i]
+		// Strip ESC sequences (CSI, OSC, etc.)
+		if b == 0x1b && i+1 < len(s) {
+			next := s[i+1]
+			if next == '[' {
+				// CSI: skip until 0x40-0x7E terminator
+				i += 2
+				for i < len(s) && (s[i] < 0x40 || s[i] > 0x7E) {
+					i++
+				}
+				if i < len(s) {
+					i++ // skip terminator
+				}
+				continue
+			}
+			if next == ']' {
+				// OSC: skip until ST (ESC\ or BEL)
+				i += 2
+				for i < len(s) {
+					if s[i] == 0x07 { // BEL
+						i++
+						break
+					}
+					if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+			// Other ESC sequences: skip ESC + next byte
+			i += 2
+			continue
+		}
+		// Allow tab, newline, carriage return; strip other control chars
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			i++
+			continue
+		}
+		if b == 0x7F { // DEL
+			i++
+			continue
+		}
+		sb.WriteByte(b)
+		i++
+	}
+	return sb.String()
 }
 
 // parseTimestamp extracts HH:MM:SS from an ISO timestamp string.
