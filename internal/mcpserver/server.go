@@ -58,7 +58,7 @@ func setupLogger(chatDir string) *log.Logger {
 	logDir := filepath.Dir(chatDir)
 	logPath := filepath.Join(logDir, "mcp-server.log")
 
-	os.MkdirAll(logDir, 0755)
+	os.MkdirAll(logDir, 0700)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return log.New(os.Stderr, "[MCP] ", log.LstdFlags|log.Lshortfile)

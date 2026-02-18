@@ -32,7 +32,7 @@ func EnsureMCPServerBinary(binaryData []byte, dataDir string) error {
 
 	log.Println("Installing MCP server binary...")
 
-	if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(binPath), 0700); err != nil {
 		return err
 	}
 

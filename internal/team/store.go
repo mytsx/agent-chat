@@ -42,7 +42,7 @@ type Store struct {
 
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(dataDir, 0700)
 	fp := filepath.Join(dataDir, "teams.json")
 
 	s := &Store{
@@ -122,7 +122,7 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	}
 
 	// Create chat directory
-	os.MkdirAll(chatDir, 0755)
+	os.MkdirAll(chatDir, 0700)
 
 	return t, nil
 }

@@ -15,6 +15,15 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+const (
+	// maxMessagesInRoom is the threshold at which old messages are pruned.
+	maxMessagesInRoom = 500
+	// truncateToMessages is the number of messages retained after pruning.
+	truncateToMessages = 300
+	// maxFieldLength caps free-text fields (role, content) to prevent abuse.
+	maxFieldLength = 32000
+)
+
 // toolHandlers holds all MCP tool handler functions.
 type toolHandlers struct {
 	storage *Storage
@@ -38,6 +47,9 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 	}
 	if err := validation.ValidateName(room); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(role) > maxFieldLength {
+		return mcp.NewToolResultError(fmt.Sprintf("role too long: %d chars, max %d", len(role), maxFieldLength)), nil
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", agentName, role, room)
@@ -121,6 +133,9 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	if err := validation.ValidateName(room); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if len(content) > maxFieldLength {
+		return mcp.NewToolResultError(fmt.Sprintf("content too long: %d chars, max %d", len(content), maxFieldLength)), nil
+	}
 
 	h.logger.Printf("send_message: from=%q to=%q room=%q priority=%s expects_reply=%v contentLen=%d",
 		fromAgent, toAgent, room, priority, expectsReply, len(content))
@@ -150,10 +165,10 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	}
 	messages = append(messages, msg)
 
-	// Truncate if messages exceed 500, keep last 300
-	if len(messages) > 500 {
+	// Truncate if messages exceed threshold, keep most recent
+	if len(messages) > maxMessagesInRoom {
 		originalLen := len(messages)
-		messages = messages[len(messages)-300:]
+		messages = messages[len(messages)-truncateToMessages:]
 		h.logger.Printf("send_message: truncated messages from %d to %d", originalLen, len(messages))
 	}
 
@@ -220,28 +235,28 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	}
 
 	totalCount := len(filtered)
-	var result string
+	var sb strings.Builder
 
 	if limit > 0 && len(filtered) > limit {
 		filtered = filtered[len(filtered)-limit:]
-		result = fmt.Sprintf("\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
+		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
 	} else {
-		result = fmt.Sprintf("\U0001f4ec %d mesaj:\n\n", len(filtered))
+		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj:\n\n", len(filtered))
 	}
 
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			result += fmt.Sprintf("[%s] %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s\n", ts, msg.Content)
 		} else if msg.To == "all" {
-			result += fmt.Sprintf("[%s] %s \u2192 HERKESE: %s\n", ts, msg.From, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, msg.From, msg.Content)
 		} else {
-			result += fmt.Sprintf("[%s] %s \u2192 %s: %s\n", ts, msg.From, msg.To, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, msg.From, msg.To, msg.Content)
 		}
-		result += fmt.Sprintf("  (ID: %d)\n\n", msg.ID)
+		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -280,21 +295,22 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 
 	h.logger.Printf("list_agents: room=%q count=%d", roomLabel, len(agents))
 
-	result := fmt.Sprintf("\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", roomLabel, len(agents))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", roomLabel, len(agents))
 	for name, info := range agents {
 		marker := ""
 		if name == agentName {
 			marker = " (sen)"
 		}
-		result += fmt.Sprintf("  \u2022 %s%s", name, marker)
+		fmt.Fprintf(&sb, "  \u2022 %s%s", name, marker)
 		if info.Role != "" {
-			result += fmt.Sprintf(" - %s", info.Role)
+			fmt.Fprintf(&sb, " - %s", info.Role)
 		}
 		joined := strings.Split(info.JoinedAt, "T")[0]
-		result += fmt.Sprintf("\n    Katılım: %s\n", joined)
+		fmt.Fprintf(&sb, "\n    Katılım: %s\n", joined)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -381,30 +397,30 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	}
 
 	totalCount := len(filtered)
-	var result string
+	var sb strings.Builder
 
 	if limit > 0 && len(filtered) > limit {
 		filtered = filtered[len(filtered)-limit:]
-		result = fmt.Sprintf("\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
+		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
 	} else {
-		result = fmt.Sprintf("\U0001f4ec %d mesaj (tümü):\n\n", len(filtered))
+		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj (tümü):\n\n", len(filtered))
 	}
 
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			result += fmt.Sprintf("[%s] SYSTEM: %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] SYSTEM: %s\n", ts, msg.Content)
 		} else {
 			contentPreview := msg.Content
 			if len(contentPreview) > 100 {
 				contentPreview = contentPreview[:100]
 			}
-			result += fmt.Sprintf("[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, msg.From, msg.To, contentPreview)
+			fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, msg.From, msg.To, contentPreview)
 		}
-		result += "\n"
+		sb.WriteString("\n")
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -492,16 +508,17 @@ func (h *toolHandlers) listRooms(_ context.Context, _ mcp.CallToolRequest) (*mcp
 		return rooms[i].Name < rooms[j].Name
 	})
 
-	result := fmt.Sprintf("\U0001f3e0 Mevcut odalar (%d):\n\n", len(rooms))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\U0001f3e0 Mevcut odalar (%d):\n\n", len(rooms))
 	for _, r := range rooms {
 		defaultMarker := ""
 		if r.Name == h.storage.defaultRoom {
 			defaultMarker = " (varsayılan)"
 		}
-		result += fmt.Sprintf("  \u2022 %s%s - %d agent, %d mesaj\n", r.Name, defaultMarker, r.Agents, r.Messages)
+		fmt.Fprintf(&sb, "  \u2022 %s%s - %d agent, %d mesaj\n", r.Name, defaultMarker, r.Agents, r.Messages)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 // parseTimestamp extracts HH:MM:SS from an ISO timestamp string.

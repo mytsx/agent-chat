@@ -49,7 +49,7 @@ func (a *App) startup(ctx context.Context) {
 	// Data directory
 	homeDir, _ := os.UserHomeDir()
 	a.dataDir = filepath.Join(homeDir, ".agent-chat")
-	os.MkdirAll(a.dataDir, 0755)
+	os.MkdirAll(a.dataDir, 0700)
 
 	// Initialize PTY manager
 	a.ptyManager = ptymgr.NewManager(func(sessionID string, data []byte) {
@@ -120,7 +120,7 @@ func (a *App) watchExistingTeams() {
 				teamName = "default"
 			}
 			roomDir := filepath.Join(t.ChatDir, teamName)
-			os.MkdirAll(roomDir, 0755)
+			os.MkdirAll(roomDir, 0700)
 			a.watcher.WatchDir(roomDir)
 		}
 	}
@@ -203,7 +203,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// Ensure room dir is watched
 	if a.watcher != nil {
-		os.MkdirAll(roomDir, 0755)
+		os.MkdirAll(roomDir, 0700)
 		a.watcher.WatchDir(roomDir)
 	}
 
@@ -427,7 +427,7 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 	// Start watching this team's chat directory (room-specific)
 	if a.watcher != nil {
 		roomDir := filepath.Join(t.ChatDir, name)
-		os.MkdirAll(roomDir, 0755)
+		os.MkdirAll(roomDir, 0700)
 		a.watcher.WatchDir(roomDir)
 	}
 

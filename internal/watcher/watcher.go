@@ -66,7 +66,7 @@ func New(onMessages MessageHandler, onAgents AgentHandler) (*Watcher, error) {
 // WatchDir starts watching a chat directory
 func (w *Watcher) WatchDir(chatDir string) error {
 	// Ensure directory exists
-	os.MkdirAll(chatDir, 0755)
+	os.MkdirAll(chatDir, 0700)
 
 	w.mu.Lock()
 	if _, exists := w.dirs[chatDir]; !exists {
