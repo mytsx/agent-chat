@@ -275,7 +275,7 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	// Close old terminal (unregisters from orchestrator)
 	if err := a.CloseTerminal(sessionID); err != nil {
-		log.Printf("[RESTART] Failed to close old session %s: %v", shortID(sessionID), err)
+		log.Printf("[RESTART] Failed to close old session %s: %v", ptymgr.ShortID(sessionID), err)
 	}
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
@@ -335,7 +335,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	}
 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
-		cliType, agentName, shortID(sessionID), len(composed))
+		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
 
 	switch cliType {
 	default:
@@ -535,10 +535,3 @@ func (a *App) WatchChatDir(chatDir string) error {
 	return a.watcher.WatchDir(chatDir)
 }
 
-// shortID safely returns the first 8 characters of a session ID for logging.
-func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}

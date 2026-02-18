@@ -214,7 +214,7 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 			preview = preview[:120]
 		}
 		log.Printf("[PTY-WRITE] session=%s cli=%s agent=%s len=%d hex=%s",
-			shortID(sessionID), session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
+			ShortID(sessionID), session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
 	}
 
 	_, err := session.PTY.Write(data)
@@ -344,8 +344,8 @@ func (m *Manager) CloseAll() {
 	}
 }
 
-// shortID safely returns the first 8 characters of a session ID for logging.
-func shortID(id string) string {
+// ShortID safely returns the first 8 characters of a session ID for logging.
+func ShortID(id string) string {
 	if len(id) <= 8 {
 		return id
 	}

@@ -471,11 +471,11 @@ func TestRegisterUnregister_ThreadSafety(t *testing.T) {
 	o.mu.Lock()
 	finalCount := len(o.agentSessions["/rooms/team1"])
 	o.mu.Unlock()
-	// Half unregistered (25), half new registered (25), plus remaining original odd (25) = 75
-	expected := goroutines/2 + goroutines
-	_ = expected // exact count depends on timing, just verify no panic/deadlock
-	if finalCount == 0 {
-		t.Error("should have some agents registered")
+	// Half unregistered (25 even), half new registered (25 odd). Original odd agents (25) remain.
+	// Expected: 25 (original odd) + 25 (new odd) = 50.
+	expected := goroutines
+	if finalCount != expected {
+		t.Errorf("expected %d agents, got %d", expected, finalCount)
 	}
 }
 

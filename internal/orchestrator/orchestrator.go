@@ -88,7 +88,7 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 		o.agentSessions[chatDir] = make(map[string]string)
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
-	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, shortID(sessionID))
+	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, ptymgr.ShortID(sessionID))
 }
 
 // UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state
@@ -157,7 +157,7 @@ func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
 
 	session := o.ptyManager.GetSession(sessionID)
 	if session == nil {
-		log.Printf("[ORCH] sendToTerminal: session not found id=%s", shortID(sessionID))
+		log.Printf("[ORCH] sendToTerminal: session not found id=%s", ptymgr.ShortID(sessionID))
 		return
 	}
 
@@ -225,7 +225,7 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 	} else {
 		prompt = fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
 	}
-	log.Printf("[ORCH] Notifying agent=%s session=%s", agentName, shortID(sessionID))
+	log.Printf("[ORCH] Notifying agent=%s session=%s", agentName, ptymgr.ShortID(sessionID))
 	o.sendToTerminal(sessionID, prompt)
 }
 
@@ -313,13 +313,6 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
 	}
 }
 
-// shortID safely returns the first 8 characters of a session ID for logging.
-func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
-}
 
 // mapKeys returns the keys of a map as a slice (for logging)
 func mapKeys[K comparable, V any](m map[K]V) []K {
