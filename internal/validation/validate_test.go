@@ -20,6 +20,9 @@ func TestValidateName(t *testing.T) {
 		{"single char", "a", false},
 		{"50 chars exactly", strings.Repeat("a", 50), false},
 		{"mixed valid chars", "Agent_1 Team-2", false},
+		{"dot in name", "api.v2", false},
+		{"version style", "release-1.0", false},
+		{"file style", "file.txt", false},
 
 		// Reject: path traversal
 		{"path traversal unix", "../../etc/passwd", true},
@@ -38,7 +41,7 @@ func TestValidateName(t *testing.T) {
 		{"null byte", "agent\x00name", true},
 		{"newline", "agent\nname", true},
 		{"tab", "agent\tname", true},
-		{"dot", "file.txt", true},
+		{"leading dot", ".hidden", false},
 		{"colon", "foo:bar", true},
 		{"semicolon", "foo;bar", true},
 		{"angle bracket", "foo<bar>", true},
