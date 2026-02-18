@@ -119,7 +119,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   restartTerminal: async (teamID, sessionID) => {
     const teamSessions = get().sessions[teamID] ?? [];
     const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
-    if (!oldSession) throw new Error("Session not found");
+    if (!oldSession) {
+      console.error(`[restartTerminal] session ${sessionID} not found in team ${teamID}`);
+      throw new Error("Session not found");
+    }
 
     const newSessionID = await RestartTerminal(sessionID);
 

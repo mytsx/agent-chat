@@ -87,7 +87,7 @@ export default function TerminalGrid() {
               cliType={s.cliType}
               isFocused={s.sessionID === focusedSessionID}
               onToggleFocus={() => toggleFocusSession(s.sessionID)}
-              onRestart={() => restartTerminal(s.teamID, s.sessionID)}
+              onRestart={() => restartTerminal(s.teamID, s.sessionID).catch(err => console.error("[restart] failed:", err))}
             />
           </div>
         ))}
@@ -104,7 +104,7 @@ export default function TerminalGrid() {
           cliType={slot.session.cliType}
           isFocused={false}
           onToggleFocus={() => toggleFocusSession(slot.session.sessionID)}
-          onRestart={() => restartTerminal(slot.session.teamID, slot.session.sessionID)}
+          onRestart={() => restartTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[restart] failed:", err))}
         />
       );
     }
@@ -137,7 +137,7 @@ export default function TerminalGrid() {
                 isFocused={false}
                 onToggleFocus={() => toggleFocusSession(s.sessionID)}
                 onRemove={() => removeTerminal(team.id, s.sessionID)}
-                onRestart={() => restartTerminal(team.id, s.sessionID)}
+                onRestart={() => restartTerminal(team.id, s.sessionID).catch(err => console.error("[restart] failed:", err))}
               />
             </Panel>
           </React.Fragment>
