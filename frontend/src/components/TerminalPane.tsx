@@ -142,7 +142,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         {cliType && cliType !== "shell" && (
           <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
         )}
-        <div className="terminal-header-actions">
+        <div
+          className="terminal-header-actions"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
           {onRestart && (
             <button
               type="button"

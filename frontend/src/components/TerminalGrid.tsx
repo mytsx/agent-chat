@@ -298,6 +298,7 @@ export default function TerminalGrid() {
             compactType={null}
             preventCollision={false}
             draggableHandle=".terminal-header"
+            draggableCancel=".terminal-header-actions,.terminal-header-actions *,button,input,textarea,select,a"
             resizeHandles={["se", "s", "e"]}
             onLayoutChange={handleCustomLayoutChange}
           >
@@ -309,7 +310,11 @@ export default function TerminalGrid() {
                   cliType={s.cliType}
                   isFocused={false}
                   onToggleFocus={() => toggleFocusSession(s.sessionID)}
-                  onRemove={() => removeTerminal(team.id, s.sessionID)}
+                  onRemove={() =>
+                    removeTerminal(team.id, s.sessionID).catch((err) =>
+                      console.error("[remove] failed:", err)
+                    )
+                  }
                   onRestart={() => restartTerminal(team.id, s.sessionID).catch(err => console.error("[restart] failed:", err))}
                 />
               </div>

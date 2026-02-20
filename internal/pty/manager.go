@@ -260,6 +260,23 @@ func (m *Manager) Resize(sessionID string, cols, rows uint16) error {
 	})
 }
 
+func gracefulExitCommand(cliType string) string {
+	switch strings.ToLower(strings.TrimSpace(cliType)) {
+	case "claude":
+		return "/exit\r"
+	case "gemini":
+		return "/quit\r"
+	case "copilot":
+		return "/exit\r"
+	case "codex":
+		return "/exit\r"
+	case "shell":
+		return "exit\r"
+	default:
+		return ""
+	}
+}
+
 // Close closes a PTY session
 func (m *Manager) Close(sessionID string) error {
 	m.mu.Lock()
@@ -271,14 +288,32 @@ func (m *Manager) Close(sessionID string) error {
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
 
-	// Close PTY file descriptor
-	session.PTY.Close()
-
-	// Kill process
-	if session.Cmd.Process != nil {
-		session.Cmd.Process.Kill()
+	// Ask the CLI to exit itself first for clean shutdown.
+	if exitCmd := gracefulExitCommand(session.CLIType); exitCmd != "" && session.PTY != nil {
+		if _, err := session.PTY.Write([]byte(exitCmd)); err != nil {
+			log.Printf("[PTY-CLOSE] graceful exit write failed session=%s cli=%s: %v",
+				ShortID(session.ID), session.CLIType, err)
+		} else {
+			time.Sleep(250 * time.Millisecond)
+		}
 	}
-	session.Cmd.Wait()
+
+	// Close PTY file descriptor to stop IO loop.
+	if session.PTY != nil {
+		_ = session.PTY.Close()
+	}
+
+	// Terminate only this terminal's command/process group.
+	if err := terminateCommandTree(session.Cmd, 2*time.Second); err != nil {
+		log.Printf("[PTY-CLOSE] force terminate failed session=%s cli=%s: %v",
+			ShortID(session.ID), session.CLIType, err)
+	}
+
+	// Prevent read goroutine leaks.
+	select {
+	case <-session.done:
+	case <-time.After(1 * time.Second):
+	}
 
 	return nil
 }
