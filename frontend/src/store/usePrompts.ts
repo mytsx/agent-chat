@@ -43,7 +43,8 @@ export const usePrompts = create<PromptsState>((set) => ({
     try {
       const prompts = await ListPrompts();
       set({ prompts: prompts || [], loading: false });
-    } catch {
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("Failed to load prompts:", e);
       set({ loading: false });
     }
   },

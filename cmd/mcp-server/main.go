@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"desktop/internal/mcpserver"
+	"desktop/internal/validation"
 )
 
 func main() {
@@ -16,6 +17,10 @@ func main() {
 	defaultRoom := os.Getenv("AGENT_CHAT_ROOM")
 	if defaultRoom == "" {
 		defaultRoom = "default"
+	}
+	if err := validation.ValidateName(defaultRoom); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid AGENT_CHAT_ROOM: %v\n", err)
+		os.Exit(1)
 	}
 
 	app := mcpserver.NewMCPServerApp(chatDir, defaultRoom)

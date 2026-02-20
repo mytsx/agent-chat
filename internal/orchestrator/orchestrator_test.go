@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -421,5 +422,269 @@ func TestMapKeys_Empty(t *testing.T) {
 	keys := mapKeys(m)
 	if len(keys) != 0 {
 		t.Errorf("expected 0 keys, got %d", len(keys))
+	}
+}
+
+// ══════════════════════════════════════════════
+// Integration Tests
+// ══════════════════════════════════════════════
+
+// TestRegisterUnregister_ThreadSafety tests concurrent Register/Unregister calls.
+func TestRegisterUnregister_ThreadSafety(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	const goroutines = 50
+	var wg sync.WaitGroup
+
+	// Concurrently register agents
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			agent := fmt.Sprintf("agent-%d", idx)
+			session := fmt.Sprintf("sess-%d", idx)
+			o.RegisterAgent("/rooms/team1", agent, session)
+		}(i)
+	}
+	wg.Wait()
+
+	o.mu.Lock()
+	count := len(o.agentSessions["/rooms/team1"])
+	o.mu.Unlock()
+	if count != goroutines {
+		t.Errorf("expected %d agents, got %d", goroutines, count)
+	}
+
+	// Concurrently unregister half, register new half
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			if idx%2 == 0 {
+				o.UnregisterAgent("/rooms/team1", fmt.Sprintf("agent-%d", idx))
+			} else {
+				o.RegisterAgent("/rooms/team1", fmt.Sprintf("new-agent-%d", idx), fmt.Sprintf("new-sess-%d", idx))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	o.mu.Lock()
+	finalCount := len(o.agentSessions["/rooms/team1"])
+	o.mu.Unlock()
+	// Half unregistered (25 even), half new registered (25 odd). Original odd agents (25) remain.
+	// Expected: 25 (original odd) + 25 (new odd) = 50.
+	expected := goroutines
+	if finalCount != expected {
+		t.Errorf("expected %d agents, got %d", expected, finalCount)
+	}
+}
+
+// TestProcessMessage_DirectMessageFlow tests direct message routing end-to-end.
+func TestProcessMessage_DirectMessageFlow(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "alice", "sess-alice")
+	o.RegisterAgent("/rooms/t", "bob", "sess-bob")
+	o.RegisterAgent("/rooms/t", "charlie", "sess-charlie")
+
+	// Alice sends direct message to Bob
+	msg := watcher.Message{From: "alice", To: "bob", Content: "Hey Bob, can you review my PR?", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-bob" {
+		t.Errorf("expected notification to bob, got session %s", (*sent)[0].sessionID)
+	}
+	if strings.Contains((*sent)[0].text, "Broadcast") {
+		t.Error("direct message should not say Broadcast")
+	}
+	if !strings.Contains((*sent)[0].text, "alice") {
+		t.Error("notification should mention sender alice")
+	}
+}
+
+// TestProcessMessage_BroadcastMessageFlow tests broadcast routing end-to-end.
+func TestProcessMessage_BroadcastMessageFlow(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "alice", "sess-alice")
+	o.RegisterAgent("/rooms/t", "bob", "sess-bob")
+	o.RegisterAgent("/rooms/t", "charlie", "sess-charlie")
+
+	// Alice broadcasts
+	msg := watcher.Message{From: "alice", To: "all", Content: "Deployment complete!", Type: "broadcast", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 2 {
+		t.Fatalf("expected 2 notifications (bob + charlie), got %d", len(*sent))
+	}
+
+	// Verify sender not notified
+	for _, s := range *sent {
+		if s.sessionID == "sess-alice" {
+			t.Error("sender alice should not be notified")
+		}
+		if !strings.Contains(s.text, "Broadcast") {
+			t.Errorf("broadcast notification should contain 'Broadcast', got: %s", s.text)
+		}
+	}
+}
+
+// TestRaceCondition_RegisterUnregisterDuringProcessMessage tests concurrent
+// Register/Unregister calls while ProcessMessage is executing.
+func TestRaceCondition_RegisterUnregisterDuringProcessMessage(t *testing.T) {
+	o, _ := newTestOrchestrator()
+
+	// Pre-register some agents
+	for i := 0; i < 10; i++ {
+		o.RegisterAgent("/rooms/t", fmt.Sprintf("agent-%d", i), fmt.Sprintf("sess-%d", i))
+	}
+
+	var wg sync.WaitGroup
+	const iterations = 100
+
+	// Concurrent ProcessMessage calls
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			msg := watcher.Message{
+				From:         fmt.Sprintf("agent-%d", idx%10),
+				To:           "all",
+				Content:      fmt.Sprintf("Message %d from agent", idx),
+				Type:         "broadcast",
+				ExpectsReply: true,
+			}
+			o.ProcessMessage("/rooms/t", msg)
+		}(i)
+	}
+
+	// Concurrent Register/Unregister while ProcessMessage runs
+	wg.Add(iterations)
+	for i := 0; i < iterations; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			agent := fmt.Sprintf("dynamic-agent-%d", idx)
+			o.RegisterAgent("/rooms/t", agent, fmt.Sprintf("dyn-sess-%d", idx))
+			o.UnregisterAgent("/rooms/t", agent)
+		}(i)
+	}
+
+	wg.Wait()
+	// Test passes if no panic, deadlock, or race detected (use -race flag)
+}
+
+// TestCooldown_IntegrationFlow tests the full cooldown→batch→flush cycle.
+func TestCooldown_IntegrationFlow(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "bob", "sess-bob")
+
+	// First message: immediate notification
+	msg1 := watcher.Message{From: "alice", To: "bob", Content: "Hey bob, first message", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg1)
+
+	if len(*sent) != 1 {
+		t.Fatalf("first message should send immediately, got %d", len(*sent))
+	}
+
+	// Second message within cooldown: should be batched
+	msg2 := watcher.Message{From: "charlie", To: "bob", Content: "Hey bob, second message", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg2)
+
+	if len(*sent) != 1 {
+		t.Errorf("second message within cooldown should be batched, sent=%d", len(*sent))
+	}
+
+	// Third message within cooldown: also batched
+	msg3 := watcher.Message{From: "alice", To: "bob", Content: "Hey bob, third message", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg3)
+
+	if len(*sent) != 1 {
+		t.Errorf("third message within cooldown should be batched, sent=%d", len(*sent))
+	}
+
+	// Verify pending messages accumulated
+	key := "/rooms/t:bob"
+	o.mu.Lock()
+	pendingCount := len(o.pendingMsgs[key])
+	hasTimer := o.pendingTimers[key] != nil
+	if hasTimer {
+		o.pendingTimers[key].Stop()
+	}
+	o.mu.Unlock()
+
+	if pendingCount != 2 {
+		t.Errorf("expected 2 pending messages, got %d", pendingCount)
+	}
+	if !hasTimer {
+		t.Error("expected a flush timer to be running")
+	}
+
+	// Manual flush (simulating timer expiry)
+	o.flushPending("/rooms/t", "bob", "sess-bob")
+
+	if len(*sent) != 2 {
+		t.Errorf("after flush, expected 2 total sent notifications, got %d", len(*sent))
+	}
+
+	// Verify flush notification mentions count and senders
+	flushed := (*sent)[1]
+	if !strings.Contains(flushed.text, "2 new messages") {
+		t.Errorf("flush notification should mention '2 new messages', got: %s", flushed.text)
+	}
+	if !strings.Contains(flushed.text, "alice") || !strings.Contains(flushed.text, "charlie") {
+		t.Errorf("flush notification should mention both senders, got: %s", flushed.text)
+	}
+}
+
+// TestUnregisterAgent_CleansCooldownState verifies that unregistering cleans up cooldown data.
+func TestUnregisterAgent_CleansCooldownState(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
+
+	// Create cooldown state
+	key := "/rooms/t:agent-1"
+	o.mu.Lock()
+	o.lastNotified[key] = time.Now()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.pendingTimers[key] = time.AfterFunc(10*time.Second, func() {})
+	o.mu.Unlock()
+
+	// Unregister should clean everything
+	o.UnregisterAgent("/rooms/t", "agent-1")
+
+	o.mu.Lock()
+	_, hasLN := o.lastNotified[key]
+	_, hasPM := o.pendingMsgs[key]
+	_, hasPT := o.pendingTimers[key]
+	o.mu.Unlock()
+
+	if hasLN {
+		t.Error("lastNotified should be cleaned up after unregister")
+	}
+	if hasPM {
+		t.Error("pendingMsgs should be cleaned up after unregister")
+	}
+	if hasPT {
+		t.Error("pendingTimers should be cleaned up after unregister")
+	}
+}
+
+// TestMultipleChatDirs verifies agents in different chatDirs are isolated.
+func TestMultipleChatDirs(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "alice", "sess-alice-1")
+	o.RegisterAgent("/rooms/team2", "alice", "sess-alice-2")
+	o.RegisterAgent("/rooms/team1", "bob", "sess-bob-1")
+
+	// Message in team1 should only notify team1 agents
+	msg := watcher.Message{From: "alice", To: "all", Content: "Team1 update", Type: "broadcast", ExpectsReply: true}
+	o.ProcessMessage("/rooms/team1", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected 1 notification (bob in team1), got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-bob-1" {
+		t.Errorf("expected notification to bob in team1, got %s", (*sent)[0].sessionID)
 	}
 }

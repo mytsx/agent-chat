@@ -23,6 +23,8 @@ type PTYSession struct {
 	TeamID         string
 	AgentName      string
 	CLIType        string
+	WorkDir        string // stored for restart
+	PromptID       string // stored for restart
 	done           chan struct{}
 	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
 }
@@ -91,6 +93,7 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdNam
 		TeamID:    teamID,
 		AgentName: agentName,
 		CLIType:   cliType,
+		WorkDir:   workDir,
 		done:      make(chan struct{}),
 	}
 
@@ -211,7 +214,7 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 			preview = preview[:120]
 		}
 		log.Printf("[PTY-WRITE] session=%s cli=%s agent=%s len=%d hex=%s",
-			sessionID[:8], session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
+			ShortID(sessionID), session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
 	}
 
 	_, err := session.PTY.Write(data)
@@ -339,4 +342,12 @@ func (m *Manager) CloseAll() {
 	for _, id := range ids {
 		m.Close(id)
 	}
+}
+
+// ShortID safely returns the first 8 characters of a session ID for logging.
+func ShortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }

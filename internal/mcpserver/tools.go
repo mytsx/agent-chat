@@ -10,7 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"desktop/internal/validation"
+
 	"github.com/mark3labs/mcp-go/mcp"
+)
+
+const (
+	// maxMessagesInRoom is the threshold at which old messages are pruned.
+	maxMessagesInRoom = 500
+	// truncateToMessages is the number of messages retained after pruning.
+	truncateToMessages = 300
+	// maxFieldLength caps free-text fields (role, content) to prevent abuse.
+	maxFieldLength = 32000
 )
 
 // toolHandlers holds all MCP tool handler functions.
@@ -30,6 +41,16 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 	}
 	role := request.GetString("role", "")
 	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(agentName); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(role) > maxFieldLength {
+		return mcp.NewToolResultError(fmt.Sprintf("role too long: %d chars, max %d", len(role), maxFieldLength)), nil
+	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", agentName, role, room)
 
@@ -101,6 +122,21 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	priority := request.GetString("priority", "normal")
 	room := request.GetString("room", "")
 
+	if err := validation.ValidateName(fromAgent); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if toAgent != "all" {
+		if err := validation.ValidateName(toAgent); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(content) > maxFieldLength {
+		return mcp.NewToolResultError(fmt.Sprintf("content too long: %d chars, max %d", len(content), maxFieldLength)), nil
+	}
+
 	h.logger.Printf("send_message: from=%q to=%q room=%q priority=%s expects_reply=%v contentLen=%d",
 		fromAgent, toAgent, room, priority, expectsReply, len(content))
 
@@ -128,6 +164,14 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 		Priority:     priority,
 	}
 	messages = append(messages, msg)
+
+	// Truncate if messages exceed threshold, keep most recent
+	if len(messages) > maxMessagesInRoom {
+		originalLen := len(messages)
+		messages = messages[len(messages)-truncateToMessages:]
+		h.logger.Printf("send_message: truncated messages from %d to %d", originalLen, len(messages))
+	}
+
 	if err := h.storage.SaveMessages(messages, room); err != nil {
 		h.logger.Printf("send_message: SaveMessages error: %v", err)
 		return mcp.NewToolResultError(err.Error()), nil
@@ -150,6 +194,13 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	unreadOnly := request.GetBool("unread_only", true)
 	limit := request.GetInt("limit", 10)
 	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(agentName); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	h.logger.Printf("read_messages: agent=%q since_id=%d unread_only=%v limit=%d room=%q",
 		agentName, sinceID, unreadOnly, limit, room)
@@ -184,33 +235,40 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	}
 
 	totalCount := len(filtered)
-	var result string
+	var sb strings.Builder
 
 	if limit > 0 && len(filtered) > limit {
 		filtered = filtered[len(filtered)-limit:]
-		result = fmt.Sprintf("\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
+		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
 	} else {
-		result = fmt.Sprintf("\U0001f4ec %d mesaj:\n\n", len(filtered))
+		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj:\n\n", len(filtered))
 	}
 
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			result += fmt.Sprintf("[%s] %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s\n", ts, sanitize(msg.Content))
 		} else if msg.To == "all" {
-			result += fmt.Sprintf("[%s] %s \u2192 HERKESE: %s\n", ts, msg.From, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, sanitize(msg.From), sanitize(msg.Content))
 		} else {
-			result += fmt.Sprintf("[%s] %s \u2192 %s: %s\n", ts, msg.From, msg.To, msg.Content)
+			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.Content))
 		}
-		result += fmt.Sprintf("  (ID: %d)\n\n", msg.ID)
+		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(agentName); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	h.logger.Printf("list_agents: agent=%q room=%q", agentName, room)
 
@@ -237,21 +295,22 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 
 	h.logger.Printf("list_agents: room=%q count=%d", roomLabel, len(agents))
 
-	result := fmt.Sprintf("\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", roomLabel, len(agents))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\U0001f465 '%s' odasındaki agent'lar (%d):\n\n", sanitize(roomLabel), len(agents))
 	for name, info := range agents {
 		marker := ""
 		if name == agentName {
 			marker = " (sen)"
 		}
-		result += fmt.Sprintf("  \u2022 %s%s", name, marker)
+		fmt.Fprintf(&sb, "  \u2022 %s%s", sanitize(name), marker)
 		if info.Role != "" {
-			result += fmt.Sprintf(" - %s", info.Role)
+			fmt.Fprintf(&sb, " - %s", sanitize(info.Role))
 		}
 		joined := strings.Split(info.JoinedAt, "T")[0]
-		result += fmt.Sprintf("\n    Katılım: %s\n", joined)
+		fmt.Fprintf(&sb, "\n    Katılım: %s\n", joined)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -260,6 +319,13 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(agentName); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	h.logger.Printf("leave_room: agent=%q room=%q", agentName, room)
 
@@ -290,6 +356,10 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 func (h *toolHandlers) clearRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	room := request.GetString("room", "")
 
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	h.logger.Printf("clear_room: room=%q", room)
 
 	h.storage.SaveMessages([]Message{}, room)
@@ -307,6 +377,10 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	limit := request.GetInt("limit", 15)
 	room := request.GetString("room", "")
 
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	h.logger.Printf("read_all_messages: since_id=%d limit=%d room=%q", sinceID, limit, room)
 
 	messages, _ := h.storage.GetMessages(room)
@@ -323,35 +397,42 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	}
 
 	totalCount := len(filtered)
-	var result string
+	var sb strings.Builder
 
 	if limit > 0 && len(filtered) > limit {
 		filtered = filtered[len(filtered)-limit:]
-		result = fmt.Sprintf("\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
+		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
 	} else {
-		result = fmt.Sprintf("\U0001f4ec %d mesaj (tümü):\n\n", len(filtered))
+		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj (tümü):\n\n", len(filtered))
 	}
 
 	for _, msg := range filtered {
 		ts := parseTimestamp(msg.Timestamp)
 		if msg.Type == "system" {
-			result += fmt.Sprintf("[%s] SYSTEM: %s\n", ts, msg.Content)
+			fmt.Fprintf(&sb, "[%s] SYSTEM: %s\n", ts, sanitize(msg.Content))
 		} else {
 			contentPreview := msg.Content
 			if len(contentPreview) > 100 {
 				contentPreview = contentPreview[:100]
 			}
-			result += fmt.Sprintf("[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, msg.From, msg.To, contentPreview)
+			fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
 		}
-		result += "\n"
+		sb.WriteString("\n")
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(agentName); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	if agentName != "" {
 		agents, _ := h.storage.GetAgents(room)
@@ -427,16 +508,74 @@ func (h *toolHandlers) listRooms(_ context.Context, _ mcp.CallToolRequest) (*mcp
 		return rooms[i].Name < rooms[j].Name
 	})
 
-	result := fmt.Sprintf("\U0001f3e0 Mevcut odalar (%d):\n\n", len(rooms))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "\U0001f3e0 Mevcut odalar (%d):\n\n", len(rooms))
 	for _, r := range rooms {
 		defaultMarker := ""
 		if r.Name == h.storage.defaultRoom {
 			defaultMarker = " (varsayılan)"
 		}
-		result += fmt.Sprintf("  \u2022 %s%s - %d agent, %d mesaj\n", r.Name, defaultMarker, r.Agents, r.Messages)
+		fmt.Fprintf(&sb, "  \u2022 %s%s - %d agent, %d mesaj\n", r.Name, defaultMarker, r.Agents, r.Messages)
 	}
 
-	return mcp.NewToolResultText(result), nil
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// sanitize strips ANSI escape sequences and control characters from untrusted
+// text to prevent terminal injection when tool output is displayed.
+func sanitize(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		b := s[i]
+		// Strip ESC sequences (CSI, OSC, etc.)
+		if b == 0x1b && i+1 < len(s) {
+			next := s[i+1]
+			if next == '[' {
+				// CSI: skip until 0x40-0x7E terminator
+				i += 2
+				for i < len(s) && (s[i] < 0x40 || s[i] > 0x7E) {
+					i++
+				}
+				if i < len(s) {
+					i++ // skip terminator
+				}
+				continue
+			}
+			if next == ']' {
+				// OSC: skip until ST (ESC\ or BEL)
+				i += 2
+				for i < len(s) {
+					if s[i] == 0x07 { // BEL
+						i++
+						break
+					}
+					if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+			// Other ESC sequences: skip ESC + next byte
+			i += 2
+			continue
+		}
+		// Allow tab, newline, carriage return; strip other control chars
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			i++
+			continue
+		}
+		if b == 0x7F { // DEL
+			i++
+			continue
+		}
+		sb.WriteByte(b)
+		i++
+	}
+	return sb.String()
 }
 
 // parseTimestamp extracts HH:MM:SS from an ISO timestamp string.

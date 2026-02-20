@@ -82,18 +82,30 @@ func New(ptyManager *ptymgr.Manager) *Orchestrator {
 
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
+	o.mu.Lock()
 	if o.agentSessions[chatDir] == nil {
 		o.agentSessions[chatDir] = make(map[string]string)
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
-	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, sessionID[:8])
+	o.mu.Unlock()
+	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, ptymgr.ShortID(sessionID))
 }
 
-// UnregisterAgent removes an agent's PTY session mapping
+// UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state
 func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	if sessions, ok := o.agentSessions[chatDir]; ok {
 		delete(sessions, agentName)
 	}
+	// F007: Clean up cooldown tracking for this agent
+	key := chatDir + ":" + agentName
+	delete(o.lastNotified, key)
+	if timer, ok := o.pendingTimers[key]; ok {
+		timer.Stop()
+		delete(o.pendingTimers, key)
+	}
+	delete(o.pendingMsgs, key)
 }
 
 // AnalyzeMessage analyzes a message and decides what action to take
@@ -145,7 +157,7 @@ func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
 
 	session := o.ptyManager.GetSession(sessionID)
 	if session == nil {
-		log.Printf("[ORCH] sendToTerminal: session not found id=%s", sessionID[:8])
+		log.Printf("[ORCH] sendToTerminal: session not found id=%s", ptymgr.ShortID(sessionID))
 		return
 	}
 
@@ -197,8 +209,9 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 				o.flushPending(chatDir, agentName, sessionID)
 			})
 		}
+		pendingCount := len(o.pendingMsgs[key])
 		o.mu.Unlock()
-		log.Printf("[ORCH] Notification batched for agent=%s (cooldown), pending=%d", agentName, len(o.pendingMsgs[key]))
+		log.Printf("[ORCH] Notification batched for agent=%s (cooldown), pending=%d", agentName, pendingCount)
 		return
 	}
 
@@ -212,7 +225,7 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 	} else {
 		prompt = fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
 	}
-	log.Printf("[ORCH] Notifying agent=%s session=%s", agentName, sessionID[:8])
+	log.Printf("[ORCH] Notifying agent=%s session=%s", agentName, ptymgr.ShortID(sessionID))
 	o.sendToTerminal(sessionID, prompt)
 }
 
@@ -265,31 +278,41 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
 		return
 	}
 
+	// Snapshot sessions under lock to avoid race with RegisterAgent/UnregisterAgent
+	o.mu.Lock()
 	sessions := o.agentSessions[chatDir]
 	if sessions == nil {
 		log.Printf("[ORCH] No agent sessions for chatDir=%s (registered dirs: %v)", chatDir, mapKeys(o.agentSessions))
+		o.mu.Unlock()
 		return
 	}
+	// Copy map so we can release the lock before sending notifications
+	sessionsCopy := make(map[string]string, len(sessions))
+	for k, v := range sessions {
+		sessionsCopy[k] = v
+	}
+	o.mu.Unlock()
 
-	log.Printf("[ORCH] Registered agents for chatDir: %v", mapKeys(sessions))
+	log.Printf("[ORCH] Registered agents for chatDir: %v", mapKeys(sessionsCopy))
 
 	fromAgent := msg.From
 	toAgent := msg.To
 
 	if toAgent == "all" {
 		// Broadcast - notify everyone except sender
-		for agent, sessionID := range sessions {
+		for agent, sessionID := range sessionsCopy {
 			if agent != fromAgent {
 				o.notifyAgent(chatDir, agent, sessionID, fromAgent, true)
 			}
 		}
-	} else if sessionID, ok := sessions[toAgent]; ok {
+	} else if sessionID, ok := sessionsCopy[toAgent]; ok {
 		// Direct message - notify target only
 		o.notifyAgent(chatDir, toAgent, sessionID, fromAgent, false)
 	} else {
 		log.Printf("[ORCH] Target agent=%s not found in sessions", toAgent)
 	}
 }
+
 
 // mapKeys returns the keys of a map as a slice (for logging)
 func mapKeys[K comparable, V any](m map[K]V) []K {

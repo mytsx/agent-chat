@@ -33,7 +33,7 @@ type Store struct {
 
 // NewStore creates a new prompt store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(dataDir, 0700)
 	fp := filepath.Join(dataDir, "prompts.json")
 
 	s := &Store{

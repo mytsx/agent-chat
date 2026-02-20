@@ -37,7 +37,7 @@ type Storage struct {
 
 // NewStorage creates a new Storage instance.
 func NewStorage(chatDir, defaultRoom string) *Storage {
-	os.MkdirAll(chatDir, 0755)
+	os.MkdirAll(chatDir, 0700)
 	return &Storage{
 		chatDir:     chatDir,
 		defaultRoom: defaultRoom,
@@ -51,7 +51,7 @@ func (s *Storage) getRoomDir(room string) string {
 		roomName = s.defaultRoom
 	}
 	dir := filepath.Join(s.chatDir, roomName)
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 	return dir
 }
 

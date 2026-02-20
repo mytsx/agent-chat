@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"desktop/internal/validation"
+
 	"github.com/google/uuid"
 )
 
@@ -40,7 +42,7 @@ type Store struct {
 
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(dataDir, 0700)
 	fp := filepath.Join(dataDir, "teams.json")
 
 	s := &Store{
@@ -94,6 +96,10 @@ func (s *Store) Get(id string) (Team, error) {
 
 // Create creates a new team
 func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if err := validation.ValidateName(name); err != nil {
+		return Team{}, fmt.Errorf("invalid team name: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -116,13 +122,17 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	}
 
 	// Create chat directory
-	os.MkdirAll(chatDir, 0755)
+	os.MkdirAll(chatDir, 0700)
 
 	return t, nil
 }
 
 // Update updates a team
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if err := validation.ValidateName(name); err != nil {
+		return Team{}, fmt.Errorf("invalid team name: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

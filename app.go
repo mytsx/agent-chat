@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/team"
+	"desktop/internal/validation"
 	"desktop/internal/watcher"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -47,7 +49,7 @@ func (a *App) startup(ctx context.Context) {
 	// Data directory
 	homeDir, _ := os.UserHomeDir()
 	a.dataDir = filepath.Join(homeDir, ".agent-chat")
-	os.MkdirAll(a.dataDir, 0755)
+	os.MkdirAll(a.dataDir, 0700)
 
 	// Initialize PTY manager
 	a.ptyManager = ptymgr.NewManager(func(sessionID string, data []byte) {
@@ -99,7 +101,7 @@ func (a *App) startup(ctx context.Context) {
 	if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
 		log.Printf("MCP server setup error: %v", err)
 	} else {
-		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot} {
+		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot, cli.CLICodex} {
 			cli.ResetMCPConfig(ct, a.dataDir)
 		}
 	}
@@ -118,7 +120,7 @@ func (a *App) watchExistingTeams() {
 				teamName = "default"
 			}
 			roomDir := filepath.Join(t.ChatDir, teamName)
-			os.MkdirAll(roomDir, 0755)
+			os.MkdirAll(roomDir, 0700)
 			a.watcher.WatchDir(roomDir)
 		}
 	}
@@ -147,8 +149,8 @@ func (a *App) clearAllRooms() {
 			continue
 		}
 		roomDir := filepath.Join(roomsDir, e.Name())
-		os.Remove(filepath.Join(roomDir, "messages.json"))
-		os.Remove(filepath.Join(roomDir, "agents.json"))
+		removeIfExists(roomDir, "messages.json", e.Name())
+		removeIfExists(roomDir, "agents.json", e.Name())
 		log.Printf("[STARTUP] Cleared room: %s", e.Name())
 	}
 }
@@ -171,6 +173,10 @@ func (a *App) OpenDirectoryDialog() (string, error) {
 
 // CreateTerminal creates a new terminal and returns its session ID
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string) (string, error) {
+	if err := validation.ValidateName(agentName); err != nil {
+		return "", fmt.Errorf("invalid agent name: %w", err)
+	}
+
 	// Get team info for chat dir and room name
 	var chatDir string
 	var teamName string
@@ -193,7 +199,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// Ensure room dir is watched
 	if a.watcher != nil {
-		os.MkdirAll(roomDir, 0755)
+		os.MkdirAll(roomDir, 0700)
 		a.watcher.WatchDir(roomDir)
 	}
 
@@ -232,6 +238,11 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", err
 	}
 
+	// Store promptID for restart
+	if s := a.ptyManager.GetSession(sessionID); s != nil {
+		s.PromptID = promptID
+	}
+
 	// Register agent session for orchestrator (using roomDir)
 	if agentName != "" {
 		a.orchestrator.RegisterAgent(roomDir, agentName, sessionID)
@@ -241,6 +252,32 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID)
 
 	return sessionID, nil
+}
+
+// RestartTerminal closes a terminal and creates a new one with the same parameters.
+// Returns the new session ID.
+func (a *App) RestartTerminal(sessionID string) (string, error) {
+	session := a.ptyManager.GetSession(sessionID)
+	if session == nil {
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Capture restart params before closing
+	teamID := session.TeamID
+	agentName := session.AgentName
+	workDir := session.WorkDir
+	cliType := session.CLIType
+	promptID := session.PromptID
+
+	// Close old terminal (unregisters from orchestrator)
+	if err := a.CloseTerminal(sessionID); err != nil {
+		log.Printf("[RESTART] Failed to close old session %s: %v", ptymgr.ShortID(sessionID), err)
+	}
+
+	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
+
+	// Create new terminal with same params
+	return a.CreateTerminal(teamID, agentName, workDir, cliType, promptID)
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it
@@ -294,7 +331,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	}
 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
-		cliType, agentName, sessionID[:8], len(composed))
+		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
 
 	switch cliType {
 	default:
@@ -386,7 +423,7 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 	// Start watching this team's chat directory (room-specific)
 	if a.watcher != nil {
 		roomDir := filepath.Join(t.ChatDir, name)
-		os.MkdirAll(roomDir, 0755)
+		os.MkdirAll(roomDir, 0700)
 		a.watcher.WatchDir(roomDir)
 	}
 
@@ -492,4 +529,11 @@ func (a *App) GetAgents(chatDir string) map[string]watcher.Agent {
 // WatchChatDir starts watching a chat directory
 func (a *App) WatchChatDir(chatDir string) error {
 	return a.watcher.WatchDir(chatDir)
+}
+
+// removeIfExists removes a file, logging non-NotExist errors.
+func removeIfExists(dir, fileName, roomName string) {
+	if err := os.Remove(filepath.Join(dir, fileName)); err != nil && !os.IsNotExist(err) {
+		log.Printf("[STARTUP] Failed to remove %s in %s: %v", fileName, roomName, err)
+	}
 }

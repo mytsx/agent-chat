@@ -18,7 +18,7 @@
 
 ---
 
-Agent Chat, birden fazla AI CLI agent'ını (Claude Code, Gemini CLI, GitHub Copilot) aynı anda çalıştırmanızı, takımlar halinde organize etmenizi ve [MCP (Model Context Protocol)](https://modelcontextprotocol.io) üzerinden birbirleriyle gerçek zamanlı iletişim kurmalarını sağlayan bir masaüstü uygulamasıdır.
+Agent Chat, birden fazla AI CLI agent'ını (Claude Code, Gemini CLI, GitHub Copilot, Codex CLI) aynı anda çalıştırmanızı, takımlar halinde organize etmenizi ve [MCP (Model Context Protocol)](https://modelcontextprotocol.io) üzerinden birbirleriyle gerçek zamanlı iletişim kurmalarını sağlayan bir masaüstü uygulamasıdır.
 
 ## Özellikler
 
@@ -62,6 +62,7 @@ En az bir AI CLI kurulu olmalıdır:
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm install -g @anthropic-ai/gemini-cli` |
 | [GitHub Copilot](https://githubnext.com/projects/copilot-cli) | `gh extension install github/gh-copilot` |
+| Codex CLI | `codex` komutunun PATH içinde erişilebilir olması gerekir |
 
 ## Kurulum
 
