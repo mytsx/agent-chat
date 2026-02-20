@@ -1,6 +1,6 @@
 // Go struct mirrors
 
-export type CLIType = "claude" | "gemini" | "copilot" | "shell";
+export type CLIType = "claude" | "gemini" | "copilot" | "codex" | "shell";
 
 export interface CLIInfo {
   type: CLIType;

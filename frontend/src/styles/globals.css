@@ -472,6 +472,11 @@ html, body, #root {
   color: #58a6ff;
 }
 
+.cli-badge-codex {
+  background: rgba(247, 163, 43, 0.15);
+  color: #f7a32b;
+}
+
 /* ============ Setup Wizard ============ */
 .setup-wizard {
   display: flex;

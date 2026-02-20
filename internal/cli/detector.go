@@ -67,6 +67,7 @@ const (
 	CLIClaude  CLIType = "claude"
 	CLIGemini  CLIType = "gemini"
 	CLICopilot CLIType = "copilot"
+	CLICodex   CLIType = "codex"
 	CLIShell   CLIType = "shell"
 )
 
@@ -87,6 +88,7 @@ var knownCLIs = []struct {
 	{CLIClaude, "Claude Code", "claude"},
 	{CLIGemini, "Gemini CLI", "gemini"},
 	{CLICopilot, "GitHub Copilot", "copilot"},
+	{CLICodex, "Codex CLI", "codex"},
 }
 
 // DetectAll checks which AI CLIs are available on the system
@@ -128,6 +130,8 @@ func GetCommand(cliType CLIType) (string, []string) {
 		return "gemini", []string{"--approval-mode", "yolo"}
 	case CLICopilot:
 		return "copilot", []string{"--yolo"}
+	case CLICodex:
+		return "codex", []string{"--dangerously-bypass-approvals-and-sandbox"}
 	default:
 		shell := os.Getenv("SHELL")
 		if shell == "" {

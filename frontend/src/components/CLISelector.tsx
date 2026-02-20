@@ -4,6 +4,7 @@ const CLI_COLORS: Record<CLIType, string> = {
   claude: "#d2a8ff",
   gemini: "#56d364",
   copilot: "#58a6ff",
+  codex: "#f7a32b",
   shell: "#8b949e",
 };
 

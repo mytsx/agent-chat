@@ -101,7 +101,7 @@ func (a *App) startup(ctx context.Context) {
 	if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
 		log.Printf("MCP server setup error: %v", err)
 	} else {
-		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot} {
+		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot, cli.CLICodex} {
 			cli.ResetMCPConfig(ct, a.dataDir)
 		}
 	}
@@ -537,4 +537,3 @@ func removeIfExists(dir, fileName, roomName string) {
 		log.Printf("[STARTUP] Failed to remove %s in %s: %v", fileName, roomName, err)
 	}
 }
-

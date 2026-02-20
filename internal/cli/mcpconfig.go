@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // mcpServerEntry is the config entry for agent-chat MCP server
@@ -28,6 +30,9 @@ func EnsureMCPConfig(cliType CLIType, dataDir, roomName string) error {
 	if cliType == CLIShell {
 		return nil
 	}
+	if cliType == CLICodex {
+		return upsertCodexMCPConfig(dataDir, roomName)
+	}
 
 	configPath, err := getConfigPath(cliType)
 	if err != nil {
@@ -45,6 +50,9 @@ func EnsureMCPConfig(cliType CLIType, dataDir, roomName string) error {
 func ResetMCPConfig(cliType CLIType, dataDir string) error {
 	if cliType == CLIShell {
 		return nil
+	}
+	if cliType == CLICodex {
+		return upsertCodexMCPConfig(dataDir, "")
 	}
 
 	configPath, err := getConfigPath(cliType)
@@ -83,9 +91,52 @@ func getConfigPath(cliType CLIType) (string, error) {
 		return filepath.Join(home, ".gemini", "settings.json"), nil
 	case CLICopilot:
 		return filepath.Join(home, ".copilot", "mcp-config.json"), nil
+	case CLICodex:
+		return filepath.Join(home, ".codex", "config.toml"), nil
 	default:
 		return "", fmt.Errorf("unsupported CLI type: %s", cliType)
 	}
+}
+
+// upsertCodexMCPConfig updates Codex MCP config using `codex mcp` subcommands.
+// Codex uses TOML config; we delegate write/merge behavior to Codex CLI itself.
+func upsertCodexMCPConfig(dataDir, roomName string) error {
+	if _, err := exec.LookPath("codex"); err != nil {
+		// Codex is not installed; nothing to configure.
+		return nil
+	}
+
+	envs := []string{"AGENT_CHAT_DIR=" + GetRoomsDir(dataDir)}
+	if roomName != "" {
+		envs = append(envs, "AGENT_CHAT_ROOM="+roomName)
+	}
+
+	// Best-effort cleanup of previous entry.
+	removeCmd := exec.Command("codex", "mcp", "remove", "agent-chat")
+	if out, err := removeCmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		msgLower := strings.ToLower(msg)
+		if msg != "" && !strings.Contains(msgLower, "not found") && !strings.Contains(msgLower, "no mcp server") {
+			log.Printf("codex mcp remove warning: %s", msg)
+		}
+	}
+
+	args := []string{"mcp", "add", "agent-chat"}
+	for _, envKV := range envs {
+		args = append(args, "--env", envKV)
+	}
+	args = append(args, "--", GetMCPBinaryPath(dataDir))
+
+	addCmd := exec.Command("codex", args...)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("codex mcp add failed: %w: %s", err, msg)
+		}
+		return fmt.Errorf("codex mcp add failed: %w", err)
+	}
+
+	return nil
 }
 
 func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) error {
