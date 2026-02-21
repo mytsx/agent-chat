@@ -81,7 +81,15 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   removeTerminal: async (teamID, sessionID) => {
-    await CloseTerminal(sessionID);
+    try {
+      await CloseTerminal(sessionID);
+    } catch (e) {
+      const msg = String(e).toLowerCase();
+      // Backend side can already have evicted a dead session.
+      if (!msg.includes("session not found")) {
+        throw e;
+      }
+    }
     set((s) => ({
       sessions: {
         ...s.sessions,

@@ -230,49 +230,184 @@ html, body, #root {
   color: var(--text-muted);
 }
 
+.custom-layout-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.custom-layout-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px;
+}
+
+.custom-grid-layout {
+  min-height: 100%;
+}
+
+.custom-grid-item {
+  width: 100%;
+  height: 100%;
+}
+
+.custom-grid-layout .react-grid-item.react-grid-placeholder {
+  background: rgba(88, 166, 255, 0.2);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.custom-grid-layout .react-grid-item > .react-resizable-handle::after {
+  border-color: rgba(201, 209, 217, 0.7);
+}
+
+.custom-layout-empty {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+}
+
+.custom-setup-drawer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: min(390px, 42vw);
+  height: min(580px, 74vh);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  z-index: 40;
+  overflow: hidden;
+}
+
+.custom-setup-drawer .setup-wizard {
+  height: 100%;
+}
+
 /* ============ Grid Selector ============ */
 .grid-selector {
   display: flex;
-  gap: 4px;
-}
-
-.grid-option {
-  display: flex;
   align-items: center;
-  gap: 4px;
-  background: none;
+  gap: 8px;
+  padding: 2px 6px;
+  background: var(--bg-primary);
   border: 1px solid var(--border);
-  color: var(--text-secondary);
-  padding: 3px 6px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
+}
+
+.grid-layout-display {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.grid-layout-label {
   font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
 }
 
-.grid-option:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
-.grid-option-active {
-  border-color: var(--accent);
-  background: rgba(88, 166, 255, 0.1);
+.grid-layout-value {
+  font-size: 12px;
+  font-weight: 600;
   color: var(--accent);
 }
 
-.grid-cell {
-  background: var(--text-muted);
-  border-radius: 1px;
-  opacity: 0.5;
+.grid-stepper-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.grid-option-active .grid-cell {
-  background: var(--accent);
-  opacity: 0.8;
+.grid-stepper {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
 }
 
-.grid-label {
+.grid-stepper-label {
   font-size: 10px;
+  color: var(--text-muted);
+  padding: 0 4px;
+  user-select: none;
+}
+
+.grid-stepper-btn {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+
+.grid-stepper-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.grid-stepper-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.grid-stepper-input {
+  width: 36px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  text-align: center;
+  font-size: 11px;
+  outline: none;
+  padding: 0 2px;
+}
+
+.grid-stepper-input:focus {
+  border-color: var(--accent);
+}
+
+.grid-stepper-sep {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.grid-custom-btn {
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.grid-custom-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.grid-custom-btn-active {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--accent);
 }
 
 /* ============ Terminal Pane ============ */
