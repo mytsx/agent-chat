@@ -34,12 +34,16 @@ codesign --remove-signature "$APP_PATH" 2>/dev/null || true
 
 # Sign nested frameworks and dylibs first (depth-first)
 echo "==> Signing nested components..."
-find "$APP_PATH/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.framework" \) 2>/dev/null | while read -r item; do
-    codesign --force --sign "$DEVELOPER_ID" \
-        --options runtime \
-        --timestamp \
-        "$item"
-done
+if [ -d "$APP_PATH/Contents/Frameworks" ]; then
+    find "$APP_PATH/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.framework" \) | while read -r item; do
+        codesign --force --sign "$DEVELOPER_ID" \
+            --options runtime \
+            --timestamp \
+            "$item"
+    done || true
+else
+    echo "    No Frameworks directory, skipping."
+fi
 
 # Sign the main executable
 echo "==> Signing main executable..."
