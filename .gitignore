@@ -38,6 +38,11 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 
+# Distribution
+dist/
+*.dmg
+*.zip
+
 # Temp files
 *.log
 *.tmp
