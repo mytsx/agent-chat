@@ -2,7 +2,7 @@
 
 # Agent Chat
 
-**AI agent'larınızı tek bir masaüstü uygulamasından yönetin ve birbirleriyle konuşturn.**
+**AI agent'larınızı tek bir masaüstü uygulamasından yönetin ve birbirleriyle konuşturun.**
 
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Wails](https://img.shields.io/badge/Wails-v2-412991?logo=webassembly&logoColor=white)](https://wails.io)
@@ -30,23 +30,26 @@ Agent Chat, birden fazla AI CLI agent'ını (Claude Code, Gemini CLI, GitHub Cop
 - **Otomatik MCP Kurulumu** — MCP server binary'si uygulama içine gömülüdür, kurulum gerektirmez
 - **Akıllı Orkestrasyon** — Mesaj analizi, bildirim cooldown'u ve toplu iletim
 - **Gerçek Zamanlı Terminal** — xterm.js ile native PTY terminal yönetimi
+- **WebSocket Hub** — In-memory room state, periyodik persist, gerçek zamanlı event broadcasting
 
 ## Nasıl Çalışır
 
 ```mermaid
 graph LR
-    A[Claude Code] -->|stdio JSON-RPC| M[MCP Server]
-    B[Gemini CLI] -->|stdio JSON-RPC| M
-    C[Copilot CLI] -->|stdio JSON-RPC| M
-    M -->|JSON dosya yazma| D[(rooms/*.json)]
-    D -->|fsnotify| W[File Watcher]
-    W --> O[Orchestrator]
+    A[Claude Code] -->|stdio JSON-RPC| M1[MCP Server]
+    B[Gemini CLI] -->|stdio JSON-RPC| M2[MCP Server]
+    C[Copilot CLI] -->|stdio JSON-RPC| M3[MCP Server]
+    M1 -->|WebSocket| H[Hub Server]
+    M2 -->|WebSocket| H
+    M3 -->|WebSocket| H
+    H -->|Event broadcast| D[Desktop App]
+    D -->|Orchestrator| O[PTY Manager]
     O -->|PTY write| A
     O -->|PTY write| B
     O -->|PTY write| C
 ```
 
-Her AI CLI kendi MCP server instance'ını stdio üzerinden başlatır. Agent'lar `join_room`, `send_message`, `read_messages` gibi MCP araçlarıyla iletişim kurar. Masaüstü uygulaması dosya değişikliklerini izleyerek mesajları ilgili terminallere yönlendirir.
+Her AI CLI kendi MCP server instance'ını stdio üzerinden başlatır. MCP server'lar WebSocket ile hub'a bağlanır. Agent'lar `join_room`, `send_message`, `read_messages` gibi MCP araçlarıyla iletişim kurar. Hub event'leri masaüstü uygulamasına broadcast eder, orchestrator mesajları ilgili terminallere yönlendirir.
 
 ## Kurulum
 
@@ -102,13 +105,15 @@ Uygulamaya gömülü MCP server 9 araç sunar:
 
 ```
 agent-chat/
-├── app.go                      # Wails uygulama giriş noktası
-├── cmd/mcp-server/             # Gömülü MCP server binary'si
+├── app.go                      # Wails uygulama, hub process yönetimi
+├── cmd/mcp-server/             # Dual-mode binary (--hub veya stdio MCP)
 ├── internal/
-│   ├── mcpserver/              # MCP araç implementasyonları + JSON storage
+│   ├── hub/                    # WebSocket hub server (room state, persistence)
+│   ├── hubclient/              # WebSocket client (RPC, event handling)
+│   ├── types/                  # Shared tipler (Message, Agent, Protocol)
+│   ├── mcpserver/              # MCP araç implementasyonları (hub RPC wrapper)
 │   ├── orchestrator/           # Mesaj yönlendirme, cooldown, batching
 │   ├── pty/                    # PTY yönetimi, CLI başlatma
-│   ├── watcher/                # fsnotify dosya izleme
 │   ├── cli/                    # CLI tespiti, MCP config yönetimi
 │   ├── team/                   # Takım CRUD operasyonları
 │   └── prompt/                 # Prompt şablonlama
@@ -121,15 +126,14 @@ agent-chat/
 
 ```
 ~/.agent-chat/
-├── mcp-server-bin              # Gömülü binary (otomatik çıkarılır)
-├── mcp-server.log              # MCP server logları
+├── mcp-server-bin              # Dual-mode binary (otomatik çıkarılır)
+├── mcp-server.log              # Hub ve MCP server logları
+├── hub.port                    # Hub WebSocket port numarası
 ├── teams.json                  # Takım konfigürasyonları
 ├── prompts.json                # Prompt kütüphanesi
 ├── global_prompt.md            # Global sistem prompt'u
-└── rooms/
-    └── {takım-adı}/
-        ├── messages.json       # Mesajlar (flock ile kilitli)
-        └── agents.json         # Aktif agent'lar
+└── hub-state/
+    └── {oda-adı}.json          # Persist edilen room state (mesajlar + agent'lar)
 ```
 
 </details>
@@ -137,10 +141,10 @@ agent-chat/
 <details>
 <summary><strong>Teknik Detaylar</strong></summary>
 
-- **İletişim:** Stdio JSON-RPC (ağ sunucusu yok)
-- **Persistence:** JSON dosyaları + `syscall.Flock` (POSIX file locking)
+- **Hub:** WebSocket server (`gorilla/websocket`), in-memory room state + 5sn periyodik persist
+- **MCP İletişim:** Stdio JSON-RPC (agent ↔ MCP server), WebSocket (MCP server ↔ hub)
+- **Persistence:** Atomic write (temp file + rename), JSON format
 - **Terminal:** Native PTY allocation (`github.com/creack/pty`)
-- **Dosya İzleme:** `fsnotify` ile anlık değişiklik algılama
 - **Prompt Gönderimi:** ANSI bracketed paste mode (`ESC[200~...ESC[201~`)
 - **Agent Temizliği:** 5 dakika idle olan agent'lar otomatik kaldırılır
 - **MCP Config:** Startup'ta global config yazılır, eski per-project override'lar temizlenir
