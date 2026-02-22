@@ -3,19 +3,24 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"desktop/internal/cli"
+	"desktop/internal/hubclient"
 	"desktop/internal/orchestrator"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/team"
+	"desktop/internal/types"
 	"desktop/internal/validation"
-	"desktop/internal/watcher"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -30,7 +35,8 @@ var mcpServerBin []byte
 type App struct {
 	ctx          context.Context
 	ptyManager   *ptymgr.Manager
-	watcher      *watcher.Watcher
+	hubClient    *hubclient.HubClient
+	hubProcess   *os.Process
 	orchestrator *orchestrator.Orchestrator
 	promptStore  *prompt.Store
 	teamStore    *team.Store
@@ -59,29 +65,6 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize orchestrator
 	a.orchestrator = orchestrator.New(a.ptyManager)
 
-	// Initialize file watcher
-	var err error
-	a.watcher, err = watcher.New(
-		func(chatDir string, messages []watcher.Message) {
-			// Emit to frontend
-			runtime.EventsEmit(a.ctx, "messages:new", map[string]interface{}{
-				"chatDir":  chatDir,
-				"messages": messages,
-			})
-			// Process through orchestrator
-			a.orchestrator.HandleNewMessages(chatDir, messages)
-		},
-		func(chatDir string, agents map[string]watcher.Agent) {
-			runtime.EventsEmit(a.ctx, "agents:updated", map[string]interface{}{
-				"chatDir": chatDir,
-				"agents":  agents,
-			})
-		},
-	)
-	if err == nil {
-		a.watcher.Start()
-	}
-
 	// Initialize stores
 	a.promptStore, _ = prompt.NewStore(a.dataDir)
 	a.teamStore, _ = team.NewStore(a.dataDir)
@@ -89,15 +72,7 @@ func (a *App) startup(ctx context.Context) {
 	// Seed prompts from existing files
 	a.seedPrompts()
 
-	// Clear old session data (messages + agents) from all rooms
-	a.clearAllRooms()
-
-	// Watch existing teams' chat directories
-	a.watchExistingTeams()
-
-	// Setup MCP server binary synchronously — must complete before any terminal starts.
-	// This extracts the embedded binary and force-writes MCP config for all CLIs,
-	// ensuring every agent (regardless of working directory) has an up-to-date config.
+	// Setup MCP server binary synchronously
 	if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
 		log.Printf("MCP server setup error: %v", err)
 	} else {
@@ -105,53 +80,209 @@ func (a *App) startup(ctx context.Context) {
 			cli.ResetMCPConfig(ct, a.dataDir)
 		}
 	}
+
+	// Start hub process
+	if err := a.startHub(); err != nil {
+		log.Printf("Hub start error: %v", err)
+		return
+	}
+
+	// Connect to hub
+	if err := a.connectToHub(); err != nil {
+		log.Printf("Hub connect error: %v", err)
+		return
+	}
+
+	// Subscribe to existing teams
+	a.subscribeExistingTeams()
+
+	// Monitor hub process
+	a.monitorHub()
 }
 
-// watchExistingTeams starts file watchers for all previously saved teams
-func (a *App) watchExistingTeams() {
-	if a.watcher == nil {
+// startHub spawns the hub process.
+func (a *App) startHub() error {
+	binPath := cli.GetMCPBinaryPath(a.dataDir)
+
+	// Remove stale port file to prevent connecting to old hub
+	os.Remove(filepath.Join(a.dataDir, "hub.port"))
+
+	cmd := exec.Command(binPath, "--hub")
+	cmd.Env = append(os.Environ(),
+		"AGENT_CHAT_DATA_DIR="+a.dataDir,
+	)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("hub start: %w", err)
+	}
+
+	a.hubProcess = cmd.Process
+	log.Printf("[STARTUP] Hub process started: pid=%d", cmd.Process.Pid)
+
+	// Wait for hub.port file (max 5s)
+	portPath := filepath.Join(a.dataDir, "hub.port")
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(portPath); err == nil {
+			data, _ := os.ReadFile(portPath)
+			log.Printf("[STARTUP] Hub ready on port %s", strings.TrimSpace(string(data)))
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("hub.port not created within 5s")
+}
+
+// connectToHub creates a hub client and connects.
+func (a *App) connectToHub() error {
+	hubAddr, err := hubclient.DiscoverHubAddr(a.dataDir)
+	if err != nil {
+		return err
+	}
+
+	client := hubclient.New(hubAddr, log.New(os.Stderr, "[HUB-CLIENT] ", log.LstdFlags))
+	if err := client.ConnectWithRetry(5); err != nil {
+		return err
+	}
+
+	// Set event handler
+	client.SetEventHandler(func(event types.Event) {
+		a.handleHubEvent(event)
+	})
+
+	// Identify as desktop client
+	client.Identify("desktop", "", "")
+
+	a.hubClient = client
+	log.Printf("[STARTUP] Connected to hub")
+	return nil
+}
+
+// handleHubEvent processes events from the hub.
+func (a *App) handleHubEvent(event types.Event) {
+	switch event.Event {
+	case "message_new":
+		// Parse message from event data
+		var data struct {
+			Message types.Message `json:"message"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			log.Printf("[HUB-EVENT] Failed to parse message_new: %v", err)
+			return
+		}
+
+		// Emit to frontend
+		runtime.EventsEmit(a.ctx, "messages:new", map[string]interface{}{
+			"chatDir":  event.Room,
+			"messages": []types.Message{data.Message},
+		})
+
+		// Process through orchestrator
+		a.orchestrator.ProcessMessage(event.Room, data.Message)
+
+	case "agent_joined", "agent_left":
+		var data struct {
+			AgentName string                  `json:"agent_name"`
+			Agents    map[string]types.Agent  `json:"agents"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			log.Printf("[HUB-EVENT] Failed to parse %s: %v", event.Event, err)
+			return
+		}
+
+		runtime.EventsEmit(a.ctx, "agents:updated", map[string]interface{}{
+			"chatDir": event.Room,
+			"agents":  data.Agents,
+		})
+
+	case "room_cleared":
+		runtime.EventsEmit(a.ctx, "agents:updated", map[string]interface{}{
+			"chatDir": event.Room,
+			"agents":  map[string]types.Agent{},
+		})
+	}
+}
+
+// subscribeExistingTeams subscribes to hub events for all saved teams.
+func (a *App) subscribeExistingTeams() {
+	if a.hubClient == nil {
 		return
 	}
 	teams := a.teamStore.List()
+	var rooms []string
 	for _, t := range teams {
-		if t.ChatDir != "" {
-			teamName := t.Name
-			if teamName == "" {
-				teamName = "default"
-			}
-			roomDir := filepath.Join(t.ChatDir, teamName)
-			os.MkdirAll(roomDir, 0700)
-			a.watcher.WatchDir(roomDir)
+		teamName := t.Name
+		if teamName == "" {
+			teamName = "default"
 		}
+		rooms = append(rooms, teamName)
 	}
+	if len(rooms) > 0 {
+		a.hubClient.Subscribe(rooms)
+	}
+}
+
+// monitorHub watches the hub process and restarts if it crashes.
+func (a *App) monitorHub() {
+	if a.hubProcess == nil {
+		return
+	}
+	go func() {
+		state, err := a.hubProcess.Wait()
+		if err != nil {
+			log.Printf("[HUB-MONITOR] Hub process wait error: %v", err)
+		}
+		if state != nil && !state.Success() {
+			log.Printf("[HUB-MONITOR] Hub crashed (exit=%d), restarting...", state.ExitCode())
+			// Clean up old client
+			if a.hubClient != nil {
+				a.hubClient.Close()
+			}
+			// Restart
+			time.Sleep(500 * time.Millisecond)
+			if err := a.startHub(); err != nil {
+				log.Printf("[HUB-MONITOR] Hub restart failed: %v", err)
+				return
+			}
+			if err := a.connectToHub(); err != nil {
+				log.Printf("[HUB-MONITOR] Hub reconnect failed: %v", err)
+				return
+			}
+			a.subscribeExistingTeams()
+		}
+	}()
 }
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
-	if a.watcher != nil {
-		a.watcher.Stop()
+	// Close hub client
+	if a.hubClient != nil {
+		a.hubClient.Close()
 	}
+
+	// Stop hub process gracefully
+	if a.hubProcess != nil {
+		a.hubProcess.Signal(syscall.SIGTERM)
+		// Wait up to 3s for hub to persist and shut down
+		done := make(chan struct{})
+		go func() {
+			a.hubProcess.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			log.Printf("[SHUTDOWN] Hub process exited gracefully")
+		case <-time.After(3 * time.Second):
+			log.Printf("[SHUTDOWN] Hub process did not exit in 3s, killing")
+			a.hubProcess.Kill()
+		}
+	}
+
+	// Close PTY sessions
 	if a.ptyManager != nil {
 		a.ptyManager.CloseAll()
-	}
-}
-
-// clearAllRooms removes messages.json and agents.json from all room directories
-// so each app launch starts with a clean slate.
-func (a *App) clearAllRooms() {
-	roomsDir := cli.GetRoomsDir(a.dataDir)
-	entries, err := os.ReadDir(roomsDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		roomDir := filepath.Join(roomsDir, e.Name())
-		removeIfExists(roomDir, "messages.json", e.Name())
-		removeIfExists(roomDir, "agents.json", e.Name())
-		log.Printf("[STARTUP] Cleared room: %s", e.Name())
 	}
 }
 
@@ -177,30 +308,21 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
 
-	// Get team info for chat dir and room name
-	var chatDir string
+	// Get team info for room name
 	var teamName string
 	if teamID != "" {
 		t, err := a.teamStore.Get(teamID)
 		if err == nil {
-			chatDir = t.ChatDir
 			teamName = t.Name
 		}
-	}
-	if chatDir == "" {
-		chatDir = cli.GetRoomsDir(a.dataDir)
 	}
 	if teamName == "" {
 		teamName = "default"
 	}
 
-	// Room dir = chatDir/teamName (matches MCP server's _get_room_dir)
-	roomDir := filepath.Join(chatDir, teamName)
-
-	// Ensure room dir is watched
-	if a.watcher != nil {
-		os.MkdirAll(roomDir, 0700)
-		a.watcher.WatchDir(roomDir)
+	// Subscribe to room events
+	if a.hubClient != nil {
+		a.hubClient.Subscribe([]string{teamName})
 	}
 
 	// Ensure MCP server binary is ready and configured for the selected CLI
@@ -218,7 +340,6 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	cmdName, cmdArgs := cli.GetCommand(ct)
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument
-	// (Copilot's Ink TUI doesn't accept programmatic PTY input for submission)
 	if ct == cli.CLICopilot && agentName != "" {
 		composed := a.composeAgentPrompt(teamID, agentName, promptID)
 		if composed != "" {
@@ -228,7 +349,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	env := []string{
-		"AGENT_CHAT_DIR=" + chatDir,
+		"AGENT_CHAT_DATA_DIR=" + a.dataDir,
 		"AGENT_CHAT_ROOM=" + teamName,
 		"TERM=xterm-256color",
 	}
@@ -243,9 +364,9 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		s.PromptID = promptID
 	}
 
-	// Register agent session for orchestrator (using roomDir)
+	// Register agent session for orchestrator (using room name)
 	if agentName != "" {
-		a.orchestrator.RegisterAgent(roomDir, agentName, sessionID)
+		a.orchestrator.RegisterAgent(teamName, agentName, sessionID)
 	}
 
 	// Send startup prompt in background
@@ -255,7 +376,6 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 }
 
 // RestartTerminal closes a terminal and creates a new one with the same parameters.
-// Returns the new session ID.
 func (a *App) RestartTerminal(sessionID string) (string, error) {
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
@@ -276,7 +396,6 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	// Create new terminal with same params
 	return a.CreateTerminal(teamID, agentName, workDir, cliType, promptID)
 }
 
@@ -313,15 +432,13 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 		return
 	}
 
-	// Wait for CLI to become idle (prompt ready) instead of fixed sleep.
-	// First give a minimum startup time, then wait for output to settle.
+	// Wait for CLI to become idle
 	switch cliType {
 	case "gemini":
-		time.Sleep(5 * time.Second) // initial minimum wait
+		time.Sleep(5 * time.Second)
 	default:
 		time.Sleep(3 * time.Second)
 	}
-	// Wait until CLI has been idle for 2s (max 30s total wait)
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
@@ -333,26 +450,21 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
 		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
 
-	switch cliType {
-	default:
-		// Claude/Gemini: bracketed paste prevents newlines from triggering submit
-		const (
-			bracketOpen  = "\x1b[200~"
-			bracketClose = "\x1b[201~"
-		)
-		a.ptyManager.Write(sessionID, []byte(bracketOpen+composed+bracketClose))
-		time.Sleep(200 * time.Millisecond)
-		a.ptyManager.Write(sessionID, []byte("\r"))
-	}
+	// Claude/Gemini: bracketed paste
+	const (
+		bracketOpen  = "\x1b[200~"
+		bracketClose = "\x1b[201~"
+	)
+	a.ptyManager.Write(sessionID, []byte(bracketOpen+composed+bracketClose))
+	time.Sleep(200 * time.Millisecond)
+	a.ptyManager.Write(sessionID, []byte("\r"))
 }
 
 // WriteToTerminal writes data to a terminal
 func (a *App) WriteToTerminal(sessionID, data string) error {
 	session := a.ptyManager.GetSession(sessionID)
 	if session != nil && session.CLIType == "copilot" {
-		// Filter Focus Out events — Copilot's Ink TUI stops processing input
-		// when it thinks the terminal lost focus, which prevents the orchestrator
-		// from delivering notifications to background terminals.
+		// Filter Focus Out events
 		if data == "\x1b[O" {
 			return nil
 		}
@@ -379,8 +491,7 @@ func (a *App) CloseTerminal(sessionID string) error {
 				if teamName == "" {
 					teamName = "default"
 				}
-				roomDir := filepath.Join(t.ChatDir, teamName)
-				a.orchestrator.UnregisterAgent(roomDir, session.AgentName)
+				a.orchestrator.UnregisterAgent(teamName, session.AgentName)
 			}
 		}
 	}
@@ -420,11 +531,9 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 		return team.Team{}, err
 	}
 
-	// Start watching this team's chat directory (room-specific)
-	if a.watcher != nil {
-		roomDir := filepath.Join(t.ChatDir, name)
-		os.MkdirAll(roomDir, 0700)
-		a.watcher.WatchDir(roomDir)
+	// Subscribe to hub events for this team
+	if a.hubClient != nil {
+		a.hubClient.Subscribe([]string{name})
 	}
 
 	return t, nil
@@ -437,15 +546,6 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
-	t, err := a.teamStore.Get(id)
-	if err != nil {
-		return err
-	}
-
-	if a.watcher != nil {
-		a.watcher.UnwatchDir(t.ChatDir)
-	}
-
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 	for _, s := range sessions {
 		a.ptyManager.Close(s.ID)
@@ -508,32 +608,38 @@ func (a *App) SetGlobalPrompt(content string) error {
 	return os.WriteFile(filepath.Join(a.dataDir, "global_prompt.md"), []byte(content), 0644)
 }
 
-// ===================== Watcher Bindings =====================
+// ===================== Hub Bindings =====================
 
-// GetMessages returns all messages from a chat directory
-func (a *App) GetMessages(chatDir string) []watcher.Message {
-	if chatDir == "" {
-		chatDir = cli.GetRoomsDir(a.dataDir)
+// GetMessages returns all messages from a room
+func (a *App) GetMessages(room string) []types.Message {
+	if a.hubClient == nil {
+		return nil
 	}
-	return a.watcher.GetAllMessages(chatDir)
+	msgs, err := a.hubClient.GetMessagesRaw(room)
+	if err != nil {
+		log.Printf("[HUB] GetMessages error for room %s: %v", room, err)
+		return nil
+	}
+	return msgs
 }
 
-// GetAgents returns all agents from a chat directory
-func (a *App) GetAgents(chatDir string) map[string]watcher.Agent {
-	if chatDir == "" {
-		chatDir = cli.GetRoomsDir(a.dataDir)
+// GetAgents returns all agents from a room
+func (a *App) GetAgents(room string) map[string]types.Agent {
+	if a.hubClient == nil {
+		return nil
 	}
-	return a.watcher.GetAllAgents(chatDir)
+	agents, err := a.hubClient.GetAgentsRaw(room)
+	if err != nil {
+		log.Printf("[HUB] GetAgents error for room %s: %v", room, err)
+		return nil
+	}
+	return agents
 }
 
-// WatchChatDir starts watching a chat directory
-func (a *App) WatchChatDir(chatDir string) error {
-	return a.watcher.WatchDir(chatDir)
-}
-
-// removeIfExists removes a file, logging non-NotExist errors.
-func removeIfExists(dir, fileName, roomName string) {
-	if err := os.Remove(filepath.Join(dir, fileName)); err != nil && !os.IsNotExist(err) {
-		log.Printf("[STARTUP] Failed to remove %s in %s: %v", fileName, roomName, err)
+// WatchChatDir subscribes to a room (backward-compatible binding name).
+func (a *App) WatchChatDir(room string) error {
+	if a.hubClient == nil {
+		return fmt.Errorf("hub not connected")
 	}
+	return a.hubClient.Subscribe([]string{room})
 }

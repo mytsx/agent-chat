@@ -3,7 +3,7 @@
 import {prompt} from '../models';
 import {team} from '../models';
 import {cli} from '../models';
-import {watcher} from '../models';
+import {types} from '../models';
 
 export function CloseTerminal(arg1:string):Promise<void>;
 
@@ -19,11 +19,11 @@ export function DeleteTeam(arg1:string):Promise<void>;
 
 export function DetectCLIs():Promise<Array<cli.CLIInfo>>;
 
-export function GetAgents(arg1:string):Promise<Record<string, watcher.Agent>>;
+export function GetAgents(arg1:string):Promise<Record<string, types.Agent>>;
 
 export function GetGlobalPrompt():Promise<string>;
 
-export function GetMessages(arg1:string):Promise<Array<watcher.Message>>;
+export function GetMessages(arg1:string):Promise<Array<types.Message>>;
 
 export function GetPrompt(arg1:string):Promise<prompt.Prompt>;
 

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	ptymgr "desktop/internal/pty"
-	"desktop/internal/watcher"
+	"desktop/internal/types"
 )
 
 const (
@@ -109,7 +109,7 @@ func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 }
 
 // AnalyzeMessage analyzes a message and decides what action to take
-func AnalyzeMessage(msg watcher.Message) AnalysisResult {
+func AnalyzeMessage(msg types.Message) AnalysisResult {
 	content := msg.Content
 	contentLower := strings.ToLower(content)
 	expectsReply := msg.ExpectsReply
@@ -262,7 +262,7 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 }
 
 // ProcessMessage processes a single message and notifies relevant agents
-func (o *Orchestrator) ProcessMessage(chatDir string, msg watcher.Message) {
+func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 	log.Printf("[ORCH] ProcessMessage: chatDir=%s from=%s to=%s type=%s expects_reply=%v content_len=%d",
 		chatDir, msg.From, msg.To, msg.Type, msg.ExpectsReply, len(msg.Content))
 
@@ -324,7 +324,7 @@ func mapKeys[K comparable, V any](m map[K]V) []K {
 }
 
 // HandleNewMessages is the callback for the file watcher
-func (o *Orchestrator) HandleNewMessages(chatDir string, messages []watcher.Message) {
+func (o *Orchestrator) HandleNewMessages(chatDir string, messages []types.Message) {
 	for _, msg := range messages {
 		o.ProcessMessage(chatDir, msg)
 	}

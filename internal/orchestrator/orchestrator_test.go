@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"desktop/internal/watcher"
+	"desktop/internal/types"
 )
 
 // ── Fake PTY types (unused but kept for potential future expansion) ──
@@ -50,7 +50,7 @@ func newTestOrchestrator() (*Orchestrator, *[]sentNotification) {
 // ── AnalyzeMessage tests ──
 
 func TestAnalyzeMessage_NormalNotify(t *testing.T) {
-	msg := watcher.Message{
+	msg := types.Message{
 		Content:      "Backend API deployed successfully",
 		Type:         "direct",
 		ExpectsReply: true,
@@ -76,7 +76,7 @@ func TestAnalyzeMessage_AckSkip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := watcher.Message{Content: tt.content, Type: "direct", ExpectsReply: tt.reply}
+			msg := types.Message{Content: tt.content, Type: "direct", ExpectsReply: tt.reply}
 			r := AnalyzeMessage(msg)
 			if r.Action != tt.wantAction {
 				t.Errorf("%s: want %s, got %s (%s)", tt.name, tt.wantAction, r.Action, r.Reason)
@@ -95,7 +95,7 @@ func TestAnalyzeMessage_QuestionAlwaysNotify(t *testing.T) {
 	}
 	for _, q := range questions {
 		t.Run(q, func(t *testing.T) {
-			msg := watcher.Message{Content: q, Type: "direct", ExpectsReply: false}
+			msg := types.Message{Content: q, Type: "direct", ExpectsReply: false}
 			r := AnalyzeMessage(msg)
 			if r.Action != "notify" {
 				t.Errorf("question %q: want notify, got %s", q, r.Action)
@@ -108,7 +108,7 @@ func TestAnalyzeMessage_QuestionAlwaysNotify(t *testing.T) {
 }
 
 func TestAnalyzeMessage_ExpectsReply(t *testing.T) {
-	msg := watcher.Message{Content: "Deploy the new version", Type: "direct", ExpectsReply: true}
+	msg := types.Message{Content: "Deploy the new version", Type: "direct", ExpectsReply: true}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
 		t.Errorf("expects_reply=true should notify, got %s", r.Action)
@@ -116,7 +116,7 @@ func TestAnalyzeMessage_ExpectsReply(t *testing.T) {
 }
 
 func TestAnalyzeMessage_Informational(t *testing.T) {
-	msg := watcher.Message{Content: "I just deployed the backend to production", Type: "broadcast", ExpectsReply: false}
+	msg := types.Message{Content: "I just deployed the backend to production", Type: "broadcast", ExpectsReply: false}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
 		t.Errorf("informational should notify, got %s", r.Action)
@@ -124,7 +124,7 @@ func TestAnalyzeMessage_Informational(t *testing.T) {
 }
 
 func TestAnalyzeMessage_EmptyContent(t *testing.T) {
-	msg := watcher.Message{Content: "", Type: "direct", ExpectsReply: false}
+	msg := types.Message{Content: "", Type: "direct", ExpectsReply: false}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
 		t.Errorf("empty content should default to notify, got %s", r.Action)
@@ -132,7 +132,7 @@ func TestAnalyzeMessage_EmptyContent(t *testing.T) {
 }
 
 func TestAnalyzeMessage_CodeContent(t *testing.T) {
-	msg := watcher.Message{
+	msg := types.Message{
 		Content:      `func main() { fmt.Println("hello $world"); os.Exit(0) }`,
 		Type:         "direct",
 		ExpectsReply: true,
@@ -176,14 +176,14 @@ func TestUnregisterNonexistent(t *testing.T) {
 func TestProcessMessage_SystemSkipped(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "a1", "sess-11111111")
-	msg := watcher.Message{From: "SYSTEM", To: "all", Content: "agent joined", Type: "system"}
+	msg := types.Message{From: "SYSTEM", To: "all", Content: "agent joined", Type: "system"}
 	o.ProcessMessage("/rooms/t", msg) // should not panic
 }
 
 func TestProcessMessage_AckSkipped(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-11111111")
-	msg := watcher.Message{From: "agent-2", To: "agent-1", Content: "tesekkurler", Type: "direct", ExpectsReply: false}
+	msg := types.Message{From: "agent-2", To: "agent-1", Content: "tesekkurler", Type: "direct", ExpectsReply: false}
 	o.ProcessMessage("/rooms/t", msg)
 
 	o.mu.Lock()
@@ -200,14 +200,14 @@ func TestProcessMessage_AckSkipped(t *testing.T) {
 
 func TestProcessMessage_NoSessionsForDir(t *testing.T) {
 	o, _ := newTestOrchestrator()
-	msg := watcher.Message{From: "a1", To: "a2", Content: "Hello", Type: "direct", ExpectsReply: true}
+	msg := types.Message{From: "a1", To: "a2", Content: "Hello", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/unknown", msg) // should not panic
 }
 
 func TestProcessMessage_DirectTargetNotFound(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-11111111")
-	msg := watcher.Message{From: "agent-1", To: "agent-3", Content: "Hey there?", Type: "direct", ExpectsReply: true}
+	msg := types.Message{From: "agent-1", To: "agent-3", Content: "Hey there?", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg) // should not panic
 }
 
@@ -355,7 +355,7 @@ func TestProcessMessage_BroadcastExcludesSender(t *testing.T) {
 	o.RegisterAgent("/rooms/t", "agent-2", "sess-22222222")
 	o.RegisterAgent("/rooms/t", "agent-3", "sess-33333333")
 
-	msg := watcher.Message{From: "agent-1", To: "all", Content: "Deploy done, review pls", Type: "broadcast", ExpectsReply: true}
+	msg := types.Message{From: "agent-1", To: "all", Content: "Deploy done, review pls", Type: "broadcast", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg)
 
 	o.mu.Lock()
@@ -392,7 +392,7 @@ func TestHandleNewMessages_Multiple(t *testing.T) {
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-11111111")
 	o.RegisterAgent("/rooms/t", "agent-2", "sess-22222222")
 
-	msgs := []watcher.Message{
+	msgs := []types.Message{
 		{From: "SYSTEM", To: "all", Content: "joined", Type: "system"},
 		{From: "agent-1", To: "agent-2", Content: "tesekkurler", Type: "direct", ExpectsReply: false},
 		{From: "agent-1", To: "agent-2", Content: "Can you deploy the API?", Type: "direct", ExpectsReply: true},
@@ -487,7 +487,7 @@ func TestProcessMessage_DirectMessageFlow(t *testing.T) {
 	o.RegisterAgent("/rooms/t", "charlie", "sess-charlie")
 
 	// Alice sends direct message to Bob
-	msg := watcher.Message{From: "alice", To: "bob", Content: "Hey Bob, can you review my PR?", Type: "direct", ExpectsReply: true}
+	msg := types.Message{From: "alice", To: "bob", Content: "Hey Bob, can you review my PR?", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg)
 
 	if len(*sent) != 1 {
@@ -512,7 +512,7 @@ func TestProcessMessage_BroadcastMessageFlow(t *testing.T) {
 	o.RegisterAgent("/rooms/t", "charlie", "sess-charlie")
 
 	// Alice broadcasts
-	msg := watcher.Message{From: "alice", To: "all", Content: "Deployment complete!", Type: "broadcast", ExpectsReply: true}
+	msg := types.Message{From: "alice", To: "all", Content: "Deployment complete!", Type: "broadcast", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg)
 
 	if len(*sent) != 2 {
@@ -548,7 +548,7 @@ func TestRaceCondition_RegisterUnregisterDuringProcessMessage(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			msg := watcher.Message{
+			msg := types.Message{
 				From:         fmt.Sprintf("agent-%d", idx%10),
 				To:           "all",
 				Content:      fmt.Sprintf("Message %d from agent", idx),
@@ -580,7 +580,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	o.RegisterAgent("/rooms/t", "bob", "sess-bob")
 
 	// First message: immediate notification
-	msg1 := watcher.Message{From: "alice", To: "bob", Content: "Hey bob, first message", Type: "direct", ExpectsReply: true}
+	msg1 := types.Message{From: "alice", To: "bob", Content: "Hey bob, first message", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg1)
 
 	if len(*sent) != 1 {
@@ -588,7 +588,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	}
 
 	// Second message within cooldown: should be batched
-	msg2 := watcher.Message{From: "charlie", To: "bob", Content: "Hey bob, second message", Type: "direct", ExpectsReply: true}
+	msg2 := types.Message{From: "charlie", To: "bob", Content: "Hey bob, second message", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg2)
 
 	if len(*sent) != 1 {
@@ -596,7 +596,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	}
 
 	// Third message within cooldown: also batched
-	msg3 := watcher.Message{From: "alice", To: "bob", Content: "Hey bob, third message", Type: "direct", ExpectsReply: true}
+	msg3 := types.Message{From: "alice", To: "bob", Content: "Hey bob, third message", Type: "direct", ExpectsReply: true}
 	o.ProcessMessage("/rooms/t", msg3)
 
 	if len(*sent) != 1 {
@@ -678,7 +678,7 @@ func TestMultipleChatDirs(t *testing.T) {
 	o.RegisterAgent("/rooms/team1", "bob", "sess-bob-1")
 
 	// Message in team1 should only notify team1 agents
-	msg := watcher.Message{From: "alice", To: "all", Content: "Team1 update", Type: "broadcast", ExpectsReply: true}
+	msg := types.Message{From: "alice", To: "all", Content: "Team1 update", Type: "broadcast", ExpectsReply: true}
 	o.ProcessMessage("/rooms/team1", msg)
 
 	if len(*sent) != 1 {
