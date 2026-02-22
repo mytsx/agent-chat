@@ -6,6 +6,17 @@ Bilinen sorunlar ve yapilacaklar listesi.
 
 - [ ] **Resim paste edilemiyor** — Terminal panellerine veya chat alanina resim yapistirildiginda (Cmd+V) resim icerigi islenmez/goruntulenmez. xterm.js varsayilan olarak resim paste destegi sunmaz; ozel bir handler veya binary paste destegi gerekebilir.
 
+## DevOps
+
+- [ ] **GitHub Actions release secret'lari** — CI/CD pipeline (`release.yml`) code signing icin secret'lar gerektirir. Lokaldeki sertifikayi export edip GitHub'a ekle:
+  - `CERTIFICATE_P12_BASE64`: `base64 -i certificate.p12 | pbcopy`
+  - `CERTIFICATE_PASSWORD`: .p12 sifresi
+  - `APPLE_ID`: Apple hesap e-postasi
+  - `APPLE_TEAM_ID`: `VTVG4G3NFH`
+  - `APPLE_APP_PASSWORD`: App-specific password (appleid.apple.com)
+  - `DEVELOPER_ID`: `Developer ID Application: Mehmet Yerli (VTVG4G3NFH)`
+  - Eklenecek yer: GitHub repo → Settings → Secrets and variables → Actions
+
 ## Planned Features
 
 ### Session Persistence & Terminal Restart (CLI Resume)
