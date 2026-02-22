@@ -14,6 +14,7 @@ import (
 type mcpServerEntry struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
+	Type    string            `json:"type,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 }
 
@@ -66,7 +67,7 @@ func ResetMCPConfig(cliType CLIType, dataDir string) error {
 
 func buildMCPEntry(dataDir, roomName string) mcpServerEntry {
 	env := map[string]string{
-		"AGENT_CHAT_DIR": GetRoomsDir(dataDir),
+		"AGENT_CHAT_DATA_DIR": dataDir,
 	}
 	if roomName != "" {
 		env["AGENT_CHAT_ROOM"] = roomName
@@ -74,6 +75,7 @@ func buildMCPEntry(dataDir, roomName string) mcpServerEntry {
 	return mcpServerEntry{
 		Command: GetMCPBinaryPath(dataDir),
 		Args:    []string{},
+		Type:    "stdio",
 		Env:     env,
 	}
 }
@@ -106,7 +108,7 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 		return nil
 	}
 
-	envs := []string{"AGENT_CHAT_DIR=" + GetRoomsDir(dataDir)}
+	envs := []string{"AGENT_CHAT_DATA_DIR=" + dataDir}
 	if roomName != "" {
 		envs = append(envs, "AGENT_CHAT_ROOM="+roomName)
 	}

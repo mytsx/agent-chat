@@ -1,9 +1,11 @@
 package mcpserver
 
 import (
+	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+
+	"desktop/internal/hubclient"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -16,10 +18,8 @@ type MCPServerApp struct {
 	logger  *log.Logger
 }
 
-// NewMCPServerApp creates a new MCP server application.
-func NewMCPServerApp(chatDir, defaultRoom string) *MCPServerApp {
-	logger := setupLogger(chatDir)
-
+// NewMCPServerApp creates a new MCP server application backed by a hub client.
+func NewMCPServerApp(client *hubclient.HubClient, defaultRoom string, logger *log.Logger) *MCPServerApp {
 	s := server.NewMCPServer(
 		"agent-chat",
 		"1.0.0",
@@ -29,13 +29,13 @@ func NewMCPServerApp(chatDir, defaultRoom string) *MCPServerApp {
 	)
 
 	app := &MCPServerApp{
-		storage: NewStorage(chatDir, defaultRoom),
+		storage: NewStorage(client, defaultRoom),
 		server:  s,
 		logger:  logger,
 	}
 	app.registerTools()
 
-	logger.Printf("MCP server initialized — chatDir=%s defaultRoom=%s pid=%d", chatDir, defaultRoom, os.Getpid())
+	logger.Printf("MCP server initialized — defaultRoom=%s pid=%d", defaultRoom, os.Getpid())
 	return app
 }
 
@@ -49,22 +49,6 @@ func (app *MCPServerApp) Serve() error {
 		app.logger.Println("Server exited cleanly")
 	}
 	return err
-}
-
-// setupLogger creates a file logger at chatDir/../mcp-server.log
-// (e.g. ~/.agent-chat/mcp-server.log). Falls back to stderr if file open fails.
-func setupLogger(chatDir string) *log.Logger {
-	// chatDir is typically ~/.agent-chat/rooms — log file goes one level up
-	logDir := filepath.Dir(chatDir)
-	logPath := filepath.Join(logDir, "mcp-server.log")
-
-	os.MkdirAll(logDir, 0700)
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return log.New(os.Stderr, "[MCP] ", log.LstdFlags|log.Lshortfile)
-	}
-
-	return log.New(f, "[MCP] ", log.LstdFlags|log.Lshortfile)
 }
 
 func (app *MCPServerApp) registerTools() {
@@ -81,6 +65,7 @@ Args:
 
 Returns:
     Confirmation message with list of other agents in the room`),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Required(),
 			mcp.Description("Unique name for this agent (e.g., \"backend\", \"frontend\", \"mobile\")"),
@@ -107,6 +92,7 @@ Args:
 
 Returns:
     Confirmation that message was sent`),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("from_agent",
 			mcp.Required(),
 			mcp.Description("Your agent name"),
@@ -122,7 +108,7 @@ Returns:
 			mcp.Description("Set False for acknowledgments/thanks to prevent infinite loops (default: True)"),
 		),
 		mcp.WithString("priority",
-			mcp.Description("\"urgent\", \"normal\", or \"low\" (default: \"normal\")"),
+			mcp.Description(fmt.Sprintf("\"urgent\", \"normal\", or \"low\" (default: \"normal\")")),
 		),
 		mcp.WithString("room",
 			mcp.Description("Room name (empty = default room)"),
@@ -142,6 +128,8 @@ Args:
 
 Returns:
     List of messages formatted for reading`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Required(),
 			mcp.Description("Your agent name (to filter relevant messages)"),
@@ -170,6 +158,8 @@ Args:
 
 Returns:
     List of active agents with their roles`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Description("Your agent name (optional, for updating last_seen)"),
 		),
@@ -188,6 +178,7 @@ Args:
 
 Returns:
     Confirmation message`),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Required(),
 			mcp.Description("Your agent name"),
@@ -222,6 +213,8 @@ Args:
 
 Returns:
     List of all messages formatted for reading`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithNumber("since_id",
 			mcp.Description("Only get messages after this ID (default: 0 for all)"),
 		),
@@ -243,6 +236,8 @@ Args:
 
 Returns:
     The ID of the last message, or 0 if no messages`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Description("Your agent name (optional, for updating last_seen)"),
 		),
@@ -257,5 +252,7 @@ Returns:
 
 Returns:
     List of rooms with agent counts`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
 	), h.listRooms)
 }

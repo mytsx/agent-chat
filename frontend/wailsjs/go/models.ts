@@ -121,7 +121,7 @@ export namespace team {
 
 }
 
-export namespace watcher {
+export namespace types {
 	
 	export class Message {
 	    id: number;

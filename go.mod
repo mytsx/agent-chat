@@ -4,8 +4,8 @@ go 1.23.0
 
 require (
 	github.com/creack/pty v1.1.24
-	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/wailsapp/wails/v2 v2.11.0
 )
@@ -16,7 +16,6 @@ require (
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
 	github.com/labstack/echo/v4 v4.13.3 // indirect

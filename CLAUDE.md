@@ -31,34 +31,42 @@ cd frontend && npm run build
 
 ## Architecture
 
-This is a Wails v2 desktop app (Go backend + React frontend) that orchestrates multiple AI CLI agents (Claude Code, Gemini CLI, GitHub Copilot) communicating via shared JSON files.
+This is a Wails v2 desktop app (Go backend + React frontend) that orchestrates multiple AI CLI agents (Claude Code, Gemini CLI, GitHub Copilot) communicating via a WebSocket hub.
 
-### Two Independent Binaries
+### Three Components
 
-1. **Desktop App** (`main.go` / `app.go`): Wails application managing UI, terminals, and file watching
-2. **MCP Server** (`cmd/mcp-server/`): Standalone Go binary embedded into the desktop app via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin` at runtime. Each CLI agent spawns its own MCP server instance via stdio.
+1. **Desktop App** (`main.go` / `app.go`): Wails application managing UI, terminals, and hub communication
+2. **Hub Server** (`internal/hub/`): WebSocket server managing in-memory room state, spawned as a child process (`mcp-server-bin --hub`)
+3. **MCP Server** (`cmd/mcp-server/`): Standalone Go binary embedded via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin`. Dual-mode: `--hub` runs WebSocket server, default runs stdio MCP server + WebSocket client.
 
 ### Communication Flow
 
 ```
-Agent CLI (Claude/Gemini/Copilot)
-  → MCP Server (per-agent stdio process)
-    → JSON file write (~/.agent-chat/rooms/{team}/messages.json)
-      → fsnotify watcher detects change
-        → Orchestrator analyzes & routes notification
-          → PTY write to target agent's terminal
-```
+Desktop App (Wails)                    Hub Process (mcp-server-bin --hub)
+  ├─ startup: spawn hub               ├─ WebSocket server localhost:{port}
+  ├─ hubClient (WS client) ──────────→├─ In-memory room state
+  ├─ Event handler:                    ├─ Periodic persist (5s)
+  │   message_new → orchestrator       ├─ Event broadcast → subscribers
+  │   agent_joined → frontend          └─ Port → ~/.agent-chat/hub.port
+  ├─ Orchestrator (unchanged)
+  └─ PTY Manager (unchanged)
 
-All agent communication passes through JSON files with `syscall.Flock` locking. There is no database or network server.
+CLI Agent (Claude/Gemini/Copilot)
+  └─ stdio JSON-RPC
+      └─ MCP Server (mcp-server-bin)
+           └─ hubClient (WS client) ──→ Hub
+```
 
 ### Key Packages
 
 | Package | Purpose |
 |---------|---------|
-| `internal/mcpserver/` | MCP tool implementations (9 tools: join_room, send_message, read_messages, etc.) |
+| `internal/types/` | Shared types: `Message`, `Agent`, `Request`, `Response`, `Event` |
+| `internal/hub/` | WebSocket hub server: room state, client management, persistence, request dispatch |
+| `internal/hubclient/` | WebSocket client: request-response RPC, event handling, reconnection |
+| `internal/mcpserver/` | MCP tool implementations (9 tools), thin RPC wrappers over hub client |
 | `internal/pty/` | Pseudo-terminal management — spawns CLIs, handles UTF-8 buffering, idle detection |
 | `internal/orchestrator/` | Message routing — analyzes content, manages cooldowns, batches notifications |
-| `internal/watcher/` | fsnotify-based file watching for messages.json and agents.json changes |
 | `internal/cli/` | CLI detection, MCP config management (~/.claude.json etc.), startup prompt composition |
 | `internal/team/` | Team configuration persistence (teams.json) |
 | `internal/prompt/` | Prompt template storage with variable substitution |
@@ -70,15 +78,17 @@ The desktop app writes MCP server config to CLI config files at startup and per-
 - `~/.gemini/settings.json` → same structure
 - `~/.copilot/mcp-config.json` → same structure
 
+MCP config includes `AGENT_CHAT_DATA_DIR` env var pointing to `~/.agent-chat/` so MCP instances can discover the hub port.
+
 **Critical:** Claude Code has per-project MCP overrides in `~/.claude.json` under `projects[path].mcpServers`. The `cleanProjectMCPOverrides()` function removes stale per-project `agent-chat` entries that would shadow the global config.
 
 ### Data Directory
 
 All runtime data lives in `~/.agent-chat/`:
-- `mcp-server-bin` — extracted Go binary
-- `mcp-server.log` — MCP server debug log (all instances append here)
-- `rooms/{team_name}/messages.json` — message log per team
-- `rooms/{team_name}/agents.json` — active agents per team
+- `mcp-server-bin` — extracted Go binary (dual-mode: MCP server or hub)
+- `mcp-server.log` — debug log (hub and MCP instances append here)
+- `hub.port` — current hub WebSocket port (written at startup, removed on shutdown)
+- `hub-state/{room}.json` — persisted room state (messages + agents)
 - `teams.json`, `prompts.json`, `global_prompt.md` — app config
 
 ### Frontend
@@ -92,3 +102,4 @@ React 18 + TypeScript + Vite + Zustand. Stores in `frontend/src/store/` manage t
 - MCP server logs to file (not stdout/stderr) since stdio is used for JSON-RPC
 - PTY environment strips `VSCODE_*`, `ELECTRON_*`, `NODE_OPTIONS` vars to prevent focus issues
 - Startup prompts use ANSI bracketed paste mode (`ESC[200~...ESC[201~`) to prevent premature submission
+- Hub persistence uses atomic write (temp file + rename) to prevent corruption

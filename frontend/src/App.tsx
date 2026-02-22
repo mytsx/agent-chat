@@ -108,21 +108,17 @@ function AppContent() {
   useEffect(() => {
     if (!activeTeamID) return;
     const team = useTeams.getState().teams.find((t) => t.id === activeTeamID);
-    if (team?.chat_dir) {
-      const roomDir = team.chat_dir + "/" + (team.name || "default");
-      loadMessages(roomDir).catch((e) => {
-        if (import.meta.env.DEV) console.warn("Failed to load messages:", e);
-      });
-      loadAgents(roomDir).catch((e) => {
-        if (import.meta.env.DEV) console.warn("Failed to load agents:", e);
-      });
-    }
+    const roomName = team?.name || "default";
+    loadMessages(roomName).catch((e) => {
+      if (import.meta.env.DEV) console.warn("Failed to load messages:", e);
+    });
+    loadAgents(roomName).catch((e) => {
+      if (import.meta.env.DEV) console.warn("Failed to load agents:", e);
+    });
   }, [activeTeamID]);
 
   const activeTeam = teams.find((t) => t.id === activeTeamID);
-  const chatDir = activeTeam
-    ? activeTeam.chat_dir + "/" + (activeTeam.name || "default")
-    : "/tmp/agent-chat-room/default";
+  const chatDir = activeTeam?.name || "default";
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
