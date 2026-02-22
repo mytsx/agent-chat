@@ -24,6 +24,7 @@ export interface Team {
   agents: AgentConfig[];
   grid_layout: string;
   chat_dir: string;
+  manager_agent: string;
   custom_prompt: string;
   created_at: string;
 }
@@ -43,9 +44,11 @@ export interface Message {
   id: number;
   from: string;
   to: string;
+  original_to?: string;
   content: string;
   timestamp: string;
   type: string;
+  routed_by_manager?: boolean;
   expects_reply: boolean;
   priority: string;
 }

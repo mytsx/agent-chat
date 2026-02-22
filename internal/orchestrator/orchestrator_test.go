@@ -211,6 +211,29 @@ func TestProcessMessage_DirectTargetNotFound(t *testing.T) {
 	o.ProcessMessage("/rooms/t", msg) // should not panic
 }
 
+func TestProcessMessage_ManagerRoutedAlwaysNotifiesManager(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "manager", "sess-manager")
+
+	msg := types.Message{
+		From:            "agent-2",
+		To:              "manager",
+		OriginalTo:      "agent-1",
+		Content:         "tamam",
+		Type:            "direct",
+		RoutedByManager: true,
+		ExpectsReply:    false,
+	}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected manager notification, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-manager" {
+		t.Fatalf("expected manager session notify, got %s", (*sent)[0].sessionID)
+	}
+}
+
 // ── Cooldown / Batching tests ──
 
 func TestNotifyAgent_FirstCallImmediate(t *testing.T) {

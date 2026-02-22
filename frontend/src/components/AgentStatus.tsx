@@ -23,6 +23,10 @@ export default function AgentStatus({ chatDir }: Props) {
     return Date.now() / 1000 - agent.last_seen < 300;
   };
 
+  const isManager = (agent: Agent) => {
+    return agent.role?.toLowerCase() === "manager";
+  };
+
   return (
     <div className="agent-status">
       <h3 className="sidebar-section-title">
@@ -35,7 +39,10 @@ export default function AgentStatus({ chatDir }: Props) {
               className={`agent-indicator ${isActive(agent) ? "agent-active" : "agent-offline"}`}
             />
             <div className="agent-info">
-              <span className="agent-name">{name}</span>
+              <span className="agent-name">
+                {name}
+                {isManager(agent) ? " (manager)" : ""}
+              </span>
               {agent.role && (
                 <span className="agent-role">{agent.role}</span>
               )}

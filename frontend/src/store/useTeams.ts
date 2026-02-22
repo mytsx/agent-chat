@@ -5,6 +5,7 @@ import {
   CreateTeam,
   UpdateTeam,
   DeleteTeam,
+  SetTeamManager,
 } from "../../wailsjs/go/main/App";
 
 interface TeamsState {
@@ -25,6 +26,7 @@ interface TeamsState {
     gridLayout: string,
     agents: AgentConfig[]
   ) => Promise<void>;
+  setTeamManager: (id: string, managerAgent: string) => Promise<void>;
   deleteTeam: (id: string) => Promise<void>;
 }
 
@@ -60,6 +62,13 @@ export const useTeams = create<TeamsState>((set, get) => ({
 
   updateTeam: async (id, name, gridLayout, agents) => {
     const t = await UpdateTeam(id, name, gridLayout, agents);
+    set((s) => ({
+      teams: s.teams.map((team) => (team.id === id ? t : team)),
+    }));
+  },
+
+  setTeamManager: async (id, managerAgent) => {
+    const t = await SetTeamManager(id, managerAgent);
     set((s) => ({
       teams: s.teams.map((team) => (team.id === id ? t : team)),
     }));

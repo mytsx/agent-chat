@@ -25,6 +25,7 @@ type Client struct {
 	rooms      map[string]bool // subscribed rooms
 	clientType string          // "mcp" or "desktop"
 	agentName  string
+	joinedRoom string
 }
 
 func newClient(hub *Hub, conn *websocket.Conn) *Client {

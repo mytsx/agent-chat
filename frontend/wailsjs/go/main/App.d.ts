@@ -45,6 +45,8 @@ export function SendPromptToAgent(arg1:string,arg2:string,arg3:Record<string, st
 
 export function SetGlobalPrompt(arg1:string):Promise<void>;
 
+export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;
+
 export function UpdatePrompt(arg1:string,arg2:string,arg3:string,arg4:string,arg5:Array<string>):Promise<prompt.Prompt>;
 
 export function UpdateTeam(arg1:string,arg2:string,arg3:string,arg4:Array<team.AgentConfig>):Promise<team.Team>;

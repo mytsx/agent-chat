@@ -29,6 +29,7 @@ type Team struct {
 	Agents       []AgentConfig `json:"agents"`
 	GridLayout   string        `json:"grid_layout"` // "1x1", "2x2", "2x3", etc.
 	ChatDir      string        `json:"chat_dir"`
+	ManagerAgent string        `json:"manager_agent"`
 	CustomPrompt string        `json:"custom_prompt"`
 	CreatedAt    string        `json:"created_at"`
 }
@@ -142,6 +143,27 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 			s.teams[i].GridLayout = gridLayout
 			s.teams[i].Agents = agents
 
+			if err := s.save(); err != nil {
+				return Team{}, err
+			}
+			return s.teams[i], nil
+		}
+	}
+	return Team{}, fmt.Errorf("team not found: %s", id)
+}
+
+// SetManager sets or clears manager agent for a team. Empty string clears manager.
+func (s *Store) SetManager(id, managerAgent string) (Team, error) {
+	if err := validation.ValidateName(managerAgent); err != nil {
+		return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, t := range s.teams {
+		if t.ID == id {
+			s.teams[i].ManagerAgent = managerAgent
 			if err := s.save(); err != nil {
 				return Team{}, err
 			}

@@ -146,6 +146,7 @@ func (h *Hub) runClientManager() {
 			h.logger.Printf("Client connected (total: %d)", len(h.clients))
 
 		case client := <-h.unregister:
+			var joinedRoom, agentName string
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
@@ -156,8 +157,22 @@ func (h *Hub) runClientManager() {
 						delete(subs, client)
 					}
 				}
+				joinedRoom = client.joinedRoom
+				agentName = client.agentName
 			}
 			h.mu.Unlock()
+
+			// If this client had joined as an agent, remove it immediately
+			// so name re-use and manager lock cleanup do not wait for stale timeout.
+			if joinedRoom != "" && agentName != "" {
+				roomState := h.getOrCreateRoom(joinedRoom)
+				if sysMsg, found := roomState.Leave(agentName); found {
+					agents := roomState.GetAgents()
+					h.broadcastEvent(joinedRoom, "message_new", map[string]any{"message": sysMsg})
+					h.broadcastEvent(joinedRoom, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
+				}
+			}
+
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}
 	}

@@ -83,9 +83,15 @@ CLI Agent (Claude/Gemini/Copilot)
 - Hub discovers port via `~/.agent-chat/hub.port` file or `AGENT_CHAT_HUB_PORT` env override
 - Persistence: atomic write (temp file + rename) to `hub-state/{room}.json`
 
-### Orchestrator Message Routing
+### Manager + Orchestrator Routing
 
-When hub emits `message_new`, orchestrator decides whether to notify the target agent's PTY:
+Hub is the routing authority:
+- **Manager gateway:** when an agent joins with `role="manager"`, non-manager `send_message` calls are intercepted to manager first
+- **Single manager lock:** room allows only one active manager at a time
+- **Identity enforcement:** `from_agent` must match the agent name bound by `join_room`
+- **Heartbeat timeout:** manager routing lock auto-clears after ~30s inactivity
+
+Orchestrator is PTY notification authority:
 - **Skip:** acknowledgments (<80 chars + contains "teşekkür/thanks/ok/tamam")
 - **Always notify:** questions (contains "?", "nasıl", "how"), `expects_reply=true`
 - **Cooldown batching:** within 3s window, messages are queued and flushed as a single batch notification

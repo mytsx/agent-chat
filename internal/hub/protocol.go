@@ -100,6 +100,10 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
+	if c.agentName != "" && c.agentName != data.AgentName {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("bu bağlantı '%s' olarak join oldu; farklı adla join olamaz", c.agentName))
+		return
+	}
 	if len(data.Role) > maxFieldLength {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("role too long: %d chars, max %d", len(data.Role), maxFieldLength))
 		return
@@ -108,11 +112,17 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
 
 	roomState := h.getOrCreateRoom(room)
-	sysMsg, agents := roomState.Join(data.AgentName, data.Role)
+	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
+	if err != nil {
+		c.sendError(req.ID, req.Type, err.Error())
+		return
+	}
 
 	// Also subscribe the client to this room
 	h.mu.Lock()
 	c.rooms[room] = true
+	c.agentName = data.AgentName
+	c.joinedRoom = room
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
@@ -158,8 +168,21 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
+	if c.joinedRoom == "" || c.agentName == "" {
+		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
+		return
+	}
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odada mesaj gönderebilirsiniz: %s", c.joinedRoom))
+		return
+	}
+
 	if err := validation.ValidateName(data.From); err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
+		return
+	}
+	if data.From != c.agentName {
+		c.sendError(req.ID, req.Type, "from_agent yalnızca kendi adınız olabilir")
 		return
 	}
 	if data.To != "all" {
@@ -177,7 +200,23 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		data.From, data.To, room, data.Priority, data.ExpectsReply, len(data.Content))
 
 	roomState := h.getOrCreateRoom(room)
-	msg, err := roomState.SendMessage(data.From, data.To, data.Content, data.ExpectsReply, data.Priority)
+
+	activeManager := roomState.GetActiveManager()
+	if activeManager != "" && data.From == activeManager {
+		roomState.TouchManagerHeartbeat(data.From)
+	}
+
+	to := data.To
+	opts := SendOptions{}
+	intercepted := false
+	if activeManager != "" && data.From != activeManager {
+		intercepted = true
+		opts.OriginalTo = data.To
+		opts.RoutedByManager = true
+		to = activeManager
+	}
+
+	msg, err := roomState.SendMessage(data.From, to, data.Content, data.ExpectsReply, data.Priority, opts)
 	if err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
@@ -186,7 +225,9 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	h.logger.Printf("send_message: id=%d saved to room=%s", msg.ID, room)
 
 	var text string
-	if data.To == "all" {
+	if intercepted {
+		text = fmt.Sprintf("\U0001f4e4 Mesaj manager '%s' agent'ına iletildi, onay bekliyor (ID: %d)", activeManager, msg.ID)
+	} else if data.To == "all" {
 		text = fmt.Sprintf("\U0001f4e4 Mesaj tüm agent'lara gönderildi (ID: %d)", msg.ID)
 	} else {
 		text = fmt.Sprintf("\U0001f4e4 Mesaj '%s' agent'ına gönderildi (ID: %d)", data.To, msg.ID)
@@ -218,6 +259,9 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	}
 
 	roomState := h.getOrCreateRoom(room)
+	if c.agentName != "" {
+		roomState.TouchManagerHeartbeat(c.agentName)
+	}
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
 	if len(filtered) == 0 {
@@ -239,6 +283,9 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 			fmt.Fprintf(&sb, "[%s] %s\n", ts, sanitize(msg.Content))
 		} else if msg.To == "all" {
 			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, sanitize(msg.From), sanitize(msg.Content))
+		} else if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
+			fmt.Fprintf(&sb, "[%s] %s \u2192 %s (orijinal: %s): %s\n",
+				ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(msg.Content))
 		} else {
 			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.Content))
 		}
@@ -259,6 +306,9 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
+	if c.agentName != "" {
+		roomState.TouchManagerHeartbeat(c.agentName)
+	}
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
 
 	if len(filtered) == 0 {
@@ -283,7 +333,12 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 			if len(contentPreview) > 100 {
 				contentPreview = contentPreview[:100]
 			}
-			fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
+			if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
+				fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s (orijinal: %s): %s\n",
+					ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(contentPreview))
+			} else {
+				fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
+			}
 		}
 		sb.WriteString("\n")
 	}
@@ -300,6 +355,9 @@ func (h *Hub) handleListAgents(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
+	if c.agentName != "" {
+		roomState.TouchManagerHeartbeat(c.agentName)
+	}
 	agents := roomState.ListAgents(data.AgentName)
 
 	if len(agents) == 0 {
@@ -339,6 +397,18 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
+	if c.agentName == "" || c.joinedRoom == "" {
+		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
+		return
+	}
+	if data.AgentName != c.agentName {
+		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla leave_room çağırabilirsiniz")
+		return
+	}
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan ayrılabilirsiniz: %s", c.joinedRoom))
+		return
+	}
 
 	roomState := h.getOrCreateRoom(room)
 	sysMsg, found := roomState.Leave(data.AgentName)
@@ -351,6 +421,8 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 
 	respData, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName)})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.agentName = ""
+	c.joinedRoom = ""
 
 	agents := roomState.GetAgents()
 	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})
@@ -377,6 +449,9 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
+	if c.agentName != "" {
+		roomState.TouchManagerHeartbeat(c.agentName)
+	}
 	lastID := roomState.GetLastMessageID(data.AgentName)
 
 	respData, _ := json.Marshal(map[string]any{"last_id": lastID})

@@ -184,8 +184,8 @@ func (a *App) handleHubEvent(event types.Event) {
 
 	case "agent_joined", "agent_left":
 		var data struct {
-			AgentName string                  `json:"agent_name"`
-			Agents    map[string]types.Agent  `json:"agents"`
+			AgentName string                 `json:"agent_name"`
+			Agents    map[string]types.Agent `json:"agents"`
 		}
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			log.Printf("[HUB-EVENT] Failed to parse %s: %v", event.Event, err)
@@ -302,6 +302,63 @@ func (a *App) OpenDirectoryDialog() (string, error) {
 	})
 }
 
+func hasPromptTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if strings.EqualFold(strings.TrimSpace(t), tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) isManagerPrompt(promptID string) bool {
+	if promptID == "" {
+		return false
+	}
+	p, err := a.promptStore.Get(promptID)
+	if err != nil {
+		return false
+	}
+	return hasPromptTag(p.Tags, "manager")
+}
+
+// resolveManagerIntent determines whether this terminal should start as manager.
+// If persist=true and manager is inferred from prompt tag, team manager is auto-set.
+func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist bool) (bool, error) {
+	if agentName == "" {
+		return false, nil
+	}
+
+	managerFromPrompt := a.isManagerPrompt(promptID)
+	if teamID == "" {
+		return managerFromPrompt, nil
+	}
+
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return managerFromPrompt, nil
+	}
+
+	managerFromTeam := strings.TrimSpace(t.ManagerAgent)
+	if managerFromTeam != "" {
+		if managerFromPrompt && managerFromTeam != agentName {
+			return false, fmt.Errorf("team manager already set to '%s'; '%s' cannot use manager prompt", managerFromTeam, agentName)
+		}
+		return managerFromTeam == agentName, nil
+	}
+
+	if managerFromPrompt {
+		if persist {
+			if _, err := a.teamStore.SetManager(teamID, agentName); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // CreateTerminal creates a new terminal and returns its session ID
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
@@ -318,6 +375,11 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 	if teamName == "" {
 		teamName = "default"
+	}
+
+	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
+	if err != nil {
+		return "", err
 	}
 
 	// Subscribe to room events
@@ -341,7 +403,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument
 	if ct == cli.CLICopilot && agentName != "" {
-		composed := a.composeAgentPrompt(teamID, agentName, promptID)
+		composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
 		if composed != "" {
 			cmdArgs = append(cmdArgs, "-i", composed)
 			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(composed))
@@ -370,7 +432,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	// Send startup prompt in background
-	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID)
+	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, isManager)
 
 	return sessionID, nil
 }
@@ -400,7 +462,7 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it
-func (a *App) composeAgentPrompt(teamID, agentName, promptID string) string {
+func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager bool) string {
 	if agentName == "" {
 		return ""
 	}
@@ -423,11 +485,23 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string) string {
 		}
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, teamName)
+	if isManager {
+		managerPrompt, _ := promptsFS.ReadFile("prompts/manager_prompt.md")
+		managerText := strings.TrimSpace(string(managerPrompt))
+		if managerText != "" {
+			if strings.TrimSpace(selectedPrompt) == "" {
+				selectedPrompt = managerText
+			} else if !strings.Contains(selectedPrompt, managerText) {
+				selectedPrompt = strings.TrimSpace(selectedPrompt) + "\n\n" + managerText
+			}
+		}
+	}
+
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, teamName, isManager)
 }
 
 // sendStartupPrompt sends the initial prompt to a CLI agent
-func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID string) {
+func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID string, isManager bool) {
 	if cliType == "" || cliType == "shell" || cliType == "copilot" || agentName == "" {
 		return
 	}
@@ -442,7 +516,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
-	composed := a.composeAgentPrompt(teamID, agentName, promptID)
+	composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
 	if composed == "" {
 		return
 	}
@@ -542,6 +616,24 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 // UpdateTeam updates a team
 func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig) (team.Team, error) {
 	return a.teamStore.Update(id, name, gridLayout, agents)
+}
+
+// SetTeamManager sets or clears the manager agent for a team.
+func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
+	managerAgent = strings.TrimSpace(managerAgent)
+	if err := validation.ValidateName(managerAgent); err != nil {
+		return team.Team{}, fmt.Errorf("invalid manager agent: %w", err)
+	}
+
+	t, err := a.teamStore.Get(id)
+	if err != nil {
+		return team.Team{}, err
+	}
+	if t.ManagerAgent != "" && managerAgent != "" && t.ManagerAgent != managerAgent {
+		return team.Team{}, fmt.Errorf("team already has manager '%s'; clear first before assigning '%s'", t.ManagerAgent, managerAgent)
+	}
+
+	return a.teamStore.SetManager(id, managerAgent)
 }
 
 // DeleteTeam deletes a team

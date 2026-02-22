@@ -697,6 +697,28 @@ html, body, #root {
   cursor: default;
 }
 
+.wizard-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.wizard-checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.wizard-checkbox-row span {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
 /* ============ CLI Selector (Wizard) ============ */
 .wizard-cli-group {
   display: flex;
