@@ -260,19 +260,21 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
+	if c.joinedRoom == "" || c.agentName == "" {
+		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
+		return
+	}
 	if err := validation.ValidateName(data.AgentName); err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
-	if c.agentName != "" && data.AgentName != c.agentName {
+	if data.AgentName != c.agentName {
 		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla mesaj okuyabilirsiniz")
 		return
 	}
 
 	roomState := h.getOrCreateRoom(room)
-	if c.agentName != "" {
-		roomState.TouchManagerHeartbeat(c.agentName)
-	}
+	roomState.TouchManagerHeartbeat(c.agentName)
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
 	if len(filtered) == 0 {
@@ -471,6 +473,11 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
+	// Desktop app (clientType set, no agentName) can query without join
+	if c.agentName == "" && c.clientType == "" {
+		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
+		return
+	}
 	if c.agentName != "" && data.AgentName != "" && data.AgentName != c.agentName {
 		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla sorgulama yapabilirsiniz")
 		return
