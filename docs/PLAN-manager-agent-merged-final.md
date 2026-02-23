@@ -86,7 +86,7 @@ Hedef sonuc:
 - `RoomState` alanlari eklenecek:
 - `managerAgent string`
 - `managerLastSeen float64`
-- Sabit: `managerTimeoutSec = 30`
+- Sabit: `managerTimeoutSec = 300`
 - `Join` imzasi hata donecek sekilde guncellenecek:
 - `Join(agentName, role string) (types.Message, map[string]types.Agent, error)`
 - Join kontrolu:

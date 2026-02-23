@@ -145,7 +145,7 @@ agent-chat/
 <summary><strong>Teknik Detaylar</strong></summary>
 
 - **Hub:** WebSocket server (`gorilla/websocket`), in-memory room state + 5sn periyodik persist
-- **Manager Routing:** Tek aktif manager lock'u, 30sn heartbeat timeout, `from_agent` kimlik eşleşme zorunluluğu
+- **Manager Routing:** Tek aktif manager lock'u, 300sn (5dk) heartbeat timeout, `from_agent` kimlik eşleşme zorunluluğu
 - **MCP İletişim:** Stdio JSON-RPC (agent ↔ MCP server), WebSocket (MCP server ↔ hub)
 - **Persistence:** Atomic write (temp file + rename), JSON format
 - **Terminal:** Native PTY allocation (`github.com/creack/pty`)
