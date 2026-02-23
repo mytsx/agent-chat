@@ -318,7 +318,11 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
 
-	// Only the active manager (or desktop app without agentName) can read all messages
+	// Only the active manager or desktop app can read all messages
+	if c.agentName == "" && c.clientType == "" {
+		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
+		return
+	}
 	if c.agentName != "" {
 		activeManager := roomState.GetActiveManager()
 		if activeManager != "" && c.agentName != activeManager {
