@@ -621,8 +621,10 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 // SetTeamManager sets or clears the manager agent for a team.
 func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 	managerAgent = strings.TrimSpace(managerAgent)
-	if err := validation.ValidateName(managerAgent); err != nil {
-		return team.Team{}, fmt.Errorf("invalid manager agent: %w", err)
+	if managerAgent != "" {
+		if err := validation.ValidateName(managerAgent); err != nil {
+			return team.Team{}, fmt.Errorf("invalid manager agent: %w", err)
+		}
 	}
 
 	t, err := a.teamStore.Get(id)

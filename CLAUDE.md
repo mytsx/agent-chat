@@ -89,7 +89,7 @@ Hub is the routing authority:
 - **Manager gateway:** when an agent joins with `role="manager"`, non-manager `send_message` calls are intercepted to manager first
 - **Single manager lock:** room allows only one active manager at a time
 - **Identity enforcement:** `from_agent` must match the agent name bound by `join_room`
-- **Heartbeat timeout:** manager routing lock auto-clears after ~30s inactivity
+- **Heartbeat timeout:** manager routing lock auto-clears after ~300s (5min) inactivity, matching stale agent cleanup
 
 Orchestrator is PTY notification authority:
 - **Skip:** acknowledgments (<80 chars + contains "teşekkür/thanks/ok/tamam")

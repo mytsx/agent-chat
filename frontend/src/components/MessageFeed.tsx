@@ -51,19 +51,14 @@ export default function MessageFeed({ chatDir }: Props) {
               key={msg.id}
               className={`msg ${msg.priority === "urgent" ? "msg-urgent" : ""}`}
             >
-              {(() => {
-                let targetLabel = msg.to === "all" ? "=> ALL" : `=> ${msg.to}`;
-                if (msg.original_to && msg.original_to !== msg.to) {
-                  targetLabel = `${targetLabel} (intended: ${msg.original_to})`;
-                }
-                return (
-                  <div className="msg-header">
-                    <span className="msg-from">{msg.from}</span>
-                    <span className="msg-arrow">{targetLabel}</span>
-                    <span className="msg-time">{time}</span>
-                  </div>
-                );
-              })()}
+              <div className="msg-header">
+                <span className="msg-from">{msg.from}</span>
+                <span className="msg-arrow">
+                  {msg.to === "all" ? "=> ALL" : `=> ${msg.to}`}
+                  {msg.original_to && msg.original_to !== msg.to ? ` (intended: ${msg.original_to})` : null}
+                </span>
+                <span className="msg-time">{time}</span>
+              </div>
               <div className="msg-content">{msg.content}</div>
             </div>
           );

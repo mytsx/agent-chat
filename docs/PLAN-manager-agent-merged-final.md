@@ -17,7 +17,7 @@ Hedef sonuc:
 1. Manager aktif odada `send_message(from=agentX, to=Y)` cagrisinin kaydi `to=manager` olarak olusur.
 2. Manager aktif odada manager disi hicbir mesaj dogrudan hedefe dusmez.
 3. Manager mesajlari normal hedefe gider (direct/broadcast).
-4. Manager dusunce (30s heartbeat timeout) routing otomatik fallback olur.
+4. Manager dusunce (300s heartbeat timeout) routing otomatik fallback olur.
 5. Ayni odada duplicate agent name join reddedilir.
 6. `from_agent` ile bagli client kimligi eslesmiyorsa `send_message` reddedilir.
 
@@ -29,7 +29,7 @@ Hedef sonuc:
 4. Team `manager_agent` alani UX ve otomasyon amacli olacak; runtime lock yine hub'da.
 5. `read_all_messages` herkese acik kalacak.
 6. Kuyruklama yok; manager pasifse mevcut davranisa donulur.
-7. Heartbeat timeout sabit: `30s`.
+7. Heartbeat timeout sabit: `300s` (5 dakika).
 
 ## Mesaj Akisi (Decision Complete)
 
@@ -198,7 +198,7 @@ Hedef sonuc:
 1. Manager yok: mevcut direct/broadcast calisir.
 2. Manager var: agent-to-agent mesaj once manager'a gider.
 3. Manager forward: hedef agent notification alir.
-4. Manager kapanir: 30s sonra fallback devreye girer.
+4. Manager kapanir: 300s sonra fallback devreye girer.
 5. Ayni isimle ikinci agent join: reject.
 6. Sahte `from_agent`: reject.
 

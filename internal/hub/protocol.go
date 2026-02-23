@@ -52,7 +52,13 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 	json.Unmarshal(req.Data, &data)
 
 	c.clientType = data.ClientType
-	c.agentName = data.AgentName
+	if data.AgentName != "" {
+		if c.joinedRoom != "" && c.agentName != data.AgentName {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("join_room sonrası agent adı değiştirilemez (mevcut: %s)", c.agentName))
+			return
+		}
+		c.agentName = data.AgentName
+	}
 	if data.Room != "" {
 		c.rooms[data.Room] = true
 	}
@@ -258,6 +264,10 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
+	if c.agentName != "" && data.AgentName != c.agentName {
+		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla mesaj okuyabilirsiniz")
+		return
+	}
 
 	roomState := h.getOrCreateRoom(room)
 	if c.agentName != "" {
@@ -307,7 +317,14 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
+
+	// Only the active manager (or desktop app without agentName) can read all messages
 	if c.agentName != "" {
+		activeManager := roomState.GetActiveManager()
+		if activeManager != "" && c.agentName != activeManager {
+			c.sendError(req.ID, req.Type, "yalnızca manager tüm mesajları okuyabilir")
+			return
+		}
 		roomState.TouchManagerHeartbeat(c.agentName)
 	}
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
@@ -449,11 +466,21 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 	json.Unmarshal(req.Data, &data)
 
 	room := h.resolveRoom(req.Room)
+
+	if c.agentName != "" && data.AgentName != "" && data.AgentName != c.agentName {
+		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla sorgulama yapabilirsiniz")
+		return
+	}
+
 	roomState := h.getOrCreateRoom(room)
 	if c.agentName != "" {
 		roomState.TouchManagerHeartbeat(c.agentName)
 	}
-	lastID := roomState.GetLastMessageID(data.AgentName)
+	agentForQuery := data.AgentName
+	if agentForQuery == "" && c.agentName != "" {
+		agentForQuery = c.agentName
+	}
+	lastID := roomState.GetLastMessageID(agentForQuery)
 
 	respData, _ := json.Marshal(map[string]any{"last_id": lastID})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})

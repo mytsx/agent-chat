@@ -154,8 +154,10 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 
 // SetManager sets or clears manager agent for a team. Empty string clears manager.
 func (s *Store) SetManager(id, managerAgent string) (Team, error) {
-	if err := validation.ValidateName(managerAgent); err != nil {
-		return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
+	if managerAgent != "" {
+		if err := validation.ValidateName(managerAgent); err != nil {
+			return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
+		}
 	}
 
 	s.mu.Lock()
