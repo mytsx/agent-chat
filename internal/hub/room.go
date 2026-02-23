@@ -15,7 +15,7 @@ const (
 	truncateToMessages = 300
 	maxFieldLength     = 32000
 	staleTimeout       = 300 // seconds
-	managerTimeoutSec  = 30
+	managerTimeoutSec  = 300
 )
 
 // RoomState holds in-memory state for a single chat room.
@@ -247,6 +247,18 @@ func (r *RoomState) GetActiveManager() string {
 	return r.getActiveManagerLocked()
 }
 
+// GetActiveManagerAndTouch atomically checks if the given agent is the active
+// manager and refreshes the heartbeat if so. Returns the active manager name.
+func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	active := r.getActiveManagerLocked()
+	if active != "" && active == agentName {
+		r.managerLastSeen = types.Now()
+	}
+	return active
+}
+
 // TouchManagerHeartbeat updates manager heartbeat if this agent is active manager.
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	r.mu.Lock()
@@ -367,7 +379,25 @@ func (r *RoomState) cleanupStaleLocked() {
 			r.dirty = true
 		}
 	}
-	r.getActiveManagerLocked()
+	// Clear manager lock if timed out or agent was removed
+	r.clearManagerIfStale()
+}
+
+// clearManagerIfStale resets manager lock if the manager agent no longer exists
+// in the room or if the manager heartbeat has timed out. Must be called with mu held.
+func (r *RoomState) clearManagerIfStale() {
+	if r.managerAgent == "" {
+		return
+	}
+	if _, ok := r.agents[r.managerAgent]; !ok {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+		return
+	}
+	if types.Now()-r.managerLastSeen > float64(managerTimeoutSec) {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+	}
 }
 
 func (r *RoomState) copyAgentsLocked() map[string]types.Agent {
@@ -379,19 +409,7 @@ func (r *RoomState) copyAgentsLocked() map[string]types.Agent {
 }
 
 func (r *RoomState) getActiveManagerLocked() string {
-	if r.managerAgent == "" {
-		return ""
-	}
-	if _, ok := r.agents[r.managerAgent]; !ok {
-		r.managerAgent = ""
-		r.managerLastSeen = 0
-		return ""
-	}
-	if types.Now()-r.managerLastSeen > float64(managerTimeoutSec) {
-		r.managerAgent = ""
-		r.managerLastSeen = 0
-		return ""
-	}
+	r.clearManagerIfStale()
 	return r.managerAgent
 }
 

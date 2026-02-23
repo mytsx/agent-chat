@@ -99,6 +99,61 @@ func TestHandleSendMessage_FromMismatchRejected(t *testing.T) {
 	}
 }
 
+func TestHandleSendMessage_ManagerBypass(t *testing.T) {
+	h, manager := newTestHubClient()
+
+	// Manager joins
+	h.handleRequest(manager, types.Request{
+		ID:   "join-mgr",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "manager",
+			"role":       "manager",
+		}),
+	})
+	_ = readResponse(t, manager, "join_room")
+
+	// Manager sends a message directly to alice — should NOT be intercepted
+	h.handleRequest(manager, types.Request{
+		ID:   "msg-1",
+		Type: "send_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"from":    "manager",
+			"to":      "alice",
+			"content": "hello alice, please do X",
+		}),
+	})
+	resp := readResponse(t, manager, "send_message")
+	if !resp.Success {
+		t.Fatalf("expected manager send success, got error=%s", resp.Error)
+	}
+
+	roomState := h.getOrCreateRoom("r1")
+	messages := roomState.GetMessages()
+	// Find the non-system message
+	var found bool
+	for _, msg := range messages {
+		if msg.From == "manager" && msg.Type != "system" {
+			if msg.To != "alice" {
+				t.Fatalf("expected manager message to go directly to alice, got to=%q", msg.To)
+			}
+			if msg.RoutedByManager {
+				t.Fatalf("manager's own message should NOT have routed_by_manager=true")
+			}
+			if msg.OriginalTo != "" {
+				t.Fatalf("manager's own message should NOT have original_to, got %q", msg.OriginalTo)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected to find manager's message in room")
+	}
+}
+
 func TestHandleSendMessage_ManagerInterception(t *testing.T) {
 	h, manager := newTestHubClient()
 	alice := &Client{

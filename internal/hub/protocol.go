@@ -104,6 +104,10 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("bu bağlantı '%s' olarak join oldu; farklı adla join olamaz", c.agentName))
 		return
 	}
+	if c.joinedRoom != "" && c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("zaten '%s' odasına katıldınız; farklı odaya join olamaz", c.joinedRoom))
+		return
+	}
 	if len(data.Role) > maxFieldLength {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("role too long: %d chars, max %d", len(data.Role), maxFieldLength))
 		return
@@ -201,10 +205,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	roomState := h.getOrCreateRoom(room)
 
-	activeManager := roomState.GetActiveManager()
-	if activeManager != "" && data.From == activeManager {
-		roomState.TouchManagerHeartbeat(data.From)
-	}
+	activeManager := roomState.GetActiveManagerAndTouch(data.From)
 
 	to := data.To
 	opts := SendOptions{}
