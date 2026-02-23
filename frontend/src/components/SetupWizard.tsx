@@ -45,10 +45,10 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     setCreating(true);
     try {
       const name = agentName.trim() || `agent-${slotIndex + 1}`;
-      const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex);
       if (setAsManager) {
         await setTeamManager(teamID, name);
       }
+      const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex);
       onCreated(sessionID);
     } catch (e) {
       console.error("Failed to create terminal:", e);
