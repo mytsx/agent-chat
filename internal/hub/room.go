@@ -270,6 +270,22 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	return false
 }
 
+// ResetManagerLockIfDifferent clears active manager lock unless it matches managerAgent.
+// If managerAgent is empty, the lock is always cleared.
+func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	managerAgent = strings.TrimSpace(managerAgent)
+	if managerAgent != "" && r.managerAgent == managerAgent {
+		return
+	}
+	if r.managerAgent != "" || r.managerLastSeen != 0 {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+		r.dirty = true
+	}
+}
+
 // Clear removes all messages and agents.
 func (r *RoomState) Clear() {
 	r.mu.Lock()

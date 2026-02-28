@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -14,6 +15,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 	switch req.Type {
 	case "identify":
 		h.handleIdentify(c, req)
+	case "set_manager":
+		h.handleSetManager(c, req)
 	case "subscribe":
 		h.handleSubscribe(c, req)
 	case "join_room":
@@ -48,10 +51,34 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 		ClientType string `json:"client_type"`
 		AgentName  string `json:"agent_name"`
 		Room       string `json:"room"`
+		AuthToken  string `json:"auth_token"`
 	}
-	json.Unmarshal(req.Data, &data)
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		c.sendError(req.ID, req.Type, "invalid identify payload")
+		return
+	}
 
-	c.clientType = data.ClientType
+	clientType := strings.ToLower(strings.TrimSpace(data.ClientType))
+	switch clientType {
+	case "", "mcp", "desktop":
+	default:
+		c.sendError(req.ID, req.Type, fmt.Sprintf("unsupported client_type: %s", data.ClientType))
+		return
+	}
+
+	if c.clientType != "" && clientType != "" && c.clientType != clientType {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("client_type değiştirilemez (mevcut: %s)", c.clientType))
+		return
+	}
+	if clientType == "desktop" {
+		if !h.validateDesktopToken(data.AuthToken) {
+			c.sendError(req.ID, req.Type, "desktop authentication failed")
+			return
+		}
+		c.desktopAuthed = true
+	}
+
+	c.clientType = clientType
 	if data.AgentName != "" {
 		if c.joinedRoom != "" && c.agentName != data.AgentName {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("join_room sonrası agent adı değiştirilemez (mevcut: %s)", c.agentName))
@@ -68,6 +95,59 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 	resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true}
 	resp.Data, _ = json.Marshal(map[string]bool{"ok": true})
 	c.sendJSON(resp)
+}
+
+func (h *Hub) validateDesktopToken(token string) bool {
+	hubToken := strings.TrimSpace(h.desktopAuthToken)
+	if hubToken == "" {
+		return false
+	}
+	t := strings.TrimSpace(token)
+	if len(t) != len(hubToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(t), []byte(hubToken)) == 1
+}
+
+func (c *Client) isDesktopAuthorized() bool {
+	return c.clientType == "desktop" && c.desktopAuthed
+}
+
+func (h *Hub) handleSetManager(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi manager atayabilir")
+		return
+	}
+
+	var data struct {
+		ManagerAgent string `json:"manager_agent"`
+	}
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		c.sendError(req.ID, req.Type, "invalid set_manager payload")
+		return
+	}
+	managerAgent := strings.TrimSpace(data.ManagerAgent)
+	if managerAgent != "" {
+		if err := validation.ValidateName(managerAgent); err != nil {
+			c.sendError(req.ID, req.Type, err.Error())
+			return
+		}
+	}
+
+	room := h.resolveRoom(req.Room)
+	h.setConfiguredManager(room, managerAgent)
+
+	roomState := h.getOrCreateRoom(room)
+	roomState.ResetManagerLockIfDifferent(managerAgent)
+
+	var text string
+	if managerAgent == "" {
+		text = fmt.Sprintf("'%s' odası için manager ataması temizlendi.", room)
+	} else {
+		text = fmt.Sprintf("'%s' odası manager'ı '%s' olarak ayarlandı.", room, managerAgent)
+	}
+	respData, _ := json.Marshal(map[string]string{"text": text})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 
 func (h *Hub) handleSubscribe(c *Client, req types.Request) {
@@ -117,6 +197,18 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	if len(data.Role) > maxFieldLength {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("role too long: %d chars, max %d", len(data.Role), maxFieldLength))
 		return
+	}
+	role := strings.ToLower(strings.TrimSpace(data.Role))
+	if role == "manager" {
+		configuredManager := h.getConfiguredManager(room)
+		if configuredManager == "" {
+			c.sendError(req.ID, req.Type, "manager rolü atanmadı; önce desktop üzerinden manager belirlenmeli")
+			return
+		}
+		if data.AgentName != configuredManager {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("manager rolü yalnızca '%s' agent'ına atanabilir", configuredManager))
+			return
+		}
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
@@ -324,19 +416,20 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
 
-	// Only the active manager or desktop app can read all messages
-	if c.agentName == "" && c.clientType == "" {
-		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
-		return
-	}
-	if c.agentName != "" {
+	// Only the active manager or authorized desktop app can read all messages.
+	if c.agentName == "" {
+		if !c.isDesktopAuthorized() {
+			c.sendError(req.ID, req.Type, "önce yetkili desktop identify veya join_room çağırmalısınız")
+			return
+		}
+	} else {
 		if c.joinedRoom != room {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
 			return
 		}
 		activeManager := roomState.GetActiveManager()
-		if activeManager != "" && c.agentName != activeManager {
-			c.sendError(req.ID, req.Type, "yalnızca manager tüm mesajları okuyabilir")
+		if activeManager == "" || c.agentName != activeManager {
+			c.sendError(req.ID, req.Type, "yalnızca aktif manager tüm mesajları okuyabilir")
 			return
 		}
 		roomState.TouchManagerHeartbeat(c.agentName)
@@ -464,14 +557,24 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
-	// Only desktop app or manager can clear a room
-	if c.agentName == "" && c.clientType == "" {
-		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
-		return
-	}
-	if c.agentName != "" && c.joinedRoom != room {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odayı temizleyebilirsiniz: %s", c.joinedRoom))
-		return
+	// Only authorized desktop app or active manager can clear a room.
+	if !c.isDesktopAuthorized() {
+		if c.agentName == "" || c.joinedRoom == "" {
+			c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
+			return
+		}
+		if c.joinedRoom != room {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odayı temizleyebilirsiniz: %s", c.joinedRoom))
+			return
+		}
+
+		roomState := h.getOrCreateRoom(room)
+		activeManager := roomState.GetActiveManager()
+		if activeManager == "" || c.agentName != activeManager {
+			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya yetkili desktop odayı temizleyebilir")
+			return
+		}
+		roomState.TouchManagerHeartbeat(c.agentName)
 	}
 
 	roomState := h.getOrCreateRoom(room)
@@ -492,12 +595,12 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
-	// Desktop app (clientType set, no agentName) can query without join
-	if c.agentName == "" && c.clientType == "" {
-		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
-		return
-	}
-	if c.agentName != "" {
+	if c.agentName == "" {
+		if !c.isDesktopAuthorized() {
+			c.sendError(req.ID, req.Type, "önce yetkili desktop identify veya join_room çağırmalısınız")
+			return
+		}
+	} else {
 		if c.joinedRoom != room {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan sorgulama yapabilirsiniz: %s", c.joinedRoom))
 			return
@@ -524,6 +627,11 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 // handleGetAgents returns raw agent data for a room (used by desktop app).
 func (h *Hub) handleGetAgents(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi agent listesini ham biçimde okuyabilir")
+		return
+	}
+
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
 	agents := roomState.GetAgents()
@@ -534,6 +642,11 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 
 // handleGetMessagesRaw returns raw message data for a room (used by desktop app).
 func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi mesajları ham biçimde okuyabilir")
+		return
+	}
+
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
 	messages := roomState.GetMessages()

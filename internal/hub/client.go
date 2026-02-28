@@ -24,8 +24,10 @@ type Client struct {
 	send       chan []byte
 	rooms      map[string]bool // subscribed rooms
 	clientType string          // "mcp" or "desktop"
-	agentName  string
-	joinedRoom string
+	// desktopAuthed is true only when client_type=desktop is validated with hub auth token.
+	desktopAuthed bool
+	agentName     string
+	joinedRoom    string
 }
 
 func newClient(hub *Hub, conn *websocket.Conn) *Client {

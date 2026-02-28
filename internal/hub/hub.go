@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"desktop/internal/types"
@@ -25,7 +26,11 @@ type Hub struct {
 	rooms       map[string]*RoomState
 	clients     map[*Client]bool
 	subs        map[string]map[*Client]bool // room → subscribed clients
+	roomManager map[string]string           // room → configured manager agent name
 	defaultRoom string
+	// desktopAuthToken is a shared secret set by the desktop app when spawning the hub.
+	// It is required to identify as client_type=desktop.
+	desktopAuthToken string
 
 	register   chan *Client
 	unregister chan *Client
@@ -39,16 +44,19 @@ type Hub struct {
 
 // New creates a new Hub.
 func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
+	desktopAuthToken := strings.TrimSpace(os.Getenv("AGENT_CHAT_HUB_TOKEN"))
 	return &Hub{
-		rooms:       make(map[string]*RoomState),
-		clients:     make(map[*Client]bool),
-		subs:        make(map[string]map[*Client]bool),
-		defaultRoom: defaultRoom,
-		register:    make(chan *Client),
-		unregister:  make(chan *Client),
-		dataDir:     dataDir,
-		logger:      logger,
-		done:        make(chan struct{}),
+		rooms:            make(map[string]*RoomState),
+		clients:          make(map[*Client]bool),
+		subs:             make(map[string]map[*Client]bool),
+		roomManager:      make(map[string]string),
+		defaultRoom:      defaultRoom,
+		desktopAuthToken: desktopAuthToken,
+		register:         make(chan *Client),
+		unregister:       make(chan *Client),
+		dataDir:          dataDir,
+		logger:           logger,
+		done:             make(chan struct{}),
 	}
 }
 
@@ -197,6 +205,22 @@ func (h *Hub) resolveRoom(room string) string {
 		return h.defaultRoom
 	}
 	return room
+}
+
+func (h *Hub) setConfiguredManager(room, managerAgent string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if strings.TrimSpace(managerAgent) == "" {
+		delete(h.roomManager, room)
+		return
+	}
+	h.roomManager[room] = managerAgent
+}
+
+func (h *Hub) getConfiguredManager(room string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.roomManager[room]
 }
 
 // broadcastEvent sends an event to all subscribers of a room.

@@ -223,14 +223,21 @@ func (c *HubClient) readLoop() {
 // --- Convenience methods ---
 
 // Identify sends an identify request.
-func (c *HubClient) Identify(clientType, agentName, room string) error {
+func (c *HubClient) Identify(clientType, agentName, room, authToken string) error {
 	data, _ := json.Marshal(map[string]string{
 		"client_type": clientType,
 		"agent_name":  agentName,
 		"room":        room,
+		"auth_token":  authToken,
 	})
-	_, err := c.Send(types.Request{Type: "identify", Data: data})
-	return err
+	resp, err := c.Send(types.Request{Type: "identify", Data: data})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("identify failed: %s", resp.Error)
+	}
+	return nil
 }
 
 // Subscribe subscribes to room events.
@@ -238,6 +245,19 @@ func (c *HubClient) Subscribe(rooms []string) error {
 	data, _ := json.Marshal(map[string][]string{"rooms": rooms})
 	_, err := c.Send(types.Request{Type: "subscribe", Data: data})
 	return err
+}
+
+// SetManager configures the allowed manager agent for a room.
+func (c *HubClient) SetManager(room, managerAgent string) error {
+	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
+	resp, err := c.Send(types.Request{Type: "set_manager", Room: room, Data: data})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("set_manager failed: %s", resp.Error)
+	}
+	return nil
 }
 
 // JoinRoom joins a room.
