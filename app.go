@@ -725,7 +725,7 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
-	t, _ := a.teamStore.Get(id)
+	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 	for _, s := range sessions {
 		a.ptyManager.Close(s.ID)
@@ -734,7 +734,7 @@ func (a *App) DeleteTeam(id string) error {
 	if err := a.teamStore.Delete(id); err != nil {
 		return err
 	}
-	if t.Name != "" {
+	if getErr == nil && t.Name != "" {
 		a.syncHubManager(t.Name, "")
 	}
 	return nil
