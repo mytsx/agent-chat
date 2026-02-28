@@ -3,7 +3,7 @@ import { CLIType } from "../lib/types";
 import { useTerminals } from "../store/useTerminals";
 import { usePrompts } from "../store/usePrompts";
 import { useTeams } from "../store/useTeams";
-import { OpenDirectoryDialog } from "../../wailsjs/go/main/App";
+import { OpenDirectoryDialog, IsGitRepo } from "../../wailsjs/go/main/App";
 import CLISelector from "./CLISelector";
 
 interface Props {
@@ -21,6 +21,8 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const [workDir, setWorkDir] = useState("");
   const [promptID, setPromptID] = useState("");
   const [setAsManager, setSetAsManager] = useState(false);
+  const [useWorktree, setUseWorktree] = useState(false);
+  const [isGitRepoDir, setIsGitRepoDir] = useState(false);
   const [creating, setCreating] = useState(false);
 
   // Set default CLI to first available AI CLI
@@ -30,6 +32,22 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       setSelectedCLI(firstAI ? (firstAI.type as CLIType) : "shell");
     }
   }, [availableCLIs]);
+
+  // Check if workDir is a git repo
+  useEffect(() => {
+    if (!workDir) {
+      setIsGitRepoDir(false);
+      setUseWorktree(false);
+      return;
+    }
+    IsGitRepo(workDir).then((result) => {
+      setIsGitRepoDir(result);
+      if (!result) setUseWorktree(false);
+    }).catch(() => {
+      setIsGitRepoDir(false);
+      setUseWorktree(false);
+    });
+  }, [workDir]);
 
   const handleBrowse = async () => {
     try {
@@ -48,7 +66,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       if (setAsManager) {
         await setTeamManager(teamID, name);
       }
-      const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex);
+      const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex, useWorktree);
       onCreated(sessionID);
     } catch (e) {
       console.error("Failed to create terminal:", e);
@@ -129,6 +147,23 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               <span>Set as manager</span>
             </label>
           </div>
+
+          {isGitRepoDir && (
+            <div className="wizard-field">
+              <label className="wizard-checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={useWorktree}
+                  onChange={(e) => setUseWorktree(e.target.checked)}
+                  disabled={setAsManager}
+                />
+                <span>Use Git Worktree</span>
+              </label>
+              {setAsManager && (
+                <span className="wizard-hint">Manager agent ana repoda çalışır</span>
+              )}
+            </div>
+          )}
 
           <button
             type="button"

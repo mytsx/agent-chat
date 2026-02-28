@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"desktop/internal/cli"
+	"desktop/internal/git"
 	"desktop/internal/hubclient"
 	"desktop/internal/orchestrator"
 	"desktop/internal/prompt"
@@ -401,8 +402,9 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 	return false, nil
 }
 
-// CreateTerminal creates a new terminal and returns its session ID
-func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string) (string, error) {
+// CreateTerminal creates a new terminal and returns its session ID.
+// If useWorktree is true and workDir is a git repo, a worktree is created for the agent.
+func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -422,6 +424,26 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
 	if err != nil {
 		return "", err
+	}
+
+	// Manager agent always works in main repo — backend guard
+	if isManager {
+		useWorktree = false
+	}
+
+	// Worktree setup
+	var wtDir, origWorkDir string
+	if useWorktree && workDir != "" && git.IsGitRepo(workDir) {
+		origWorkDir = workDir
+		teamSlug := git.Slug(teamName)
+		agentSlug := git.Slug(agentName)
+		branchName := fmt.Sprintf("agent/%s/%s", teamSlug, agentSlug)
+		wtDir = filepath.Join(a.dataDir, "worktrees", teamSlug, agentSlug)
+
+		if err := git.CreateWorktree(workDir, wtDir, branchName); err != nil {
+			return "", fmt.Errorf("worktree oluşturulamadı: %w", err)
+		}
+		workDir = wtDir // PTY will run in worktree directory
 	}
 
 	managerAgent := ""
@@ -476,9 +498,13 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", err
 	}
 
-	// Store promptID for restart
+	// Store promptID and worktree info for restart
 	if s := a.ptyManager.GetSession(sessionID); s != nil {
 		s.PromptID = promptID
+		if wtDir != "" {
+			s.WorktreeDir = wtDir
+			s.WorktreeRepo = origWorkDir
+		}
 	}
 
 	// Register agent session for orchestrator (using room name)
@@ -493,6 +519,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 }
 
 // RestartTerminal closes a terminal and creates a new one with the same parameters.
+// If the terminal was using a worktree, the worktree is preserved.
 func (a *App) RestartTerminal(sessionID string) (string, error) {
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
@@ -505,15 +532,34 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	workDir := session.WorkDir
 	cliType := session.CLIType
 	promptID := session.PromptID
+	wtDir := session.WorktreeDir
+	wtRepo := session.WorktreeRepo
 
-	// Close old terminal (unregisters from orchestrator)
-	if err := a.CloseTerminal(sessionID); err != nil {
+	// If worktree exists, use it as workDir (it's already created)
+	if wtDir != "" {
+		workDir = wtDir
+	}
+
+	// Close PTY but do NOT cleanup worktree (it will be reused)
+	if err := a.closeTerminalInternal(sessionID, false); err != nil {
 		log.Printf("[RESTART] Failed to close old session %s: %v", ptymgr.ShortID(sessionID), err)
 	}
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	return a.CreateTerminal(teamID, agentName, workDir, cliType, promptID)
+	// useWorktree=false because worktree already exists, workDir already points to it
+	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false)
+	if err != nil {
+		return "", err
+	}
+
+	// Transfer worktree info to new session
+	if s := a.ptyManager.GetSession(newSessionID); s != nil && wtDir != "" {
+		s.WorktreeDir = wtDir
+		s.WorktreeRepo = wtRepo
+	}
+
+	return newSessionID, nil
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it
@@ -620,22 +666,68 @@ func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 	return a.ptyManager.Resize(sessionID, uint16(cols), uint16(rows))
 }
 
-// CloseTerminal closes a terminal
-func (a *App) CloseTerminal(sessionID string) error {
+// closeTerminalInternal closes the PTY and optionally cleans up the worktree.
+func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) error {
 	session := a.ptyManager.GetSession(sessionID)
-	if session != nil {
-		if session.TeamID != "" && session.AgentName != "" {
-			t, err := a.teamStore.Get(session.TeamID)
-			if err == nil {
-				teamName := t.Name
-				if teamName == "" {
-					teamName = "default"
-				}
-				a.orchestrator.UnregisterAgent(teamName, session.AgentName)
+	if session == nil {
+		return a.ptyManager.Close(sessionID)
+	}
+
+	// Capture metadata before closing
+	wtDir := session.WorktreeDir
+	wtRepo := session.WorktreeRepo
+	agentName := session.AgentName
+
+	// Unregister from orchestrator
+	if session.TeamID != "" && agentName != "" {
+		t, err := a.teamStore.Get(session.TeamID)
+		if err == nil {
+			teamName := t.Name
+			if teamName == "" {
+				teamName = "default"
+			}
+			a.orchestrator.UnregisterAgent(teamName, agentName)
+		}
+	}
+
+	// Close PTY (terminates process)
+	if err := a.ptyManager.Close(sessionID); err != nil {
+		return err
+	}
+
+	// Worktree cleanup (after PTY is closed — no open process)
+	if cleanupWorktree && wtDir != "" && wtRepo != "" {
+		dirty, err := git.IsDirty(wtDir)
+		if err != nil {
+			log.Printf("[WORKTREE] Dirty check failed, keeping: %s (%v)", wtDir, err)
+			runtime.EventsEmit(a.ctx, "worktree:dirty", map[string]string{
+				"sessionID":   sessionID,
+				"agentName":   agentName,
+				"worktreeDir": wtDir,
+				"error":       err.Error(),
+			})
+		} else if dirty {
+			log.Printf("[WORKTREE] Dirty worktree, keeping: %s", wtDir)
+			runtime.EventsEmit(a.ctx, "worktree:dirty", map[string]string{
+				"sessionID":   sessionID,
+				"agentName":   agentName,
+				"worktreeDir": wtDir,
+			})
+		} else {
+			if err := git.RemoveWorktree(wtRepo, wtDir); err != nil {
+				log.Printf("[WORKTREE] Cleanup failed: %v", err)
+			} else {
+				log.Printf("[WORKTREE] Cleaned up: %s", wtDir)
 			}
 		}
 	}
-	return a.ptyManager.Close(sessionID)
+
+	return nil
+}
+
+// CloseTerminal closes a terminal and cleans up its worktree if clean.
+func (a *App) CloseTerminal(sessionID string) error {
+	return a.closeTerminalInternal(sessionID, true)
 }
 
 // GetTerminalSessions returns all active terminal sessions for a team
@@ -775,6 +867,11 @@ func (a *App) DeletePrompt(id string) error {
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
 	return a.ptyManager.Write(sessionID, []byte(rendered+"\n"))
+}
+
+// IsGitRepo checks if a directory is inside a git repository.
+func (a *App) IsGitRepo(dir string) bool {
+	return git.IsGitRepo(dir)
 }
 
 // ===================== CLI Bindings =====================

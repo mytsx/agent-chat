@@ -22,7 +22,8 @@ interface TerminalsState {
     workDir: string,
     cliType: CLIType,
     promptId?: string,
-    slotIndex?: number
+    slotIndex?: number,
+    useWorktree?: boolean
   ) => Promise<string>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
@@ -57,8 +58,8 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     }
   },
 
-  addTerminal: async (teamID, agentName, workDir, cliType, promptId, slotIndex) => {
-    const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "");
+  addTerminal: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree = false) => {
+    const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "", useWorktree);
     const currentSessions = get().sessions[teamID] ?? [];
     const resolvedSlotIndex = slotIndex ?? currentSessions.length;
     const session: TerminalSession = {
