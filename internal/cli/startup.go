@@ -6,7 +6,7 @@ import (
 )
 
 // ComposeStartupPrompt builds the full startup prompt from multiple parts.
-func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, selectedPrompt, agentName, teamName string, isManager bool) string {
+func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, selectedPrompt, agentName, agentRole, teamName string, isManager bool) string {
 	var parts []string
 
 	// 1. Base prompt (always included)
@@ -30,7 +30,10 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, selectedPrompt, 
 	}
 
 	// 5. Join instruction (always included)
-	role := agentName
+	role := strings.TrimSpace(agentRole)
+	if role == "" {
+		role = agentName
+	}
 	readInstruction := fmt.Sprintf("Odaya katıldıktan sonra read_messages(\"%s\") ile mesajları oku ve diğer agent'larla iletişime geç.", agentName)
 	if isManager {
 		role = "manager"

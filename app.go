@@ -321,16 +321,18 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) seedPrompts() {
-	basePrompt, err := promptsFS.ReadFile("prompts/base_prompt.md")
-	if err != nil {
-		log.Printf("[PROMPT] base_prompt.md okunamadı: %v", err)
-	}
-	managerPrompt, err := promptsFS.ReadFile("prompts/manager_prompt.md")
-	if err != nil {
-		log.Printf("[PROMPT] manager_prompt.md okunamadı: %v", err)
-	}
+	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
+	managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
 
 	a.promptStore.Seed(string(basePrompt), string(managerPrompt))
+}
+
+func (a *App) readEmbeddedPrompt(path string) []byte {
+	data, err := promptsFS.ReadFile(path)
+	if err != nil {
+		log.Printf("[PROMPT] %s okunamadı: %v", path, err)
+	}
+	return data
 }
 
 // ===================== PTY Bindings =====================
@@ -376,7 +378,7 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 
 	t, err := a.teamStore.Get(teamID)
 	if err != nil {
-		return managerFromPrompt, nil
+		return false, fmt.Errorf("takım bilgisi alınamadı %s: %w", teamID, err)
 	}
 
 	managerFromTeam := strings.TrimSpace(t.ManagerAgent)
@@ -520,10 +522,7 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 		return ""
 	}
 
-	basePrompt, err := promptsFS.ReadFile("prompts/base_prompt.md")
-	if err != nil {
-		log.Printf("[PROMPT] base_prompt.md okunamadı: %v", err)
-	}
+	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
 	globalPromptPath := filepath.Join(a.dataDir, "global_prompt.md")
 	globalPrompt, err := os.ReadFile(globalPromptPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -532,9 +531,17 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 
 	var teamPrompt string
 	var teamName string
+	var agentRole string
 	if t, err := a.teamStore.Get(teamID); err == nil {
 		teamName = t.Name
 		teamPrompt = t.CustomPrompt
+		normalizedAgent := strings.TrimSpace(agentName)
+		for _, cfg := range t.Agents {
+			if strings.EqualFold(strings.TrimSpace(cfg.Name), normalizedAgent) {
+				agentRole = strings.TrimSpace(cfg.Role)
+				break
+			}
+		}
 	}
 
 	var selectedPrompt string
@@ -545,10 +552,7 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 	}
 
 	if isManager {
-		managerPrompt, err := promptsFS.ReadFile("prompts/manager_prompt.md")
-		if err != nil {
-			log.Printf("[PROMPT] manager_prompt.md okunamadı: %v", err)
-		}
+		managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
 		managerText := strings.TrimSpace(string(managerPrompt))
 		if managerText != "" {
 			if strings.TrimSpace(selectedPrompt) == "" {
@@ -559,7 +563,7 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 		}
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, teamName, isManager)
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, agentRole, teamName, isManager)
 }
 
 // sendStartupPrompt sends the initial prompt to a CLI agent
