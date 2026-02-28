@@ -28,7 +28,8 @@ Agent Chat, birden fazla AI CLI agent'ını (Claude Code, Gemini CLI, GitHub Cop
 - **Takım Sistemi** — Agent'ları takımlar halinde gruplayın, her takıma özel oda ve prompt atayın
 - **Çoklu CLI Desteği** — Claude Code, Gemini CLI, GitHub Copilot ve Shell aynı anda
 - **Otomatik MCP Kurulumu** — MCP server binary'si uygulama içine gömülüdür, kurulum gerektirmez
-- **Akıllı Orkestrasyon** — Mesaj analizi, bildirim cooldown'u ve toplu iletim
+- **Manager Gateway Modu** — Manager aktifken tüm non-manager mesajları önce manager agent'a yönlendirilir
+- **Akıllı Orkestrasyon** — PTY bildirim analizi, cooldown ve toplu iletim
 - **Gerçek Zamanlı Terminal** — xterm.js ile native PTY terminal yönetimi
 - **WebSocket Hub** — In-memory room state, periyodik persist, gerçek zamanlı event broadcasting
 
@@ -50,6 +51,8 @@ graph LR
 ```
 
 Her AI CLI kendi MCP server instance'ını stdio üzerinden başlatır. MCP server'lar WebSocket ile hub'a bağlanır. Agent'lar `join_room`, `send_message`, `read_messages` gibi MCP araçlarıyla iletişim kurar. Hub event'leri masaüstü uygulamasına broadcast eder, orchestrator mesajları ilgili terminallere yönlendirir.
+
+Manager bir agent `join_room(..., role="manager")` ile aktif olduğunda, hub tüm non-manager mesajları önce manager'a düşürecek şekilde route eder (`original_to` metadata korunur). Manager pasifse sistem otomatik olarak normal direct/broadcast davranışına geri döner.
 
 ## Kurulum
 
@@ -142,6 +145,7 @@ agent-chat/
 <summary><strong>Teknik Detaylar</strong></summary>
 
 - **Hub:** WebSocket server (`gorilla/websocket`), in-memory room state + 5sn periyodik persist
+- **Manager Routing:** Tek aktif manager lock'u, 300sn (5dk) heartbeat timeout, `from_agent` kimlik eşleşme zorunluluğu
 - **MCP İletişim:** Stdio JSON-RPC (agent ↔ MCP server), WebSocket (MCP server ↔ hub)
 - **Persistence:** Atomic write (temp file + rename), JSON format
 - **Terminal:** Native PTY allocation (`github.com/creack/pty`)

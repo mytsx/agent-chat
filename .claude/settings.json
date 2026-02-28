@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/gemini-review-on-push.sh"
+            "command": "/Users/yerli/Developer/agent-chat/.claude/hooks/gemini-review-on-push.sh"
           }
         ]
       }
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/notify-done.sh"
+            "command": "/Users/yerli/Developer/agent-chat/.claude/hooks/notify-done.sh"
           }
         ]
       }

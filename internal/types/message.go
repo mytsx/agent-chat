@@ -11,14 +11,16 @@ type Agent struct {
 
 // Message represents a chat message.
 type Message struct {
-	ID           int    `json:"id"`
-	From         string `json:"from"`
-	To           string `json:"to"`
-	Content      string `json:"content"`
-	Timestamp    string `json:"timestamp"`
-	Type         string `json:"type"`
-	ExpectsReply bool   `json:"expects_reply"`
-	Priority     string `json:"priority"`
+	ID              int    `json:"id"`
+	From            string `json:"from"`
+	To              string `json:"to"`
+	OriginalTo      string `json:"original_to,omitempty"`
+	Content         string `json:"content"`
+	Timestamp       string `json:"timestamp"`
+	Type            string `json:"type"`
+	RoutedByManager bool   `json:"routed_by_manager,omitempty"`
+	ExpectsReply    bool   `json:"expects_reply"`
+	Priority        string `json:"priority"`
 }
 
 // Now returns current time as float64 (Python time.time() compatible).

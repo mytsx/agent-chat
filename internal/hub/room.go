@@ -15,14 +15,17 @@ const (
 	truncateToMessages = 300
 	maxFieldLength     = 32000
 	staleTimeout       = 300 // seconds
+	managerTimeoutSec  = 300
 )
 
 // RoomState holds in-memory state for a single chat room.
 type RoomState struct {
-	mu       sync.RWMutex
-	messages []types.Message
-	agents   map[string]types.Agent
-	dirty    bool
+	mu              sync.RWMutex
+	messages        []types.Message
+	agents          map[string]types.Agent
+	dirty           bool
+	managerAgent    string
+	managerLastSeen float64
 }
 
 // NewRoomState creates an empty room.
@@ -35,8 +38,14 @@ func NewRoomState() *RoomState {
 
 // PersistedRoom is the JSON-serializable form of a room.
 type PersistedRoom struct {
-	Messages []types.Message          `json:"messages"`
-	Agents   map[string]types.Agent   `json:"agents"`
+	Messages []types.Message        `json:"messages"`
+	Agents   map[string]types.Agent `json:"agents"`
+}
+
+// SendOptions carries optional routing metadata.
+type SendOptions struct {
+	OriginalTo      string
+	RoutedByManager bool
 }
 
 // nextID returns the next message ID.
@@ -48,11 +57,23 @@ func (r *RoomState) nextID() int {
 }
 
 // Join adds an agent to the room, returning the system message and current agents.
-func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent) {
+func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.cleanupStaleLocked()
+
+	if _, exists := r.agents[agentName]; exists {
+		return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", agentName)
+	}
+
+	if strings.EqualFold(strings.TrimSpace(role), "manager") {
+		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
+			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
+		}
+		r.managerAgent = agentName
+		r.managerLastSeen = types.Now()
+	}
 
 	r.agents[agentName] = types.Agent{
 		Role:     role,
@@ -77,11 +98,11 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 	r.dirty = true
 
 	agentsCopy := r.copyAgentsLocked()
-	return sysMsg, agentsCopy
+	return sysMsg, agentsCopy, nil
 }
 
 // SendMessage adds a message to the room.
-func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, priority string) (types.Message, error) {
+func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, priority string, opts SendOptions) (types.Message, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -97,14 +118,16 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	}
 
 	msg := types.Message{
-		ID:           r.nextID(),
-		From:         from,
-		To:           to,
-		Content:      content,
-		Timestamp:    types.Timestamp(),
-		Type:         msgType,
-		ExpectsReply: expectsReply,
-		Priority:     priority,
+		ID:              r.nextID(),
+		From:            from,
+		To:              to,
+		OriginalTo:      opts.OriginalTo,
+		Content:         content,
+		Timestamp:       types.Timestamp(),
+		Type:            msgType,
+		RoutedByManager: opts.RoutedByManager,
+		ExpectsReply:    expectsReply,
+		Priority:        priority,
 	}
 	r.messages = append(r.messages, msg)
 
@@ -198,6 +221,10 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	}
 
 	delete(r.agents, agentName)
+	if r.managerAgent == agentName {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+	}
 
 	sysMsg := types.Message{
 		ID:        r.nextID(),
@@ -213,12 +240,60 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	return sysMsg, true
 }
 
+// GetActiveManager returns the active manager agent name, or empty if none.
+func (r *RoomState) GetActiveManager() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getActiveManagerLocked()
+}
+
+// GetActiveManagerAndTouch atomically checks if the given agent is the active
+// manager and refreshes the heartbeat if so. Returns the active manager name.
+func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	active := r.getActiveManagerLocked()
+	if active != "" && active == agentName {
+		r.managerLastSeen = types.Now()
+	}
+	return active
+}
+
+// TouchManagerHeartbeat updates manager heartbeat if this agent is active manager.
+func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.getActiveManagerLocked() == agentName {
+		r.managerLastSeen = types.Now()
+		return true
+	}
+	return false
+}
+
+// ResetManagerLockIfDifferent clears active manager lock unless it matches managerAgent.
+// If managerAgent is empty, the lock is always cleared.
+func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	managerAgent = strings.TrimSpace(managerAgent)
+	if managerAgent != "" && r.managerAgent == managerAgent {
+		return
+	}
+	if r.managerAgent != "" || r.managerLastSeen != 0 {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+		r.dirty = true
+	}
+}
+
 // Clear removes all messages and agents.
 func (r *RoomState) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.messages = []types.Message{}
 	r.agents = make(map[string]types.Agent)
+	r.managerAgent = ""
+	r.managerLastSeen = 0
 	r.dirty = true
 }
 
@@ -320,6 +395,25 @@ func (r *RoomState) cleanupStaleLocked() {
 			r.dirty = true
 		}
 	}
+	// Clear manager lock if timed out or agent was removed
+	r.clearManagerIfStale()
+}
+
+// clearManagerIfStale resets manager lock if the manager agent no longer exists
+// in the room or if the manager heartbeat has timed out. Must be called with mu held.
+func (r *RoomState) clearManagerIfStale() {
+	if r.managerAgent == "" {
+		return
+	}
+	if _, ok := r.agents[r.managerAgent]; !ok {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+		return
+	}
+	if types.Now()-r.managerLastSeen > float64(managerTimeoutSec) {
+		r.managerAgent = ""
+		r.managerLastSeen = 0
+	}
 }
 
 func (r *RoomState) copyAgentsLocked() map[string]types.Agent {
@@ -328,6 +422,11 @@ func (r *RoomState) copyAgentsLocked() map[string]types.Agent {
 		cp[k] = v
 	}
 	return cp
+}
+
+func (r *RoomState) getActiveManagerLocked() string {
+	r.clearManagerIfStale()
+	return r.managerAgent
 }
 
 // sanitize strips ANSI escape sequences and control characters.

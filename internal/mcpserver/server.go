@@ -64,7 +64,11 @@ Args:
     room: Room name (empty = default room from AGENT_CHAT_ROOM env or "default")
 
 Returns:
-    Confirmation message with list of other agents in the room`),
+    Confirmation message with list of other agents in the room
+
+Notes:
+    - Agent names must be unique per room; duplicate names are rejected
+    - role="manager" claims manager lock for the room (only one active manager)`),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("agent_name",
 			mcp.Required(),
@@ -91,7 +95,11 @@ Args:
     room: Room name (empty = default room)
 
 Returns:
-    Confirmation that message was sent`),
+    Confirmation that message was sent
+
+Notes:
+    - from_agent must match the name you joined with via join_room
+    - If a manager is active in the room, non-manager messages are first routed to manager`),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("from_agent",
 			mcp.Required(),

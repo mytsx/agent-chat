@@ -55,6 +55,7 @@ export default function MessageFeed({ chatDir }: Props) {
                 <span className="msg-from">{msg.from}</span>
                 <span className="msg-arrow">
                   {msg.to === "all" ? "=> ALL" : `=> ${msg.to}`}
+                  {msg.original_to && msg.original_to !== msg.to ? ` (intended: ${msg.original_to})` : null}
                 </span>
                 <span className="msg-time">{time}</span>
               </div>

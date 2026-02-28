@@ -82,6 +82,7 @@ export namespace team {
 	    agents: AgentConfig[];
 	    grid_layout: string;
 	    chat_dir: string;
+	    manager_agent: string;
 	    custom_prompt: string;
 	    created_at: string;
 	
@@ -96,6 +97,7 @@ export namespace team {
 	        this.agents = this.convertValues(source["agents"], AgentConfig);
 	        this.grid_layout = source["grid_layout"];
 	        this.chat_dir = source["chat_dir"];
+	        this.manager_agent = source["manager_agent"];
 	        this.custom_prompt = source["custom_prompt"];
 	        this.created_at = source["created_at"];
 	    }
@@ -127,9 +129,11 @@ export namespace types {
 	    id: number;
 	    from: string;
 	    to: string;
+	    original_to?: string;
 	    content: string;
 	    timestamp: string;
 	    type: string;
+	    routed_by_manager?: boolean;
 	    expects_reply: boolean;
 	    priority: string;
 	
@@ -142,9 +146,11 @@ export namespace types {
 	        this.id = source["id"];
 	        this.from = source["from"];
 	        this.to = source["to"];
+	        this.original_to = source["original_to"];
 	        this.content = source["content"];
 	        this.timestamp = source["timestamp"];
 	        this.type = source["type"];
+	        this.routed_by_manager = source["routed_by_manager"];
 	        this.expects_reply = source["expects_reply"];
 	        this.priority = source["priority"];
 	    }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,6 +39,7 @@ type App struct {
 	ptyManager   *ptymgr.Manager
 	hubClient    *hubclient.HubClient
 	hubProcess   *os.Process
+	hubAuthToken string
 	orchestrator *orchestrator.Orchestrator
 	promptStore  *prompt.Store
 	teamStore    *team.Store
@@ -100,9 +103,24 @@ func (a *App) startup(ctx context.Context) {
 	a.monitorHub()
 }
 
+func newHubAuthToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 // startHub spawns the hub process.
 func (a *App) startHub() error {
 	binPath := cli.GetMCPBinaryPath(a.dataDir)
+	if strings.TrimSpace(a.hubAuthToken) == "" {
+		token, err := newHubAuthToken()
+		if err != nil {
+			return fmt.Errorf("hub auth token üretilemedi: %w", err)
+		}
+		a.hubAuthToken = token
+	}
 
 	// Remove stale port file to prevent connecting to old hub
 	os.Remove(filepath.Join(a.dataDir, "hub.port"))
@@ -110,6 +128,7 @@ func (a *App) startHub() error {
 	cmd := exec.Command(binPath, "--hub")
 	cmd.Env = append(os.Environ(),
 		"AGENT_CHAT_DATA_DIR="+a.dataDir,
+		"AGENT_CHAT_HUB_TOKEN="+a.hubAuthToken,
 	)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -153,7 +172,10 @@ func (a *App) connectToHub() error {
 	})
 
 	// Identify as desktop client
-	client.Identify("desktop", "", "")
+	if err := client.Identify("desktop", "", "", a.hubAuthToken); err != nil {
+		client.Close()
+		return err
+	}
 
 	a.hubClient = client
 	log.Printf("[STARTUP] Connected to hub")
@@ -184,8 +206,8 @@ func (a *App) handleHubEvent(event types.Event) {
 
 	case "agent_joined", "agent_left":
 		var data struct {
-			AgentName string                  `json:"agent_name"`
-			Agents    map[string]types.Agent  `json:"agents"`
+			AgentName string                 `json:"agent_name"`
+			Agents    map[string]types.Agent `json:"agents"`
 		}
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			log.Printf("[HUB-EVENT] Failed to parse %s: %v", event.Event, err)
@@ -218,9 +240,21 @@ func (a *App) subscribeExistingTeams() {
 			teamName = "default"
 		}
 		rooms = append(rooms, teamName)
+		a.syncHubManager(teamName, strings.TrimSpace(t.ManagerAgent))
 	}
 	if len(rooms) > 0 {
-		a.hubClient.Subscribe(rooms)
+		if err := a.hubClient.Subscribe(rooms); err != nil {
+			log.Printf("[HUB] Subscribe failed: %v", err)
+		}
+	}
+}
+
+func (a *App) syncHubManager(room, managerAgent string) {
+	if a.hubClient == nil || strings.TrimSpace(room) == "" {
+		return
+	}
+	if err := a.hubClient.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
+		log.Printf("[HUB] set_manager failed for room=%s manager=%s: %v", room, managerAgent, err)
 	}
 }
 
@@ -287,10 +321,18 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) seedPrompts() {
-	basePrompt, _ := promptsFS.ReadFile("prompts/base_prompt.md")
-	managerPrompt, _ := promptsFS.ReadFile("prompts/manager_prompt.md")
+	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
+	managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
 
 	a.promptStore.Seed(string(basePrompt), string(managerPrompt))
+}
+
+func (a *App) readEmbeddedPrompt(path string) []byte {
+	data, err := promptsFS.ReadFile(path)
+	if err != nil {
+		log.Printf("[PROMPT] %s okunamadı: %v", path, err)
+	}
+	return data
 }
 
 // ===================== PTY Bindings =====================
@@ -300,6 +342,63 @@ func (a *App) OpenDirectoryDialog() (string, error) {
 	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select Workspace Directory",
 	})
+}
+
+func hasPromptTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if strings.EqualFold(strings.TrimSpace(t), tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) isManagerPrompt(promptID string) bool {
+	if promptID == "" {
+		return false
+	}
+	p, err := a.promptStore.Get(promptID)
+	if err != nil {
+		return false
+	}
+	return hasPromptTag(p.Tags, "manager")
+}
+
+// resolveManagerIntent determines whether this terminal should start as manager.
+// If persist=true and manager is inferred from prompt tag, team manager is auto-set.
+func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist bool) (bool, error) {
+	if agentName == "" {
+		return false, nil
+	}
+
+	managerFromPrompt := a.isManagerPrompt(promptID)
+	if teamID == "" {
+		return managerFromPrompt, nil
+	}
+
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return false, fmt.Errorf("takım bilgisi alınamadı %s: %w", teamID, err)
+	}
+
+	managerFromTeam := strings.TrimSpace(t.ManagerAgent)
+	if managerFromTeam != "" {
+		if managerFromPrompt && managerFromTeam != agentName {
+			return false, fmt.Errorf("team manager already set to '%s'; '%s' cannot use manager prompt", managerFromTeam, agentName)
+		}
+		return managerFromTeam == agentName, nil
+	}
+
+	if managerFromPrompt {
+		if persist {
+			if _, err := a.teamStore.SetManager(teamID, agentName); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // CreateTerminal creates a new terminal and returns its session ID
@@ -320,9 +419,27 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		teamName = "default"
 	}
 
+	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
+	if err != nil {
+		return "", err
+	}
+
+	managerAgent := ""
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			managerAgent = strings.TrimSpace(t.ManagerAgent)
+		}
+	}
+	if managerAgent == "" && isManager {
+		managerAgent = agentName
+	}
+	a.syncHubManager(teamName, managerAgent)
+
 	// Subscribe to room events
 	if a.hubClient != nil {
-		a.hubClient.Subscribe([]string{teamName})
+		if err := a.hubClient.Subscribe([]string{teamName}); err != nil {
+			log.Printf("[HUB] Subscribe failed for room=%s: %v", teamName, err)
+		}
 	}
 
 	// Ensure MCP server binary is ready and configured for the selected CLI
@@ -341,7 +458,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument
 	if ct == cli.CLICopilot && agentName != "" {
-		composed := a.composeAgentPrompt(teamID, agentName, promptID)
+		composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
 		if composed != "" {
 			cmdArgs = append(cmdArgs, "-i", composed)
 			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(composed))
@@ -370,7 +487,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	// Send startup prompt in background
-	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID)
+	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, isManager)
 
 	return sessionID, nil
 }
@@ -400,20 +517,31 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it
-func (a *App) composeAgentPrompt(teamID, agentName, promptID string) string {
+func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager bool) string {
 	if agentName == "" {
 		return ""
 	}
 
-	basePrompt, _ := promptsFS.ReadFile("prompts/base_prompt.md")
+	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
 	globalPromptPath := filepath.Join(a.dataDir, "global_prompt.md")
-	globalPrompt, _ := os.ReadFile(globalPromptPath)
+	globalPrompt, err := os.ReadFile(globalPromptPath)
+	if err != nil && !os.IsNotExist(err) {
+		log.Printf("[PROMPT] global_prompt.md okunamadı: %v", err)
+	}
 
 	var teamPrompt string
 	var teamName string
+	var agentRole string
 	if t, err := a.teamStore.Get(teamID); err == nil {
 		teamName = t.Name
 		teamPrompt = t.CustomPrompt
+		normalizedAgent := strings.TrimSpace(agentName)
+		for _, cfg := range t.Agents {
+			if strings.EqualFold(strings.TrimSpace(cfg.Name), normalizedAgent) {
+				agentRole = strings.TrimSpace(cfg.Role)
+				break
+			}
+		}
 	}
 
 	var selectedPrompt string
@@ -423,11 +551,23 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string) string {
 		}
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, teamName)
+	if isManager {
+		managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
+		managerText := strings.TrimSpace(string(managerPrompt))
+		if managerText != "" {
+			if strings.TrimSpace(selectedPrompt) == "" {
+				selectedPrompt = managerText
+			} else if !strings.Contains(selectedPrompt, managerText) {
+				selectedPrompt = strings.TrimSpace(selectedPrompt) + "\n\n" + managerText
+			}
+		}
+	}
+
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, agentRole, teamName, isManager)
 }
 
 // sendStartupPrompt sends the initial prompt to a CLI agent
-func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID string) {
+func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID string, isManager bool) {
 	if cliType == "" || cliType == "shell" || cliType == "copilot" || agentName == "" {
 		return
 	}
@@ -442,7 +582,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
-	composed := a.composeAgentPrompt(teamID, agentName, promptID)
+	composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
 	if composed == "" {
 		return
 	}
@@ -533,25 +673,75 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 
 	// Subscribe to hub events for this team
 	if a.hubClient != nil {
-		a.hubClient.Subscribe([]string{name})
+		if err := a.hubClient.Subscribe([]string{name}); err != nil {
+			log.Printf("[HUB] Subscribe failed for room=%s: %v", name, err)
+		}
 	}
+	a.syncHubManager(t.Name, strings.TrimSpace(t.ManagerAgent))
 
 	return t, nil
 }
 
 // UpdateTeam updates a team
 func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig) (team.Team, error) {
-	return a.teamStore.Update(id, name, gridLayout, agents)
+	prev, err := a.teamStore.Get(id)
+	if err != nil {
+		return team.Team{}, err
+	}
+
+	updated, err := a.teamStore.Update(id, name, gridLayout, agents)
+	if err != nil {
+		return team.Team{}, err
+	}
+
+	if prev.Name != "" && prev.Name != updated.Name {
+		a.syncHubManager(prev.Name, "")
+	}
+	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+
+	return updated, nil
+}
+
+// SetTeamManager sets or clears the manager agent for a team.
+func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
+	managerAgent = strings.TrimSpace(managerAgent)
+	if managerAgent != "" {
+		if err := validation.ValidateName(managerAgent); err != nil {
+			return team.Team{}, fmt.Errorf("invalid manager agent: %w", err)
+		}
+	}
+
+	t, err := a.teamStore.Get(id)
+	if err != nil {
+		return team.Team{}, err
+	}
+	if t.ManagerAgent != "" && managerAgent != "" && t.ManagerAgent != managerAgent {
+		return team.Team{}, fmt.Errorf("team already has manager '%s'; clear first before assigning '%s'", t.ManagerAgent, managerAgent)
+	}
+
+	updated, err := a.teamStore.SetManager(id, managerAgent)
+	if err != nil {
+		return team.Team{}, err
+	}
+	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	return updated, nil
 }
 
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
+	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 	for _, s := range sessions {
 		a.ptyManager.Close(s.ID)
 	}
 
-	return a.teamStore.Delete(id)
+	if err := a.teamStore.Delete(id); err != nil {
+		return err
+	}
+	if getErr == nil && t.Name != "" {
+		a.syncHubManager(t.Name, "")
+	}
+	return nil
 }
 
 // ===================== Prompt Bindings =====================

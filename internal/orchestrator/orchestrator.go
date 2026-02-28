@@ -272,6 +272,31 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 		return
 	}
 
+	// Manager-routed messages must always notify the manager target, even for ACK-like content.
+	if msg.RoutedByManager {
+		o.mu.Lock()
+		sessions := o.agentSessions[chatDir]
+		if sessions == nil {
+			o.mu.Unlock()
+			log.Printf("[ORCH] No agent sessions for chatDir=%s (manager-routed)", chatDir)
+			return
+		}
+		sessionsCopy := make(map[string]string, len(sessions))
+		for k, v := range sessions {
+			sessionsCopy[k] = v
+		}
+		o.mu.Unlock()
+
+		target := msg.To
+		if sessionID, ok := sessionsCopy[target]; ok {
+			log.Printf("[ORCH] Manager-routed notify: from=%s manager=%s original_to=%s", msg.From, target, msg.OriginalTo)
+			o.notifyAgent(chatDir, target, sessionID, msg.From, false)
+		} else {
+			log.Printf("[ORCH] Manager-routed target not found: %s", target)
+		}
+		return
+	}
+
 	analysis := AnalyzeMessage(msg)
 	log.Printf("[ORCH] Analysis: action=%s reason=%s", analysis.Action, analysis.Reason)
 	if analysis.Action == "skip" {
@@ -312,7 +337,6 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 		log.Printf("[ORCH] Target agent=%s not found in sessions", toAgent)
 	}
 }
-
 
 // mapKeys returns the keys of a map as a slice (for logging)
 func mapKeys[K comparable, V any](m map[K]V) []K {

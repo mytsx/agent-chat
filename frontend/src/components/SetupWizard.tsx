@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { CLIType } from "../lib/types";
 import { useTerminals } from "../store/useTerminals";
 import { usePrompts } from "../store/usePrompts";
+import { useTeams } from "../store/useTeams";
 import { OpenDirectoryDialog } from "../../wailsjs/go/main/App";
 import CLISelector from "./CLISelector";
 
@@ -13,11 +14,13 @@ interface Props {
 
 export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const { availableCLIs, addTerminal } = useTerminals();
+  const setTeamManager = useTeams((s) => s.setTeamManager);
   const prompts = usePrompts((s) => s.prompts);
   const [agentName, setAgentName] = useState("");
   const [selectedCLI, setSelectedCLI] = useState<CLIType>("shell");
   const [workDir, setWorkDir] = useState("");
   const [promptID, setPromptID] = useState("");
+  const [setAsManager, setSetAsManager] = useState(false);
   const [creating, setCreating] = useState(false);
 
   // Set default CLI to first available AI CLI
@@ -42,6 +45,9 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     setCreating(true);
     try {
       const name = agentName.trim() || `agent-${slotIndex + 1}`;
+      if (setAsManager) {
+        await setTeamManager(teamID, name);
+      }
       const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex);
       onCreated(sessionID);
     } catch (e) {
@@ -112,6 +118,17 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               </select>
             </div>
           )}
+
+          <div className="wizard-field">
+            <label className="wizard-checkbox-row">
+              <input
+                type="checkbox"
+                checked={setAsManager}
+                onChange={(e) => setSetAsManager(e.target.checked)}
+              />
+              <span>Set as manager</span>
+            </label>
+          </div>
 
           <button
             type="button"
