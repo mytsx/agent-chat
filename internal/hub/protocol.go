@@ -264,6 +264,10 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
 		return
 	}
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
+		return
+	}
 	if err := validation.ValidateName(data.AgentName); err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
@@ -326,6 +330,10 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		return
 	}
 	if c.agentName != "" {
+		if c.joinedRoom != room {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
+			return
+		}
 		activeManager := roomState.GetActiveManager()
 		if activeManager != "" && c.agentName != activeManager {
 			c.sendError(req.ID, req.Type, "yalnızca manager tüm mesajları okuyabilir")
@@ -455,6 +463,17 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 
 func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
+
+	// Only desktop app or manager can clear a room
+	if c.agentName == "" && c.clientType == "" {
+		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
+		return
+	}
+	if c.agentName != "" && c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odayı temizleyebilirsiniz: %s", c.joinedRoom))
+		return
+	}
+
 	roomState := h.getOrCreateRoom(room)
 	roomState.Clear()
 
@@ -478,9 +497,15 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, "önce identify veya join_room çağırmalısınız")
 		return
 	}
-	if c.agentName != "" && data.AgentName != "" && data.AgentName != c.agentName {
-		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla sorgulama yapabilirsiniz")
-		return
+	if c.agentName != "" {
+		if c.joinedRoom != room {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan sorgulama yapabilirsiniz: %s", c.joinedRoom))
+			return
+		}
+		if data.AgentName != "" && data.AgentName != c.agentName {
+			c.sendError(req.ID, req.Type, "yalnızca kendi adınızla sorgulama yapabilirsiniz")
+			return
+		}
 	}
 
 	roomState := h.getOrCreateRoom(room)
