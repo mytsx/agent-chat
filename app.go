@@ -495,6 +495,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	sessionID, err := a.ptyManager.Create(teamID, agentName, workDir, env, cmdName, cmdArgs, cliType)
 	if err != nil {
+		// Rollback worktree if PTY creation failed
+		if wtDir != "" && origWorkDir != "" {
+			if rmErr := git.RemoveWorktree(origWorkDir, wtDir); rmErr != nil {
+				log.Printf("[WORKTREE] Rollback failed after PTY error: %v", rmErr)
+			} else {
+				log.Printf("[WORKTREE] Rolled back worktree after PTY error: %s", wtDir)
+			}
+		}
 		return "", err
 	}
 
@@ -542,7 +550,7 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
 	if err := a.closeTerminalInternal(sessionID, false); err != nil {
-		log.Printf("[RESTART] Failed to close old session %s: %v", ptymgr.ShortID(sessionID), err)
+		return "", fmt.Errorf("eski session kapatılamadı %s: %w", ptymgr.ShortID(sessionID), err)
 	}
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
@@ -824,7 +832,7 @@ func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 	for _, s := range sessions {
-		a.ptyManager.Close(s.ID)
+		a.closeTerminalInternal(s.ID, true)
 	}
 
 	if err := a.teamStore.Delete(id); err != nil {

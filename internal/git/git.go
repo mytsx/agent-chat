@@ -3,6 +3,7 @@ package git
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -19,12 +20,51 @@ func IsGitRepo(dir string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
+// toplevelDir returns the top-level directory of a git repository.
+func toplevelDir(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --show-toplevel: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // CreateWorktree creates a git worktree at worktreePath branching from repoDir.
-// If the worktree already exists it is reused (idempotent).
+// If the worktree already exists with matching repo and branch, it is reused (idempotent).
+// If it exists but belongs to a different repo or branch, an error is returned.
 func CreateWorktree(repoDir, worktreePath, branchName string) error {
 	// Check if worktree already exists at this path
 	if IsGitRepo(worktreePath) {
-		return nil // idempotent: already exists
+		// Verify it belongs to the same repo
+		repoTop, err := toplevelDir(repoDir)
+		if err != nil {
+			return fmt.Errorf("cannot determine repo toplevel: %w", err)
+		}
+		// For worktrees, commondir points back to the main repo's .git
+		wtCommon := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-common-dir")
+		wtOut, err := wtCommon.Output()
+		if err != nil {
+			return fmt.Errorf("cannot verify worktree origin: %w", err)
+		}
+		// Resolve the common dir to the repo toplevel
+		commonDir := strings.TrimSpace(string(wtOut))
+		// commonDir is typically /path/to/repo/.git — its parent is the repo toplevel
+		commonParent := filepath.Dir(commonDir)
+		if commonParent != repoTop {
+			return fmt.Errorf("worktree at %s belongs to repo %s, expected %s", worktreePath, commonParent, repoTop)
+		}
+
+		// Verify branch matches
+		currentBranch, err := CurrentBranch(worktreePath)
+		if err != nil {
+			return fmt.Errorf("cannot verify worktree branch: %w", err)
+		}
+		if currentBranch != branchName {
+			return fmt.Errorf("worktree at %s is on branch %s, expected %s", worktreePath, currentBranch, branchName)
+		}
+
+		return nil // idempotent: verified match
 	}
 
 	// Check if branch already exists

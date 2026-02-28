@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, Component, ReactNode } from "react";
+import { useEffect, useState, useRef, useCallback, Component, ReactNode } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, type PanelImperativeHandle } from "react-resizable-panels";
 import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
@@ -42,6 +42,7 @@ function AppContent() {
   const [ready, setReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
+  const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
 
   const toggleSidebar = () => {
     if (sidebarRef.current) {
@@ -89,10 +90,16 @@ function AppContent() {
           setAgents(data.chatDir, data.agents);
         }
       });
+      EventsOn("worktree:dirty", (data: { agentName?: string; worktreeDir?: string }) => {
+        if (data?.agentName && data?.worktreeDir) {
+          setWorktreeNotice({ agentName: data.agentName, worktreeDir: data.worktreeDir });
+        }
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
           EventsOff("agents:updated");
+          EventsOff("worktree:dirty");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
@@ -120,6 +127,8 @@ function AppContent() {
   const activeTeam = teams.find((t) => t.id === activeTeamID);
   const chatDir = activeTeam?.name || "default";
 
+  const dismissWorktreeNotice = useCallback(() => setWorktreeNotice(null), []);
+
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
       if (import.meta.env.DEV) console.warn("SendPromptToAgent failed:", e);
@@ -128,6 +137,14 @@ function AppContent() {
 
   return (
     <div className="app">
+      {worktreeNotice && (
+        <div className="worktree-notice">
+          <span>
+            <strong>{worktreeNotice.agentName}</strong> worktree&apos;si kirli olduğu için korunuyor: <code>{worktreeNotice.worktreeDir}</code>
+          </span>
+          <button type="button" onClick={dismissWorktreeNotice}>×</button>
+        </div>
+      )}
       <TabBar />
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">

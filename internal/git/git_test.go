@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +87,43 @@ func TestCreateWorktree(t *testing.T) {
 		// Second call should not error (idempotent)
 		if err := CreateWorktree(repo, wtPath, "reuse-branch"); err != nil {
 			t.Fatalf("second CreateWorktree should be idempotent: %v", err)
+		}
+	})
+
+	t.Run("reuse rejects branch mismatch", func(t *testing.T) {
+		repo := initTestRepo(t)
+		wtPath := filepath.Join(t.TempDir(), "wt-mismatch")
+
+		if err := CreateWorktree(repo, wtPath, "branch-a"); err != nil {
+			t.Fatalf("CreateWorktree: %v", err)
+		}
+
+		// Reuse with different branch should fail
+		err := CreateWorktree(repo, wtPath, "branch-b")
+		if err == nil {
+			t.Fatal("expected error for branch mismatch reuse")
+		}
+		if !strings.Contains(err.Error(), "expected branch-b") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reuse rejects different repo", func(t *testing.T) {
+		repo1 := initTestRepo(t)
+		repo2 := initTestRepo(t)
+		wtPath := filepath.Join(t.TempDir(), "wt-repo-mismatch")
+
+		if err := CreateWorktree(repo1, wtPath, "shared-branch"); err != nil {
+			t.Fatalf("CreateWorktree: %v", err)
+		}
+
+		// Reuse from different repo should fail
+		err := CreateWorktree(repo2, wtPath, "shared-branch")
+		if err == nil {
+			t.Fatal("expected error for repo mismatch reuse")
+		}
+		if !strings.Contains(err.Error(), "belongs to repo") {
+			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
