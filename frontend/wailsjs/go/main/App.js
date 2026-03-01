@@ -14,8 +14,8 @@ export function CreateTeam(arg1, arg2, arg3) {
   return window['go']['main']['App']['CreateTeam'](arg1, arg2, arg3);
 }
 
-export function CreateTerminal(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5);
+export function CreateTerminal(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function DeletePrompt(arg1) {
@@ -36,6 +36,10 @@ export function GetAgents(arg1) {
 
 export function GetGlobalPrompt() {
   return window['go']['main']['App']['GetGlobalPrompt']();
+}
+
+export function IsGitRepo(arg1) {
+  return window['go']['main']['App']['IsGitRepo'](arg1);
 }
 
 export function GetMessages(arg1) {

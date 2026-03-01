@@ -25,6 +25,8 @@ type PTYSession struct {
 	CLIType        string
 	WorkDir        string // stored for restart
 	PromptID       string // stored for restart
+	WorktreeDir    string // worktree directory path (empty if not using worktree)
+	WorktreeRepo   string // main repo directory (for worktree cleanup)
 	done           chan struct{}
 	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
 }

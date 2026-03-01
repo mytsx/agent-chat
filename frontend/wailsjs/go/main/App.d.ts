@@ -11,7 +11,7 @@ export function CreatePrompt(arg1:string,arg2:string,arg3:string,arg4:Array<stri
 
 export function CreateTeam(arg1:string,arg2:string,arg3:Array<team.AgentConfig>):Promise<team.Team>;
 
-export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<string>;
+export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:boolean):Promise<string>;
 
 export function DeletePrompt(arg1:string):Promise<void>;
 
@@ -22,6 +22,8 @@ export function DetectCLIs():Promise<Array<cli.CLIInfo>>;
 export function GetAgents(arg1:string):Promise<Record<string, types.Agent>>;
 
 export function GetGlobalPrompt():Promise<string>;
+
+export function IsGitRepo(arg1:string):Promise<boolean>;
 
 export function GetMessages(arg1:string):Promise<Array<types.Message>>;
 
