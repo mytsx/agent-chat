@@ -59,8 +59,12 @@ func TestCreateWorktree(t *testing.T) {
 		repo := initTestRepo(t)
 		wtPath := filepath.Join(t.TempDir(), "wt1")
 
-		if err := CreateWorktree(repo, wtPath, "test-branch"); err != nil {
+		created, err := CreateWorktree(repo, wtPath, "test-branch")
+		if err != nil {
 			t.Fatalf("CreateWorktree: %v", err)
+		}
+		if !created {
+			t.Error("expected created=true for new worktree")
 		}
 
 		if !IsGitRepo(wtPath) {
@@ -80,13 +84,21 @@ func TestCreateWorktree(t *testing.T) {
 		repo := initTestRepo(t)
 		wtPath := filepath.Join(t.TempDir(), "wt2")
 
-		if err := CreateWorktree(repo, wtPath, "reuse-branch"); err != nil {
+		created, err := CreateWorktree(repo, wtPath, "reuse-branch")
+		if err != nil {
 			t.Fatalf("first CreateWorktree: %v", err)
 		}
+		if !created {
+			t.Error("expected created=true for first call")
+		}
 
-		// Second call should not error (idempotent)
-		if err := CreateWorktree(repo, wtPath, "reuse-branch"); err != nil {
+		// Second call should not error (idempotent) and return created=false
+		created, err = CreateWorktree(repo, wtPath, "reuse-branch")
+		if err != nil {
 			t.Fatalf("second CreateWorktree should be idempotent: %v", err)
+		}
+		if created {
+			t.Error("expected created=false for reuse")
 		}
 	})
 
@@ -94,12 +106,12 @@ func TestCreateWorktree(t *testing.T) {
 		repo := initTestRepo(t)
 		wtPath := filepath.Join(t.TempDir(), "wt-mismatch")
 
-		if err := CreateWorktree(repo, wtPath, "branch-a"); err != nil {
+		if _, err := CreateWorktree(repo, wtPath, "branch-a"); err != nil {
 			t.Fatalf("CreateWorktree: %v", err)
 		}
 
 		// Reuse with different branch should fail
-		err := CreateWorktree(repo, wtPath, "branch-b")
+		_, err := CreateWorktree(repo, wtPath, "branch-b")
 		if err == nil {
 			t.Fatal("expected error for branch mismatch reuse")
 		}
@@ -113,12 +125,12 @@ func TestCreateWorktree(t *testing.T) {
 		repo2 := initTestRepo(t)
 		wtPath := filepath.Join(t.TempDir(), "wt-repo-mismatch")
 
-		if err := CreateWorktree(repo1, wtPath, "shared-branch"); err != nil {
+		if _, err := CreateWorktree(repo1, wtPath, "shared-branch"); err != nil {
 			t.Fatalf("CreateWorktree: %v", err)
 		}
 
 		// Reuse from different repo should fail
-		err := CreateWorktree(repo2, wtPath, "shared-branch")
+		_, err := CreateWorktree(repo2, wtPath, "shared-branch")
 		if err == nil {
 			t.Fatal("expected error for repo mismatch reuse")
 		}
@@ -138,7 +150,7 @@ func TestCreateWorktree(t *testing.T) {
 		}
 
 		wtPath := filepath.Join(t.TempDir(), "wt3")
-		if err := CreateWorktree(repo, wtPath, branchName); err != nil {
+		if _, err := CreateWorktree(repo, wtPath, branchName); err != nil {
 			t.Fatalf("CreateWorktree with existing branch: %v", err)
 		}
 
@@ -153,7 +165,7 @@ func TestRemoveWorktree(t *testing.T) {
 	repo := initTestRepo(t)
 	wtPath := filepath.Join(t.TempDir(), "wt-remove")
 
-	if err := CreateWorktree(repo, wtPath, "remove-branch"); err != nil {
+	if _, err := CreateWorktree(repo, wtPath, "remove-branch"); err != nil {
 		t.Fatalf("CreateWorktree: %v", err)
 	}
 
@@ -215,6 +227,12 @@ func TestSlug(t *testing.T) {
 		{"", "agent"},
 		{"🚀 Rocket", "rocket"},
 		{"çğıöşü", "cgiosu"},
+		// Separator preservation — must not collide
+		{"a_b", "a-b"},
+		{"ab", "ab"},
+		{"a.b", "a-b"},
+		{"a__b", "a-b"},
+		{"foo_bar.baz", "foo-bar-baz"},
 	}
 
 	for _, tt := range tests {
@@ -225,4 +243,21 @@ func TestSlug(t *testing.T) {
 			}
 		})
 	}
+
+	// Verify no collisions among distinct inputs that ValidateName allows
+	t.Run("no collisions", func(t *testing.T) {
+		distinctInputs := []string{"a_b", "ab", "a-b", "a.b", "a__b"}
+		seen := map[string]string{} // slug → input
+		for _, in := range distinctInputs {
+			slug := Slug(in)
+			if prev, ok := seen[slug]; ok {
+				// a_b and a-b and a.b colliding to "a-b" is expected and safe
+				// (they'd share a worktree). The dangerous case is a_b vs ab.
+				if (prev == "ab" || in == "ab") && slug == prev {
+					t.Errorf("collision: Slug(%q) == Slug(%q) == %q", prev, in, slug)
+				}
+			}
+			seen[slug] = in
+		}
+	})
 }

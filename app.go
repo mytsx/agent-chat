@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,15 +37,16 @@ var mcpServerBin []byte
 
 // App struct
 type App struct {
-	ctx          context.Context
-	ptyManager   *ptymgr.Manager
-	hubClient    *hubclient.HubClient
-	hubProcess   *os.Process
-	hubAuthToken string
-	orchestrator *orchestrator.Orchestrator
-	promptStore  *prompt.Store
-	teamStore    *team.Store
-	dataDir      string
+	ctx            context.Context
+	ptyManager     *ptymgr.Manager
+	hubClient      *hubclient.HubClient
+	hubProcess     *os.Process
+	hubAuthToken   string
+	orchestrator   *orchestrator.Orchestrator
+	promptStore    *prompt.Store
+	teamStore      *team.Store
+	dataDir        string
+	worktreeLocks  sync.Map // path → *sync.Mutex — per-path worktree lock
 }
 
 // NewApp creates a new App application struct
@@ -336,6 +338,12 @@ func (a *App) readEmbeddedPrompt(path string) []byte {
 	return data
 }
 
+// worktreeMu returns a per-path mutex for serializing worktree operations.
+func (a *App) worktreeMu(path string) *sync.Mutex {
+	v, _ := a.worktreeLocks.LoadOrStore(path, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // ===================== PTY Bindings =====================
 
 // OpenDirectoryDialog opens a native directory picker and returns the selected path
@@ -433,6 +441,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// Worktree setup
 	var wtDir, origWorkDir string
+	var wtNewlyCreated bool
 	if useWorktree && workDir != "" && git.IsGitRepo(workDir) {
 		origWorkDir = workDir
 		teamSlug := git.Slug(teamName)
@@ -440,9 +449,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		branchName := fmt.Sprintf("agent/%s/%s", teamSlug, agentSlug)
 		wtDir = filepath.Join(a.dataDir, "worktrees", teamSlug, agentSlug)
 
-		if err := git.CreateWorktree(workDir, wtDir, branchName); err != nil {
+		mu := a.worktreeMu(wtDir)
+		mu.Lock()
+		created, err := git.CreateWorktree(workDir, wtDir, branchName)
+		mu.Unlock()
+		if err != nil {
 			return "", fmt.Errorf("worktree oluşturulamadı: %w", err)
 		}
+		wtNewlyCreated = created
 		workDir = wtDir // PTY will run in worktree directory
 	}
 
@@ -495,8 +509,8 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	sessionID, err := a.ptyManager.Create(teamID, agentName, workDir, env, cmdName, cmdArgs, cliType)
 	if err != nil {
-		// Rollback worktree if PTY creation failed
-		if wtDir != "" && origWorkDir != "" {
+		// Rollback worktree only if we newly created it (not reused)
+		if wtNewlyCreated && wtDir != "" && origWorkDir != "" {
 			if rmErr := git.RemoveWorktree(origWorkDir, wtDir); rmErr != nil {
 				log.Printf("[WORKTREE] Rollback failed after PTY error: %v", rmErr)
 			} else {
@@ -705,6 +719,10 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 
 	// Worktree cleanup (after PTY is closed — no open process)
 	if cleanupWorktree && wtDir != "" && wtRepo != "" {
+		mu := a.worktreeMu(wtDir)
+		mu.Lock()
+		defer mu.Unlock()
+
 		dirty, err := git.IsDirty(wtDir)
 		if err != nil {
 			log.Printf("[WORKTREE] Dirty check failed, keeping: %s (%v)", wtDir, err)
@@ -831,8 +849,15 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
+	var closeErrors []string
 	for _, s := range sessions {
-		a.closeTerminalInternal(s.ID, true)
+		if err := a.closeTerminalInternal(s.ID, true); err != nil {
+			log.Printf("[DELETE-TEAM] Failed to close session %s: %v", ptymgr.ShortID(s.ID), err)
+			closeErrors = append(closeErrors, fmt.Sprintf("%s: %v", ptymgr.ShortID(s.ID), err))
+		}
+	}
+	if len(closeErrors) > 0 {
+		return fmt.Errorf("bazı terminaller kapatılamadı: %s", strings.Join(closeErrors, "; "))
 	}
 
 	if err := a.teamStore.Delete(id); err != nil {

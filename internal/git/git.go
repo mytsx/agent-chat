@@ -31,40 +31,41 @@ func toplevelDir(dir string) (string, error) {
 }
 
 // CreateWorktree creates a git worktree at worktreePath branching from repoDir.
-// If the worktree already exists with matching repo and branch, it is reused (idempotent).
-// If it exists but belongs to a different repo or branch, an error is returned.
-func CreateWorktree(repoDir, worktreePath, branchName string) error {
+// Returns (true, nil) if a new worktree was created, (false, nil) if an existing
+// matching worktree was reused. Returns an error if the path exists but belongs
+// to a different repo or branch.
+func CreateWorktree(repoDir, worktreePath, branchName string) (created bool, err error) {
 	// Check if worktree already exists at this path
 	if IsGitRepo(worktreePath) {
 		// Verify it belongs to the same repo
 		repoTop, err := toplevelDir(repoDir)
 		if err != nil {
-			return fmt.Errorf("cannot determine repo toplevel: %w", err)
+			return false, fmt.Errorf("cannot determine repo toplevel: %w", err)
 		}
 		// For worktrees, commondir points back to the main repo's .git
 		wtCommon := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-common-dir")
 		wtOut, err := wtCommon.Output()
 		if err != nil {
-			return fmt.Errorf("cannot verify worktree origin: %w", err)
+			return false, fmt.Errorf("cannot verify worktree origin: %w", err)
 		}
 		// Resolve the common dir to the repo toplevel
 		commonDir := strings.TrimSpace(string(wtOut))
 		// commonDir is typically /path/to/repo/.git — its parent is the repo toplevel
 		commonParent := filepath.Dir(commonDir)
 		if commonParent != repoTop {
-			return fmt.Errorf("worktree at %s belongs to repo %s, expected %s", worktreePath, commonParent, repoTop)
+			return false, fmt.Errorf("worktree at %s belongs to repo %s, expected %s", worktreePath, commonParent, repoTop)
 		}
 
 		// Verify branch matches
 		currentBranch, err := CurrentBranch(worktreePath)
 		if err != nil {
-			return fmt.Errorf("cannot verify worktree branch: %w", err)
+			return false, fmt.Errorf("cannot verify worktree branch: %w", err)
 		}
 		if currentBranch != branchName {
-			return fmt.Errorf("worktree at %s is on branch %s, expected %s", worktreePath, currentBranch, branchName)
+			return false, fmt.Errorf("worktree at %s is on branch %s, expected %s", worktreePath, currentBranch, branchName)
 		}
 
-		return nil // idempotent: verified match
+		return false, nil // idempotent: verified match, not newly created
 	}
 
 	// Check if branch already exists
@@ -79,9 +80,9 @@ func CreateWorktree(repoDir, worktreePath, branchName string) error {
 	}
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree add: %w\n%s", err, string(out))
+		return false, fmt.Errorf("git worktree add: %w\n%s", err, string(out))
 	}
-	return nil
+	return true, nil
 }
 
 // RemoveWorktree removes a git worktree (non-force).
@@ -144,8 +145,15 @@ func Slug(name string) string {
 	result, _, _ = transform.String(t, result)
 
 	result = strings.ToLower(result)
-	result = strings.ReplaceAll(result, " ", "-")
+	// Preserve separator characters as hyphens to avoid collisions (a_b vs ab)
+	for _, sep := range []string{" ", "_", "."} {
+		result = strings.ReplaceAll(result, sep, "-")
+	}
 	result = slugRe.ReplaceAllString(result, "")
+	// Collapse consecutive hyphens
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
 
 	// Trim leading/trailing hyphens
 	result = strings.Trim(result, "-")
