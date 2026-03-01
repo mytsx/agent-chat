@@ -511,11 +511,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	if err != nil {
 		// Rollback worktree only if we newly created it (not reused)
 		if wtNewlyCreated && wtDir != "" && origWorkDir != "" {
+			mu := a.worktreeMu(wtDir)
+			mu.Lock()
 			if rmErr := git.RemoveWorktree(origWorkDir, wtDir); rmErr != nil {
 				log.Printf("[WORKTREE] Rollback failed after PTY error: %v", rmErr)
 			} else {
 				log.Printf("[WORKTREE] Rolled back worktree after PTY error: %s", wtDir)
 			}
+			mu.Unlock()
 		}
 		return "", err
 	}

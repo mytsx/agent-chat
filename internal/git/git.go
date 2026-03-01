@@ -124,8 +124,8 @@ func CurrentBranch(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// slugRe matches characters that are not alphanumeric or hyphen.
-var slugRe = regexp.MustCompile(`[^a-z0-9-]+`)
+// slugRe matches characters that are not alphanumeric, hyphen, underscore, or dot.
+var slugRe = regexp.MustCompile(`[^a-z0-9._-]+`)
 
 // turkishReplacer handles Turkish chars that NFD decomposition doesn't normalize.
 var turkishReplacer = strings.NewReplacer(
@@ -145,18 +145,16 @@ func Slug(name string) string {
 	result, _, _ = transform.String(t, result)
 
 	result = strings.ToLower(result)
-	// Preserve separator characters as hyphens to avoid collisions (a_b vs ab)
-	for _, sep := range []string{" ", "_", "."} {
-		result = strings.ReplaceAll(result, sep, "-")
-	}
+	// Spaces become hyphens; _ and . are preserved (git-safe, prevents collisions)
+	result = strings.ReplaceAll(result, " ", "-")
 	result = slugRe.ReplaceAllString(result, "")
 	// Collapse consecutive hyphens
 	for strings.Contains(result, "--") {
 		result = strings.ReplaceAll(result, "--", "-")
 	}
 
-	// Trim leading/trailing hyphens
-	result = strings.Trim(result, "-")
+	// Trim leading/trailing hyphens, dots, underscores
+	result = strings.Trim(result, "-._")
 	if result == "" {
 		result = "agent"
 	}

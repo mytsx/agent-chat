@@ -227,12 +227,13 @@ func TestSlug(t *testing.T) {
 		{"", "agent"},
 		{"🚀 Rocket", "rocket"},
 		{"çğıöşü", "cgiosu"},
-		// Separator preservation — must not collide
-		{"a_b", "a-b"},
+		// Separator preservation — _ and . kept as-is, must not collide
+		{"a_b", "a_b"},
 		{"ab", "ab"},
-		{"a.b", "a-b"},
-		{"a__b", "a-b"},
-		{"foo_bar.baz", "foo-bar-baz"},
+		{"a.b", "a.b"},
+		{"a-b", "a-b"},
+		{"a__b", "a__b"},
+		{"foo_bar.baz", "foo_bar.baz"},
 	}
 
 	for _, tt := range tests {
@@ -246,16 +247,12 @@ func TestSlug(t *testing.T) {
 
 	// Verify no collisions among distinct inputs that ValidateName allows
 	t.Run("no collisions", func(t *testing.T) {
-		distinctInputs := []string{"a_b", "ab", "a-b", "a.b", "a__b"}
+		distinctInputs := []string{"a_b", "ab", "a-b", "a.b"}
 		seen := map[string]string{} // slug → input
 		for _, in := range distinctInputs {
 			slug := Slug(in)
 			if prev, ok := seen[slug]; ok {
-				// a_b and a-b and a.b colliding to "a-b" is expected and safe
-				// (they'd share a worktree). The dangerous case is a_b vs ab.
-				if (prev == "ab" || in == "ab") && slug == prev {
-					t.Errorf("collision: Slug(%q) == Slug(%q) == %q", prev, in, slug)
-				}
+				t.Errorf("collision: Slug(%q) == Slug(%q) == %q", prev, in, slug)
 			}
 			seen[slug] = in
 		}
