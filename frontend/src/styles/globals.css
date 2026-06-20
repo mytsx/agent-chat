@@ -1344,6 +1344,11 @@ html, body, #root {
   border-color: var(--accent);
 }
 
+.room-refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .room-list {
   display: flex;
   flex-direction: column;

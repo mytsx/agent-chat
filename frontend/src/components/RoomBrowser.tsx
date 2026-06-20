@@ -15,7 +15,7 @@ function relativeTime(iso: string): string {
   // Invalid Date for >3 fractional digits, so truncate to milliseconds first.
   const t = new Date(iso.replace(/(\.\d{3})\d+/, "$1")).getTime();
   if (isNaN(t)) return "—";
-  const sec = Math.floor((Date.now() - t) / 1000);
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
   if (sec < 60) return "az önce";
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min} dk önce`;
@@ -163,7 +163,7 @@ export default function RoomBrowser() {
     loadRooms();
   }, [loadRooms]);
 
-  const teamNames = new Set(teams.map((t) => t.name));
+  const teamNames = new Set((teams || []).map((t) => t.name));
 
   if (selectedRoom) {
     return (
@@ -180,8 +180,9 @@ export default function RoomBrowser() {
       <div className="room-browser-header">
         <h3 className="sidebar-section-title">Rooms ({rooms.length})</h3>
         <button
-          className="room-refresh"
+          className={`room-refresh${loading ? " loading" : ""}`}
           onClick={() => loadRooms()}
+          disabled={loading}
           title="Yenile"
         >
           ⟳
