@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/types"
@@ -128,7 +129,9 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 
 	// Is it a short acknowledgment? Only long-enough-to-be-short messages can be
 	// acks, so skip the pattern scan entirely for longer messages.
-	isShort := len([]rune(content)) < AckMsgMaxLength
+	// Rune sayısı için utf8.RuneCountInString: niyeti açık (slice değil sayım) ve
+	// compiler optimizasyonuna bağlı kalmadan allocation'sız çalışır.
+	isShort := utf8.RuneCountInString(content) < AckMsgMaxLength
 	hasAck := false
 	if isShort {
 		for _, p := range ackPatterns {
