@@ -192,6 +192,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		if t.ID != teamID {
 			continue
 		}
+		prev := t.Agents // keep the old slice for rollback
 		for j, existing := range t.Agents {
 			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
 				// Preserve Role when the upsert payload omits it.
@@ -204,18 +205,29 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 				if existing == cfg {
 					return s.teams[i], nil
 				}
-				s.teams[i].Agents[j] = cfg
+				// Copy-on-write: Get()/List() hand out a Team sharing this backing
+				// array, so mutate a fresh copy instead of the shared one to avoid a
+				// data race with concurrent readers (matches the whole-slice replace
+				// the Update method already does).
+				updated := make([]AgentConfig, len(prev))
+				copy(updated, prev)
+				updated[j] = cfg
+				s.teams[i].Agents = updated
 				if err := s.save(); err != nil {
-					s.teams[i].Agents[j] = existing // roll back so memory matches disk
+					s.teams[i].Agents = prev // roll back so memory matches disk
 					return Team{}, err
 				}
 				return s.teams[i], nil
 			}
 		}
-		// Not found: append.
-		s.teams[i].Agents = append(s.teams[i].Agents, cfg)
+		// Not found: append into a fresh slice (don't append in place — append may
+		// write into the shared backing array when spare capacity exists).
+		appended := make([]AgentConfig, len(prev), len(prev)+1)
+		copy(appended, prev)
+		appended = append(appended, cfg)
+		s.teams[i].Agents = appended
 		if err := s.save(); err != nil {
-			s.teams[i].Agents = s.teams[i].Agents[:len(s.teams[i].Agents)-1] // roll back append
+			s.teams[i].Agents = prev // roll back append
 			return Team{}, err
 		}
 		return s.teams[i], nil

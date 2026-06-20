@@ -3,6 +3,7 @@ package team
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -282,6 +283,56 @@ func TestUpsertAgentRollsBackOnSaveFailure(t *testing.T) {
 	if len(got.Agents) != 1 {
 		t.Fatalf("append not rolled back in memory: %+v", got.Agents)
 	}
+}
+
+// Get()/List() hand out a Team whose Agents slice shares the store's backing
+// array. UpsertAgent must NOT mutate that array in place, or a reader iterating a
+// previously-obtained Team races with the write. Run under -race.
+func TestUpsertAgentNoRaceWithReaders(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "custom", []AgentConfig{
+		{Name: "A", CLIType: "claude", WorkDir: "/a"},
+		{Name: "B", CLIType: "claude", WorkDir: "/b"},
+	})
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				got, err := s.Get(tm.ID)
+				if err != nil {
+					continue
+				}
+				for _, a := range got.Agents {
+					_ = a.WorkDir + a.Name // read shared backing array
+				}
+			}
+		}()
+	}
+
+	var writers sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		writers.Add(1)
+		go func(id int) {
+			defer writers.Done()
+			for k := range 300 {
+				// Vary WorkDir so each upsert actually mutates (not a no-op).
+				_, _ = s.UpsertAgent(tm.ID, AgentConfig{Name: "A", CLIType: "claude", WorkDir: fmt.Sprintf("/a-%d-%d", id, k)})
+			}
+		}(w)
+	}
+
+	writers.Wait()
+	close(stop)
+	readers.Wait()
 }
 
 // save() must be atomic: a successful save never leaves a stray .tmp file

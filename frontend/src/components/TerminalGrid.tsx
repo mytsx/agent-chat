@@ -206,6 +206,9 @@ export default function TerminalGrid() {
       }
     } catch (err) {
       console.error("[openTeamFromConfig] failed:", err);
+      alert(
+        `Takım yapılandırması açılırken hata oluştu:\n\n${err instanceof Error ? err.message : String(err)}`
+      );
     } finally {
       setOpeningFromConfig(false);
     }
