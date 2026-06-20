@@ -30,25 +30,29 @@ func GridCapacity(layout string) int {
 // (the input is never mutated).
 //
 // Normally agents are sorted ascending by SlotIndex and their slots are kept as
-// recorded. If two or more agents share a SlotIndex — e.g. legacy records written
-// before slot_index existed all defaulted to 0 — the slots are ambiguous, so it
-// falls back to positional slots (0,1,2…) in the original array order. This keeps
-// reopened terminals from piling into the same grid slot.
+// recorded. The slots are treated as ambiguous — and remapped to positional slots
+// (0,1,2…) in the original array order — when either:
+//   - two or more agents share a SlotIndex (e.g. legacy records written before
+//     slot_index existed all defaulted to 0), or
+//   - a SlotIndex is negative (corrupt/hand-edited data), which maps to no grid
+//     slot yet would still spawn a PTY — a leak.
+//
+// This keeps reopened terminals from piling into one slot or leaking off-grid.
 func AgentsInOpenOrder(agents []AgentConfig) []AgentConfig {
 	out := make([]AgentConfig, len(agents))
 	copy(out, agents)
 
 	seen := make(map[int]bool, len(out))
-	hasDuplicate := false
+	needsPositional := false
 	for _, a := range out {
-		if seen[a.SlotIndex] {
-			hasDuplicate = true
+		if a.SlotIndex < 0 || seen[a.SlotIndex] {
+			needsPositional = true
 			break
 		}
 		seen[a.SlotIndex] = true
 	}
 
-	if hasDuplicate {
+	if needsPositional {
 		for i := range out {
 			out[i].SlotIndex = i
 		}

@@ -251,6 +251,39 @@ func TestUpsertAgentSkipsWriteWhenUnchanged(t *testing.T) {
 	}
 }
 
+// When save() fails, UpsertAgent must roll back its in-memory mutation so memory
+// and disk don't diverge. Forced cross-platform by removing the data dir before
+// the upsert (the temp-file write then fails). Covers both the update and append
+// paths.
+func TestUpsertAgentRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{{Name: "A", Role: "R", CLIType: "claude", WorkDir: "/old"}})
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	// Update path: must fail and leave the existing agent untouched in memory.
+	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "A", CLIType: "claude", WorkDir: "/new"}); err == nil {
+		t.Fatal("expected save failure on update path")
+	}
+	got, _ := s.Get(tm.ID)
+	if len(got.Agents) != 1 || got.Agents[0].WorkDir != "/old" {
+		t.Fatalf("update not rolled back in memory: %+v", got.Agents)
+	}
+
+	// Append path: must fail and not leave a dangling appended agent.
+	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "B", CLIType: "claude"}); err == nil {
+		t.Fatal("expected save failure on append path")
+	}
+	got, _ = s.Get(tm.ID)
+	if len(got.Agents) != 1 {
+		t.Fatalf("append not rolled back in memory: %+v", got.Agents)
+	}
+}
+
 // save() must be atomic: a successful save never leaves a stray .tmp file
 // behind and produces a fully-valid teams.json.
 func TestSaveIsAtomic(t *testing.T) {

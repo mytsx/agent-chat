@@ -206,6 +206,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 				}
 				s.teams[i].Agents[j] = cfg
 				if err := s.save(); err != nil {
+					s.teams[i].Agents[j] = existing // roll back so memory matches disk
 					return Team{}, err
 				}
 				return s.teams[i], nil
@@ -214,6 +215,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		// Not found: append.
 		s.teams[i].Agents = append(s.teams[i].Agents, cfg)
 		if err := s.save(); err != nil {
+			s.teams[i].Agents = s.teams[i].Agents[:len(s.teams[i].Agents)-1] // roll back append
 			return Team{}, err
 		}
 		return s.teams[i], nil

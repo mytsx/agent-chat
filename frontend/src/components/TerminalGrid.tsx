@@ -198,10 +198,11 @@ export default function TerminalGrid() {
       const results = await openTeamFromConfig(team.id);
       const failed = results.filter((r) => r.error);
       if (failed.length > 0) {
-        console.error(
-          `[openTeamFromConfig] ${failed.length} agent açılamadı:`,
-          failed.map((r) => `${r.agentName}: ${r.error}`).join("; ")
-        );
+        const detail = failed.map((r) => `${r.agentName}: ${r.error}`).join("\n");
+        console.error(`[openTeamFromConfig] ${failed.length} agent açılamadı:`, detail);
+        // No notification component exists in the app, so surface batch-open
+        // failures (e.g. over-capacity slots, worktree errors) to the user here.
+        alert(`Bazı agent'lar başlatılamadı:\n\n${detail}`);
       }
     } catch (err) {
       console.error("[openTeamFromConfig] failed:", err);

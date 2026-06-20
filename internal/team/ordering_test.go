@@ -77,6 +77,23 @@ func TestAgentsInOpenOrderUniqueNonContiguousPreserved(t *testing.T) {
 	}
 }
 
+// A negative SlotIndex (corrupt/hand-edited data) would map to no rendered grid
+// slot but still spawn a PTY — a leak. It must trigger the positional fallback.
+func TestAgentsInOpenOrderNegativeSlotFallsBackToPositional(t *testing.T) {
+	in := []AgentConfig{
+		{Name: "A", SlotIndex: 0},
+		{Name: "B", SlotIndex: -1},
+		{Name: "C", SlotIndex: 5},
+	}
+	got := AgentsInOpenOrder(in)
+	wantNames := []string{"A", "B", "C"}
+	for i := range got {
+		if got[i].Name != wantNames[i] || got[i].SlotIndex != i {
+			t.Fatalf("expected positional fallback for negative slot, got %+v", got)
+		}
+	}
+}
+
 func TestAgentsInOpenOrderEmpty(t *testing.T) {
 	if got := AgentsInOpenOrder(nil); len(got) != 0 {
 		t.Fatalf("expected empty, got %v", got)
