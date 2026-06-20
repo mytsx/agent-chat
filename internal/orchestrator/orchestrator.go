@@ -187,8 +187,9 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 		}
 	}
 
-	// Is it a short acknowledgment? Only long-enough-to-be-short messages can be
-	// acks, so skip the pattern scan entirely for longer messages.
+	// Is it a short acknowledgment? Sorular zaten notify edilir ve ack olamaz
+	// (isAck = isShort && hasAck && !isQuestion), bu yüzden soru ise ack taramasını
+	// tamamen atla.
 	// isShort: mesaj ack olacak kadar kısa mı? Rune sayımı O(N), byte uzunluğu
 	// O(1). UTF-8'de her rune 1..4 byte olduğundan byte uzunluğu çoğu durumu
 	// kesin belirler: byteLen<AckMsgMaxLength ise rune sayısı da kesin küçüktür;
@@ -196,19 +197,20 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	// arasındaki gri bölgede gerçek rune sayımı gerekir — böylece kısa (yaygın)
 	// ve uzun mesajlarda tam tarama atlanır. (utf8.RuneCountInString < ... ile
 	// birebir aynı sonucu verir; eşdeğerlik testle doğrulandı.)
-	byteLen := len(content)
-	isShort := byteLen < AckMsgMaxLength ||
-		(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
-	hasAck := false
-	if isShort {
-		for _, p := range ackPatterns {
-			if matchesAckPattern(contentLower, p) {
-				hasAck = true
-				break
+	isAck := false
+	if !isQuestion {
+		byteLen := len(content)
+		isShort := byteLen < AckMsgMaxLength ||
+			(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
+		if isShort {
+			for _, p := range ackPatterns {
+				if matchesAckPattern(contentLower, p) {
+					isAck = true
+					break
+				}
 			}
 		}
 	}
-	isAck := isShort && hasAck && !isQuestion
 
 	// Decision
 	if isAck && !expectsReply {
