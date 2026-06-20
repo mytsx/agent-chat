@@ -21,22 +21,18 @@ const (
 	NotifyCooldown = 3 * time.Second
 )
 
-// ackShortWordMaxLen: bu uzunluk veya altındaki ack pattern'leri (örn. "ok")
-// tam kelime olarak eşleşmeli — yoksa "okul", "doktor", "cok" gibi alakasız
-// kelimelerin içinde alt-metin olarak eşleşip mesajı yanlışlıkla ACK sayar.
-// ackPatterns tamamı ASCII olduğundan byte uzunluğu (len) rune sayısına eşittir.
-const ackShortWordMaxLen = 3
-
 // ackPatterns - short acknowledgment messages to skip.
 // Bir slice burada en hızlı idiomatic yapıdır — map yalnız tam-eşitlik
 // aramasında O(1) verir, "contains" değil, ve map iterasyonu ölçülebilir
-// biçimde daha yavaştır (bench: ~2x). Eşleştirme matchesAckPattern ile
-// kelime-sınırı duyarlı yapılır (bkz. aşağıdaki yorum).
+// biçimde daha yavaştır (bench: ~2x). Eşleştirme matchesAckPattern ile TAM
+// KELİME (whole-word) yapılır; bu yüzden Türkçe ekli yaygın ack formları
+// ("tesekkurler", "sagolun"...) listede AÇIKÇA yer alır — stem prefix'i değil.
 var ackPatterns = []string{
-	"tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
+	"tesekkur", "tesekkurler", "sagol", "sagolun", "sagolasin", "eyvallah",
+	"tamam", "tamamdir", "anladim", "ok", "oldu",
 	"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
 	"thanks", "thank you", "got it", "okay", "perfect", "great",
-	"tamamdir", "anlasildi", "gorusuruz", "iyi calismalar",
+	"anlasildi", "gorusuruz", "iyi calismalar",
 	"evet", "hayir", "peki", "olur", "elbette", "okey", "oke",
 }
 
@@ -58,19 +54,18 @@ func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
 }
 
-// matchesAckPattern: p, s içinde SOL tarafı kelime sınırında (kelime başı)
-// olacak şekilde geçiyor mu? Bu, Türkçe eklemeli ack'leri korur ("tesekkurler"
-// → "tesekkur" stem'ini yakalar) ama "doktor"/"soldu" gibi harf-önekli yanlış
-// eşleşmeleri eler. Çok kısa pattern'ler (<= ackShortWordMaxLen, örn. "ok")
-// ek olarak SAĞ sınır da gerektirir; böylece "okul"/"okudum" elenirken
-// standalone "ok" yakalanır. s ve p küçük harfli (lowercased) varsayılır.
+// matchesAckPattern: p, s içinde TAM KELİME olarak (her iki yanı kelime sınırı
+// ya da string kenarı) geçiyor mu? Hem "ok" ⊂ "okul"/"doktor" gibi harf-önekli/
+// soneki yanlış eşleşmeleri, hem de "oldu" ⊂ "oldukca" / "peki" ⊂ "pekistirmek"
+// gibi stem-önekli yanlış eşleşmeleri eler. s ve p küçük harfli varsayılır.
 //
-// Önemli: kelime-sınırı eşleşmesi substring eşleşmesinin ALT KÜMESİdir, yani bu
-// değişiklik yalnız skip→notify yönünde hareket eder (zararsız fazladan bildirim),
-// asla yeni notify→skip (zararlı sessiz atlama) üretmez.
+// Tasarım notu: prefix (yalnız sol-sınır) eşleştirme "tesekkurler"i "tesekkur"
+// stem'iyle yakalardı ama "oldukca"yı da "oldu" ile yanlış yakalardı (zararlı
+// sessiz skip). Onun yerine tam-kelime kullanılır ve yaygın ekli ack formları
+// ackPatterns'a açıkça eklenir. Başarısızlık yönü güvenlidir: listede olmayan
+// ekli bir ack tam-kelime eşleşmez → yalnız fazladan bildirim (skip yerine
+// notify), asla zararlı sessiz atlama.
 func matchesAckPattern(s, p string) bool {
-	// ackPatterns ASCII olduğundan len(p) == rune sayısı; len O(1), RuneCount O(N).
-	requireRight := len(p) <= ackShortWordMaxLen
 	from := 0
 	for {
 		i := strings.Index(s[from:], p)
@@ -85,8 +80,8 @@ func matchesAckPattern(s, p string) bool {
 			r, _ := utf8.DecodeLastRuneInString(s[:start])
 			leftOK = !isWordRune(r)
 		}
-		rightOK := true
-		if requireRight && end < len(s) {
+		rightOK := end == len(s)
+		if !rightOK {
 			r, _ := utf8.DecodeRuneInString(s[end:])
 			rightOK = !isWordRune(r)
 		}

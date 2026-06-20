@@ -23,6 +23,10 @@ func TestAckWordBoundary(t *testing.T) {
 		"hokey oynadik bugun",       // "okey"/"ok" ⊂ "hokey" (sol önekli)
 		"poker gecesi yapalim",      // "oke"/"ok" ⊂ "poker" (sol önekli)
 		"build status_ok degil mi",  // "ok" ⊂ "status_ok" (alt çizgi sınırı)
+		"oldukca mutluyum bugun",    // "oldu" ⊂ "oldukca" (stem-önekli, tam-kelime fix)
+		"pekistirmek lazim bunu",    // "peki" ⊂ "pekistirmek" (stem-önekli)
+		"hayirli olsun yeni isin",   // "hayir" ⊂ "hayirli" (stem-önekli)
+		"guzellesmek istiyorum hep", // "guzel" ⊂ "guzellesmek" (stem-önekli)
 	}
 	for _, msg := range notAcks {
 		t.Run("notAck/"+msg, func(t *testing.T) {
@@ -39,9 +43,9 @@ func TestAckWordBoundary(t *testing.T) {
 		"ok",              // standalone kısa pattern
 		"tamam ok",        // "ok" kelime olarak (sonda)
 		"tamam",           // stem
-		"tamamdir",        // ekli form ("tamam" stem'i)
-		"tesekkurler",     // ekli form ("tesekkur" stem'i)
-		"tesekkur ederim", // çok kelimeli
+		"tamamdir",        // ayrı pattern (whole-word)
+		"tesekkurler",     // ayrı eklenen ekli form (whole-word)
+		"tesekkur ederim", // "tesekkur" + boşluk (tam kelime)
 		"sagol kardesim",  // stem + devam
 		"harika olmus",    // "harika"
 		"okay",            // "ok" değil ama "okay" pattern'i
@@ -67,22 +71,25 @@ func TestMatchesAckPattern(t *testing.T) {
 		s, p string
 		want bool
 	}{
-		{"ok", "ok", true},                // tam kelime
-		{"tamam ok", "ok", true},          // sonda, soldan boşluk
-		{"okul", "ok", false},             // kısa pattern, sağ sınır yok
-		{"doktor", "ok", false},           // kısa pattern, sol sınır yok
-		{"cok", "ok", false},              // sol harf (c)
-		{"tesekkurler", "tesekkur", true}, // uzun pattern, ek serbest
-		{"soldu", "oldu", false},          // uzun pattern ama sol harf (s)
-		{"oldu", "oldu", true},            // tam kelime
-		{"bugun oldu", "oldu", true},      // kelime başı (boşluk sonrası)
-		{"okey", "okey", true},            // uzun pattern (4), tam
-		{"hokey", "okey", false},          // sol harf (h)
-		{"oke", "oke", true},              // kısa pattern (3), tam kelime
-		{"poker", "oke", false},           // kısa pattern, sol harf (p)
-		{"okey", "oke", false},            // "oke" ⊂ "okey", sağ harf (y)
-		{"status_ok", "ok", false},        // alt çizgi kelime karakteri (sol _)
-		{"ok_done", "ok", false},          // alt çizgi kelime karakteri (sağ _)
+		{"ok", "ok", true},                   // tam kelime
+		{"tamam ok", "ok", true},             // sonda, soldan boşluk
+		{"okul", "ok", false},                // kısa pattern, sağ sınır yok
+		{"doktor", "ok", false},              // kısa pattern, sol sınır yok
+		{"cok", "ok", false},                 // sol harf (c)
+		{"tesekkurler", "tesekkur", false},   // tam-kelime: "tesekkur" + "ler" eki → false
+		{"tesekkurler", "tesekkurler", true}, // ekli form artık ayrı pattern
+		{"soldu", "oldu", false},             // sol harf (s)
+		{"oldukca", "oldu", false},           // stem-önekli: "oldu" + "kca" → false
+		{"oldu", "oldu", true},               // tam kelime
+		{"bugun oldu", "oldu", true},         // kelime başı (boşluk sonrası)
+		{"pekistirmek", "peki", false},       // stem-önekli: "peki" + "stirmek" → false
+		{"okey", "okey", true},               // uzun pattern (4), tam
+		{"hokey", "okey", false},             // sol harf (h)
+		{"oke", "oke", true},                 // kısa pattern (3), tam kelime
+		{"poker", "oke", false},              // kısa pattern, sol harf (p)
+		{"okey", "oke", false},               // "oke" ⊂ "okey", sağ harf (y)
+		{"status_ok", "ok", false},           // alt çizgi kelime karakteri (sol _)
+		{"ok_done", "ok", false},             // alt çizgi kelime karakteri (sağ _)
 	}
 	for _, c := range cases {
 		if got := matchesAckPattern(c.s, c.p); got != c.want {
