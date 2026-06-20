@@ -3,9 +3,12 @@ import { useMessagesFor } from "../store/useMessages";
 
 interface Props {
   chatDir: string;
+  // Max messages to render (most recent). 0 = no limit (show full history).
+  // Defaults to 50 for the sidebar preview; the room browser passes 0.
+  maxMessages?: number;
 }
 
-export default function MessageFeed({ chatDir }: Props) {
+export default function MessageFeed({ chatDir, maxMessages = 50 }: Props) {
   const messages = useMessagesFor(chatDir);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -28,7 +31,7 @@ export default function MessageFeed({ chatDir }: Props) {
         Messages ({messages.length})
       </h3>
       <div className="message-list">
-        {messages.slice(-50).map((msg) => {
+        {(maxMessages > 0 ? messages.slice(-maxMessages) : messages).map((msg) => {
           const time = msg.timestamp
             ? new Date(msg.timestamp).toLocaleTimeString([], {
                 hour: "2-digit",

@@ -102,7 +102,9 @@ function RoomDetail({
     loadAgents(room);
   }, [room, loadMessages, loadAgents]);
 
-  const agentNames = Object.keys(agents);
+  // useAgentsFor already returns a stable {} when absent, so this never throws;
+  // the `|| {}` is defense-in-depth, matching RoomRow's guard.
+  const agentNames = Object.keys(agents || {});
 
   return (
     <div className="room-detail">
@@ -141,7 +143,8 @@ function RoomDetail({
           </span>
         )}
       </div>
-      <MessageFeed chatDir={room} />
+      {/* maxMessages=0 → show full retained history, not the sidebar's 50-msg preview */}
+      <MessageFeed chatDir={room} maxMessages={0} />
     </div>
   );
 }

@@ -335,6 +335,9 @@ func (c *HubClient) ListRoomsDetailed() ([]types.RoomSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !resp.Success {
+		return nil, fmt.Errorf("list_rooms_detailed failed: %s", resp.Error)
+	}
 	var data struct {
 		Rooms []types.RoomSummary `json:"rooms"`
 	}

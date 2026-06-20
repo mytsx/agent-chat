@@ -948,16 +948,16 @@ func (a *App) GetMessages(room string) []types.Message {
 
 // ListRooms returns structured summaries of all rooms (including orphan rooms
 // that no longer map to a team) for the desktop room browser.
-func (a *App) ListRooms() []types.RoomSummary {
+func (a *App) ListRooms() ([]types.RoomSummary, error) {
 	if a.hubClient == nil {
-		return nil
+		return nil, fmt.Errorf("hub not connected")
 	}
 	rooms, err := a.hubClient.ListRoomsDetailed()
 	if err != nil {
 		log.Printf("[HUB] ListRooms error: %v", err)
-		return nil
+		return nil, err
 	}
-	return rooms
+	return rooms, nil
 }
 
 // GetAgents returns all agents from a room
