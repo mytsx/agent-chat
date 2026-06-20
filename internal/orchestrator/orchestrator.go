@@ -50,10 +50,12 @@ var questionPatterns = []string{
 	"how", "what", "when", "where", "who", "which", "can you", "could you",
 }
 
-// isWordRune: kelime-içi karakter mi (harf veya rakam). Türkçe dahil tüm
-// Unicode harfleri kapsar (unicode.IsLetter).
+// isWordRune: kelime-içi karakter mi (harf, rakam veya alt çizgi). Standart \w
+// tanımıyla uyumlu — alt çizgi sayesinde "status_ok"/"exit_ok" gibi teknik
+// ifadelerdeki "ok" bağımsız kelime sayılmaz. Türkçe dahil tüm Unicode harfleri
+// kapsar (unicode.IsLetter).
 func isWordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsNumber(r)
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
 }
 
 // matchesAckPattern: p, s içinde SOL tarafı kelime sınırında (kelime başı)
