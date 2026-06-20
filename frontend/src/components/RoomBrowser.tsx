@@ -16,16 +16,16 @@ function relativeTime(iso: string): string {
   const t = new Date(iso.replace(/(\.\d{3})\d+/, "$1")).getTime();
   if (isNaN(t)) return "—";
   const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (sec < 60) return "az önce";
+  if (sec < 60) return "just now";
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} dk önce`;
+  if (min < 60) return `${min}m ago`;
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} saat önce`;
+  if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
-  if (day < 30) return `${day} gün önce`;
+  if (day < 30) return `${day}d ago`;
   const mon = Math.floor(day / 30);
-  if (mon < 12) return `${mon} ay önce`;
-  return `${Math.floor(mon / 12)} yıl önce`;
+  if (mon < 12) return `${mon}mo ago`;
+  return `${Math.floor(mon / 12)}y ago`;
 }
 
 function RoomRow({
@@ -41,15 +41,15 @@ function RoomRow({
   const isEmpty = room.message_count === 0 && agentNames.length === 0;
   const countLabel =
     room.message_count >= MESSAGE_CAP
-      ? `son ${room.message_count} mesaj`
-      : `${room.message_count} mesaj`;
+      ? `last ${room.message_count} messages`
+      : `${room.message_count} messages`;
 
   return (
     <button className="room-row" onClick={onClick}>
       <div className="room-row-top">
         <span className="room-row-name">
           {room.name}
-          {room.is_default && <span className="room-tag">varsayılan</span>}
+          {room.is_default && <span className="room-tag">default</span>}
         </span>
         <span className="room-row-time">{relativeTime(room.last_activity)}</span>
       </div>
@@ -60,12 +60,12 @@ function RoomRow({
             isActiveTeam ? "origin-team" : "origin-orphan"
           }`}
         >
-          {isActiveTeam ? "takım" : "kayıtlı takım yok"}
+          {isActiveTeam ? "team" : "no team"}
         </span>
       </div>
       <div className="room-row-agents">
         {isEmpty ? (
-          <span className="room-badge room-badge-empty">boş oda</span>
+          <span className="room-badge room-badge-empty">empty room</span>
         ) : agentNames.length > 0 ? (
           agentNames.map((n) => (
             <span
@@ -77,9 +77,7 @@ function RoomRow({
             </span>
           ))
         ) : (
-          <span className="room-agent-empty">
-            agent kaydı yok (geçmiş odası)
-          </span>
+          <span className="room-agent-empty">no agents (archived room)</span>
         )}
       </div>
     </button>
@@ -112,7 +110,7 @@ function RoomDetail({
     <div className="room-detail">
       <div className="room-detail-header">
         <button className="room-back" onClick={onBack}>
-          ← Geri
+          ← Back
         </button>
         <span className="room-detail-name">{room}</span>
         <span
@@ -121,11 +119,11 @@ function RoomDetail({
           }`}
           title={
             isActiveTeam
-              ? "Aktif takım odası — yeni mesajlar canlı düşer"
-              : "Orphan oda — statik geçmiş, canlı akış yok"
+              ? "Active team room — new messages stream live"
+              : "Orphaned room — static history, no live stream"
           }
         >
-          {isActiveTeam ? "● canlı" : "○ statik"}
+          {isActiveTeam ? "● live" : "○ static"}
         </span>
       </div>
       <div className="room-detail-agents">
@@ -140,9 +138,7 @@ function RoomDetail({
             </span>
           ))
         ) : (
-          <span className="room-agent-empty">
-            agent kaydı yok (geçmiş odası)
-          </span>
+          <span className="room-agent-empty">no agents (archived room)</span>
         )}
       </div>
       {/* maxMessages=0 → show full retained history, not the sidebar's 50-msg preview */}
@@ -154,6 +150,7 @@ function RoomDetail({
 export default function RoomBrowser() {
   const rooms = useRooms((s) => s.rooms);
   const loading = useRooms((s) => s.loading);
+  const error = useRooms((s) => s.error);
   const selectedRoom = useRooms((s) => s.selectedRoom);
   const loadRooms = useRooms((s) => s.loadRooms);
   const selectRoom = useRooms((s) => s.selectRoom);
@@ -183,15 +180,17 @@ export default function RoomBrowser() {
           className={`room-refresh${loading ? " loading" : ""}`}
           onClick={() => loadRooms()}
           disabled={loading}
-          title="Yenile"
+          title="Refresh"
         >
           ⟳
         </button>
       </div>
-      {loading && rooms.length === 0 ? (
-        <p className="sidebar-empty">Yükleniyor…</p>
+      {error ? (
+        <p className="sidebar-empty room-error">Failed to load rooms: {error}</p>
+      ) : loading && rooms.length === 0 ? (
+        <p className="sidebar-empty">Loading…</p>
       ) : rooms.length === 0 ? (
-        <p className="sidebar-empty">Oda yok</p>
+        <p className="sidebar-empty">No rooms</p>
       ) : (
         <div className="room-list">
           {rooms.map((r) => (
