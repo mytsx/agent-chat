@@ -20,6 +20,8 @@ func TestAckWordBoundary(t *testing.T) {
 		"sokakta bekliyorum seni",   // "ok" ⊂ "sokak"
 		"soldu cicekler bahcede",    // "oldu" ⊂ "soldu" (sol önekli)
 		"cok yogun bir konu vardi",  // "ok" ⊂ "cok"
+		"hokey oynadik bugun",       // "okey"/"ok" ⊂ "hokey" (sol önekli)
+		"poker gecesi yapalim",      // "oke"/"ok" ⊂ "poker" (sol önekli)
 	}
 	for _, msg := range notAcks {
 		t.Run("notAck/"+msg, func(t *testing.T) {
@@ -45,6 +47,8 @@ func TestAckWordBoundary(t *testing.T) {
 		"thanks",          // ingilizce
 		"got it",          // çok kelimeli ingilizce
 		"perfect",         //
+		"okey",            // yaygın Türkçe ack (eklendi)
+		"oke",             // yaygın Türkçe ack (eklendi, kısa → tam kelime)
 	}
 	for _, msg := range acks {
 		t.Run("ack/"+msg, func(t *testing.T) {
@@ -71,6 +75,11 @@ func TestMatchesAckPattern(t *testing.T) {
 		{"soldu", "oldu", false},          // uzun pattern ama sol harf (s)
 		{"oldu", "oldu", true},            // tam kelime
 		{"bugun oldu", "oldu", true},      // kelime başı (boşluk sonrası)
+		{"okey", "okey", true},            // uzun pattern (4), tam
+		{"hokey", "okey", false},          // sol harf (h)
+		{"oke", "oke", true},              // kısa pattern (3), tam kelime
+		{"poker", "oke", false},           // kısa pattern, sol harf (p)
+		{"okey", "oke", false},            // "oke" ⊂ "okey", sağ harf (y)
 	}
 	for _, c := range cases {
 		if got := matchesAckPattern(c.s, c.p); got != c.want {

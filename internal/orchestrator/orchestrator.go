@@ -21,10 +21,11 @@ const (
 	NotifyCooldown = 3 * time.Second
 )
 
-// ackShortWordMaxRunes: bu uzunluk veya altındaki ack pattern'leri (örn. "ok")
+// ackShortWordMaxLen: bu uzunluk veya altındaki ack pattern'leri (örn. "ok")
 // tam kelime olarak eşleşmeli — yoksa "okul", "doktor", "cok" gibi alakasız
 // kelimelerin içinde alt-metin olarak eşleşip mesajı yanlışlıkla ACK sayar.
-const ackShortWordMaxRunes = 3
+// ackPatterns tamamı ASCII olduğundan byte uzunluğu (len) rune sayısına eşittir.
+const ackShortWordMaxLen = 3
 
 // ackPatterns - short acknowledgment messages to skip.
 // Bir slice burada en hızlı idiomatic yapıdır — map yalnız tam-eşitlik
@@ -36,7 +37,7 @@ var ackPatterns = []string{
 	"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
 	"thanks", "thank you", "got it", "okay", "perfect", "great",
 	"tamamdir", "anlasildi", "gorusuruz", "iyi calismalar",
-	"evet", "hayir", "peki", "olur", "elbette",
+	"evet", "hayir", "peki", "olur", "elbette", "okey", "oke",
 }
 
 // questionPatterns - patterns indicating questions, should always be notified.
@@ -58,7 +59,7 @@ func isWordRune(r rune) bool {
 // matchesAckPattern: p, s içinde SOL tarafı kelime sınırında (kelime başı)
 // olacak şekilde geçiyor mu? Bu, Türkçe eklemeli ack'leri korur ("tesekkurler"
 // → "tesekkur" stem'ini yakalar) ama "doktor"/"soldu" gibi harf-önekli yanlış
-// eşleşmeleri eler. Çok kısa pattern'ler (<= ackShortWordMaxRunes, örn. "ok")
+// eşleşmeleri eler. Çok kısa pattern'ler (<= ackShortWordMaxLen, örn. "ok")
 // ek olarak SAĞ sınır da gerektirir; böylece "okul"/"okudum" elenirken
 // standalone "ok" yakalanır. s ve p küçük harfli (lowercased) varsayılır.
 //
@@ -66,7 +67,8 @@ func isWordRune(r rune) bool {
 // değişiklik yalnız skip→notify yönünde hareket eder (zararsız fazladan bildirim),
 // asla yeni notify→skip (zararlı sessiz atlama) üretmez.
 func matchesAckPattern(s, p string) bool {
-	requireRight := utf8.RuneCountInString(p) <= ackShortWordMaxRunes
+	// ackPatterns ASCII olduğundan len(p) == rune sayısı; len O(1), RuneCount O(N).
+	requireRight := len(p) <= ackShortWordMaxLen
 	from := 0
 	for {
 		i := strings.Index(s[from:], p)
