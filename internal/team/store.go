@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,11 @@ type AgentConfig struct {
 	PromptID string `json:"prompt_id"`
 	WorkDir  string `json:"work_dir"`
 	CLIType  string `json:"cli_type"`
+	// SlotIndex is the grid position the agent reopens into. No omitempty:
+	// 0 is a valid slot and must survive serialization round-trips.
+	SlotIndex int `json:"slot_index"`
+	// UseWorktree records whether the agent runs in a git worktree.
+	UseWorktree bool `json:"use_worktree"`
 }
 
 // Team represents a tab/team configuration
@@ -65,12 +71,25 @@ func (s *Store) load() error {
 	return json.Unmarshal(data, &s.teams)
 }
 
+// save serializes the teams to disk atomically (temp file + rename) so a crash
+// mid-write — e.g. during the batch UpsertAgent calls of OpenTeamFromConfig —
+// can never leave a partial/corrupt teams.json behind. Mirrors the hub-state
+// persistence pattern (internal/hub/persistence.go).
 func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.teams, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.filePath, data, 0644)
+
+	tmpPath := s.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, s.filePath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // List returns all teams
@@ -150,6 +169,50 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
+}
+
+// UpsertAgent inserts or updates a single agent config in a team, keyed by Name.
+// If an agent with the same name exists, its fields are updated in place;
+// otherwise the agent is appended. Follows the single-field SetManager pattern
+// rather than a positional full-team Update so concurrent callers don't clobber
+// each other.
+//
+// INVARIANT: an empty cfg.Role does NOT overwrite an existing Role. Callers like
+// CreateTerminal never supply Role, so a naive upsert would erase a Role the user
+// set earlier (consumed by composeAgentPrompt). A non-empty cfg.Role overwrites.
+func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
+	if err := validation.ValidateName(cfg.Name); err != nil {
+		return Team{}, fmt.Errorf("invalid agent name: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, t := range s.teams {
+		if t.ID != teamID {
+			continue
+		}
+		for j, existing := range t.Agents {
+			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
+				// Preserve Role when the upsert payload omits it.
+				if cfg.Role == "" {
+					cfg.Role = existing.Role
+				}
+				s.teams[i].Agents[j] = cfg
+				if err := s.save(); err != nil {
+					return Team{}, err
+				}
+				return s.teams[i], nil
+			}
+		}
+		// Not found: append.
+		s.teams[i].Agents = append(s.teams[i].Agents, cfg)
+		if err := s.save(); err != nil {
+			return Team{}, err
+		}
+		return s.teams[i], nil
+	}
+	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
 
 // SetManager sets or clears manager agent for a team. Empty string clears manager.

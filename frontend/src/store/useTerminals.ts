@@ -7,6 +7,7 @@ import {
   ResizeTerminal,
   WriteToTerminal,
   DetectCLIs,
+  OpenTeamFromConfig,
 } from "../../wailsjs/go/main/App";
 
 interface TerminalsState {
@@ -25,6 +26,7 @@ interface TerminalsState {
     slotIndex?: number,
     useWorktree?: boolean
   ) => Promise<string>;
+  openTeamFromConfig: (teamID: string) => Promise<Record<string, string>[]>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
@@ -59,9 +61,17 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   addTerminal: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree = false) => {
-    const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "", useWorktree);
     const currentSessions = get().sessions[teamID] ?? [];
     const resolvedSlotIndex = slotIndex ?? currentSessions.length;
+    const sessionID = await CreateTerminal(
+      teamID,
+      agentName,
+      workDir,
+      cliType,
+      promptId ?? "",
+      useWorktree,
+      resolvedSlotIndex
+    );
     const session: TerminalSession = {
       sessionID,
       teamID,
@@ -79,6 +89,38 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     }));
 
     return sessionID;
+  },
+
+  openTeamFromConfig: async (teamID) => {
+    const results = (await OpenTeamFromConfig(teamID)) as Record<string, string>[];
+    const existing = get().sessions[teamID] ?? [];
+    const newSessions: TerminalSession[] = [];
+
+    for (const row of results) {
+      if (row.error || !row.sessionID) continue;
+      const parsedSlot = Number.parseInt(row.slotIndex ?? "", 10);
+      newSessions.push({
+        sessionID: row.sessionID,
+        teamID,
+        agentName: row.agentName ?? "",
+        cliType: (row.cliType || "shell") as CLIType,
+        index: existing.length + newSessions.length,
+        slotIndex: Number.isNaN(parsedSlot)
+          ? existing.length + newSessions.length
+          : parsedSlot,
+      });
+    }
+
+    if (newSessions.length > 0) {
+      set((s) => ({
+        sessions: {
+          ...s.sessions,
+          [teamID]: [...(s.sessions[teamID] ?? []), ...newSessions],
+        },
+      }));
+    }
+
+    return results;
   },
 
   removeTerminal: async (teamID, sessionID) => {
