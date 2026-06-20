@@ -14,8 +14,8 @@ export function CreateTeam(arg1, arg2, arg3) {
   return window['go']['main']['App']['CreateTeam'](arg1, arg2, arg3);
 }
 
-export function CreateTerminal(arg1, arg2, arg3, arg4, arg5, arg6) {
-  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5, arg6);
+export function CreateTerminal(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
+  return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
 }
 
 export function DeletePrompt(arg1) {
@@ -72,6 +72,10 @@ export function ListTeams() {
 
 export function OpenDirectoryDialog() {
   return window['go']['main']['App']['OpenDirectoryDialog']();
+}
+
+export function OpenTeamFromConfig(arg1) {
+  return window['go']['main']['App']['OpenTeamFromConfig'](arg1);
 }
 
 export function ResizeTerminal(arg1, arg2, arg3) {

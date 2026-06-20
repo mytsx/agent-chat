@@ -4,6 +4,7 @@ import {prompt} from '../models';
 import {team} from '../models';
 import {cli} from '../models';
 import {types} from '../models';
+import {main} from '../models';
 
 export function CloseTerminal(arg1:string):Promise<void>;
 
@@ -11,7 +12,7 @@ export function CreatePrompt(arg1:string,arg2:string,arg3:string,arg4:Array<stri
 
 export function CreateTeam(arg1:string,arg2:string,arg3:Array<team.AgentConfig>):Promise<team.Team>;
 
-export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:boolean):Promise<string>;
+export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:boolean,arg7:number):Promise<string>;
 
 export function DeletePrompt(arg1:string):Promise<void>;
 
@@ -40,6 +41,8 @@ export function ListRooms():Promise<Array<types.RoomSummary>>;
 export function ListTeams():Promise<Array<team.Team>>;
 
 export function OpenDirectoryDialog():Promise<string>;
+
+export function OpenTeamFromConfig(arg1:string):Promise<Array<main.OpenTeamResult>>;
 
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 

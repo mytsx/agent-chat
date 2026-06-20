@@ -16,6 +16,8 @@ export interface AgentConfig {
   prompt_id: string;
   work_dir: string;
   cli_type: string;
+  slot_index: number;
+  use_worktree: boolean;
 }
 
 export interface Team {
