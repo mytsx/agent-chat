@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/yerli/Developer/agent-chat/.codex/hooks/gemini-review-on-push.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}
