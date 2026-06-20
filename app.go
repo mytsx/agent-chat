@@ -934,16 +934,16 @@ func (a *App) SetGlobalPrompt(content string) error {
 // ===================== Hub Bindings =====================
 
 // GetMessages returns all messages from a room
-func (a *App) GetMessages(room string) []types.Message {
+func (a *App) GetMessages(room string) ([]types.Message, error) {
 	if a.hubClient == nil {
-		return nil
+		return nil, fmt.Errorf("hub not connected")
 	}
 	msgs, err := a.hubClient.GetMessagesRaw(room)
 	if err != nil {
 		log.Printf("[HUB] GetMessages error for room %s: %v", room, err)
-		return nil
+		return nil, err
 	}
-	return msgs
+	return msgs, nil
 }
 
 // ListRooms returns structured summaries of all rooms (including orphan rooms
@@ -961,16 +961,16 @@ func (a *App) ListRooms() ([]types.RoomSummary, error) {
 }
 
 // GetAgents returns all agents from a room
-func (a *App) GetAgents(room string) map[string]types.Agent {
+func (a *App) GetAgents(room string) (map[string]types.Agent, error) {
 	if a.hubClient == nil {
-		return nil
+		return nil, fmt.Errorf("hub not connected")
 	}
 	agents, err := a.hubClient.GetAgentsRaw(room)
 	if err != nil {
 		log.Printf("[HUB] GetAgents error for room %s: %v", room, err)
-		return nil
+		return nil, err
 	}
-	return agents
+	return agents, nil
 }
 
 // WatchChatDir subscribes to a room (backward-compatible binding name).

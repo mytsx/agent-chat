@@ -353,6 +353,9 @@ func (c *HubClient) GetAgentsRaw(room string) (map[string]types.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get_agents failed: %s", resp.Error)
+	}
 	var data struct {
 		Agents map[string]types.Agent `json:"agents"`
 	}
@@ -367,6 +370,9 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 	resp, err := c.Send(types.Request{Type: "get_messages_raw", Room: room})
 	if err != nil {
 		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get_messages_raw failed: %s", resp.Error)
 	}
 	var data struct {
 		Messages []types.Message `json:"messages"`
