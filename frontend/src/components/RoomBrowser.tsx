@@ -1,0 +1,208 @@
+import { useEffect } from "react";
+import { useRooms } from "../store/useRooms";
+import { useTeams } from "../store/useTeams";
+import { useMessages, useAgentsFor } from "../store/useMessages";
+import MessageFeed from "./MessageFeed";
+import { RoomSummary } from "../lib/types";
+
+// truncateToMessages in the hub — rooms at/above this cap show only the most
+// recent slice, not their lifetime total.
+const MESSAGE_CAP = 300;
+
+function relativeTime(iso: string): string {
+  if (!iso) return "—";
+  // Go emits microsecond precision (e.g. ".000000"); Safari/WKWebView return an
+  // Invalid Date for >3 fractional digits, so truncate to milliseconds first.
+  const t = new Date(iso.replace(/(\.\d{3})\d+/, "$1")).getTime();
+  if (isNaN(t)) return "—";
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const mon = Math.floor(day / 30);
+  if (mon < 12) return `${mon}mo ago`;
+  return `${Math.floor(mon / 12)}y ago`;
+}
+
+function RoomRow({
+  room,
+  isActiveTeam,
+  onClick,
+}: {
+  room: RoomSummary;
+  isActiveTeam: boolean;
+  onClick: () => void;
+}) {
+  const agentNames = Object.keys(room.agents || {});
+  const isEmpty = room.message_count === 0 && agentNames.length === 0;
+  const countLabel =
+    room.message_count >= MESSAGE_CAP
+      ? `last ${room.message_count} messages`
+      : `${room.message_count} messages`;
+
+  return (
+    <button className="room-row" onClick={onClick}>
+      <div className="room-row-top">
+        <span className="room-row-name">
+          {room.name}
+          {room.is_default && <span className="room-tag">default</span>}
+        </span>
+        <span className="room-row-time">{relativeTime(room.last_activity)}</span>
+      </div>
+      <div className="room-row-meta">
+        <span className="room-row-count">{countLabel}</span>
+        <span
+          className={`room-row-origin ${
+            isActiveTeam ? "origin-team" : "origin-orphan"
+          }`}
+        >
+          {isActiveTeam ? "team" : "no team"}
+        </span>
+      </div>
+      <div className="room-row-agents">
+        {isEmpty ? (
+          <span className="room-badge room-badge-empty">empty room</span>
+        ) : agentNames.length > 0 ? (
+          agentNames.map((n) => (
+            <span
+              key={n}
+              className="room-agent-badge"
+              title={room.agents[n]?.role || ""}
+            >
+              {n}
+            </span>
+          ))
+        ) : (
+          <span className="room-agent-empty">no agents (archived room)</span>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function RoomDetail({
+  room,
+  isActiveTeam,
+  onBack,
+}: {
+  room: string;
+  isActiveTeam: boolean;
+  onBack: () => void;
+}) {
+  const loadMessages = useMessages((s) => s.loadMessages);
+  const loadAgents = useMessages((s) => s.loadAgents);
+  const agents = useAgentsFor(room);
+
+  useEffect(() => {
+    loadMessages(room);
+    loadAgents(room);
+  }, [room, loadMessages, loadAgents]);
+
+  // useAgentsFor already returns a stable {} when absent, so this never throws;
+  // the `|| {}` is defense-in-depth, matching RoomRow's guard.
+  const agentNames = Object.keys(agents || {});
+
+  return (
+    <div className="room-detail">
+      <div className="room-detail-header">
+        <button className="room-back" onClick={onBack}>
+          ← Back
+        </button>
+        <span className="room-detail-name">{room}</span>
+        <span
+          className={`room-live ${
+            isActiveTeam ? "room-live-on" : "room-live-off"
+          }`}
+          title={
+            isActiveTeam
+              ? "Active team room — new messages stream live"
+              : "Orphaned room — static history, no live stream"
+          }
+        >
+          {isActiveTeam ? "● live" : "○ static"}
+        </span>
+      </div>
+      <div className="room-detail-agents">
+        {agentNames.length > 0 ? (
+          agentNames.map((n) => (
+            <span
+              key={n}
+              className="room-agent-badge"
+              title={agents[n]?.role || ""}
+            >
+              {n}
+            </span>
+          ))
+        ) : (
+          <span className="room-agent-empty">no agents (archived room)</span>
+        )}
+      </div>
+      {/* maxMessages=0 → show full retained history, not the sidebar's 50-msg preview */}
+      <MessageFeed chatDir={room} maxMessages={0} />
+    </div>
+  );
+}
+
+export default function RoomBrowser() {
+  const rooms = useRooms((s) => s.rooms);
+  const loading = useRooms((s) => s.loading);
+  const error = useRooms((s) => s.error);
+  const selectedRoom = useRooms((s) => s.selectedRoom);
+  const loadRooms = useRooms((s) => s.loadRooms);
+  const selectRoom = useRooms((s) => s.selectRoom);
+  const teams = useTeams((s) => s.teams);
+
+  useEffect(() => {
+    loadRooms();
+  }, [loadRooms]);
+
+  const teamNames = new Set((teams || []).map((t) => t.name));
+
+  if (selectedRoom) {
+    return (
+      <RoomDetail
+        room={selectedRoom}
+        isActiveTeam={teamNames.has(selectedRoom)}
+        onBack={() => selectRoom(null)}
+      />
+    );
+  }
+
+  return (
+    <div className="room-browser">
+      <div className="room-browser-header">
+        <h3 className="sidebar-section-title">Rooms ({rooms.length})</h3>
+        <button
+          className={`room-refresh${loading ? " loading" : ""}`}
+          onClick={() => loadRooms()}
+          disabled={loading}
+          title="Refresh"
+        >
+          ⟳
+        </button>
+      </div>
+      {error ? (
+        <p className="sidebar-empty room-error">Failed to load rooms: {error}</p>
+      ) : loading && rooms.length === 0 ? (
+        <p className="sidebar-empty">Loading…</p>
+      ) : rooms.length === 0 ? (
+        <p className="sidebar-empty">No rooms</p>
+      ) : (
+        <div className="room-list">
+          {rooms.map((r) => (
+            <RoomRow
+              key={r.name}
+              room={r}
+              isActiveTeam={teamNames.has(r.name)}
+              onClick={() => selectRoom(r.name)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

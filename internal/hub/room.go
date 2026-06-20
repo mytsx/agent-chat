@@ -372,6 +372,50 @@ type RoomInfo struct {
 	Messages int
 }
 
+// Summary returns structured metadata about the room for the desktop room browser.
+// It does NOT run stale cleanup, so the persisted agent map is reported verbatim
+// (rooms whose agents went idle still show the names they were created with).
+func (r *RoomState) Summary(name string, isDefault bool) types.RoomSummary {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	lastActivity := ""
+	if len(r.messages) > 0 {
+		lastActivity = r.messages[len(r.messages)-1].Timestamp
+	}
+
+	return types.RoomSummary{
+		Name:         name,
+		MessageCount: len(r.messages),
+		Agents:       r.copyAgentsLocked(),
+		LastActivity: lastActivity,
+		IsDefault:    isDefault,
+	}
+}
+
+// ListRoomSummaries returns structured summaries for all rooms, sorted by last
+// activity descending (most recent first); rooms with no activity sort last.
+func ListRoomSummaries(rooms map[string]*RoomState, defaultRoom string) []types.RoomSummary {
+	summaries := make([]types.RoomSummary, 0, len(rooms))
+	for name, room := range rooms {
+		summaries = append(summaries, room.Summary(name, name == defaultRoom))
+	}
+	sort.Slice(summaries, func(i, j int) bool {
+		a, b := summaries[i].LastActivity, summaries[j].LastActivity
+		if a == b {
+			return summaries[i].Name < summaries[j].Name
+		}
+		if a == "" {
+			return false
+		}
+		if b == "" {
+			return true
+		}
+		return a > b
+	})
+	return summaries
+}
+
 // ListRoomInfos returns sorted info about all rooms.
 func ListRoomInfos(rooms map[string]*RoomState) []RoomInfo {
 	var infos []RoomInfo

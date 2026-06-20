@@ -9,6 +9,15 @@ type Agent struct {
 	LastSeen float64 `json:"last_seen"`
 }
 
+// RoomSummary is structured metadata about a room, used by the desktop room browser.
+type RoomSummary struct {
+	Name         string           `json:"name"`
+	MessageCount int              `json:"message_count"`
+	Agents       map[string]Agent `json:"agents"`        // persisted agent names + roles (no cleanup)
+	LastActivity string           `json:"last_activity"` // last message timestamp (ISO), "" if empty
+	IsDefault    bool             `json:"is_default"`
+}
+
 // Message represents a chat message.
 type Message struct {
 	ID              int    `json:"id"`

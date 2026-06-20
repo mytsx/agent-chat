@@ -38,10 +38,6 @@ export function GetGlobalPrompt() {
   return window['go']['main']['App']['GetGlobalPrompt']();
 }
 
-export function IsGitRepo(arg1) {
-  return window['go']['main']['App']['IsGitRepo'](arg1);
-}
-
 export function GetMessages(arg1) {
   return window['go']['main']['App']['GetMessages'](arg1);
 }
@@ -58,8 +54,16 @@ export function GetTerminalSessions(arg1) {
   return window['go']['main']['App']['GetTerminalSessions'](arg1);
 }
 
+export function IsGitRepo(arg1) {
+  return window['go']['main']['App']['IsGitRepo'](arg1);
+}
+
 export function ListPrompts() {
   return window['go']['main']['App']['ListPrompts']();
+}
+
+export function ListRooms() {
+  return window['go']['main']['App']['ListRooms']();
 }
 
 export function ListTeams() {
