@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -614,12 +613,23 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	return newSessionID, nil
 }
 
+// OpenTeamResult is one row returned by OpenTeamFromConfig: the agent it tried to
+// open, plus either SessionID (success) or Error (failure/skipped). Empty strings
+// mark the absent one. Wails generates a typed TS interface from this struct, so
+// the frontend reads SlotIndex as a number without string conversion.
+type OpenTeamResult struct {
+	AgentName string `json:"agentName"`
+	CLIType   string `json:"cliType"`
+	SlotIndex int    `json:"slotIndex"`
+	SessionID string `json:"sessionID"`
+	Error     string `json:"error"`
+}
+
 // OpenTeamFromConfig opens every terminal saved in a team's template — one per
-// stored agent config — in slot order, and returns a result row per agent
-// (keys: agentName, cliType, slotIndex, and either sessionID on success or error
-// on failure). A per-agent failure does NOT abort the batch: that agent is
-// skipped and its error is reported so the user keeps the remaining terminals.
-func (a *App) OpenTeamFromConfig(teamID string) ([]map[string]string, error) {
+// stored agent config — in slot order, returning one OpenTeamResult per agent.
+// A per-agent failure does NOT abort the batch: that agent is skipped and its
+// error is reported so the user keeps the remaining terminals.
+func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 	t, err := a.teamStore.Get(teamID)
 	if err != nil {
 		return nil, err
@@ -634,27 +644,23 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]map[string]string, error) {
 	// that can't be shown or closed from the UI. capacity < 0 means unlimited
 	// (custom layout), so nothing is skipped there.
 	capacity := team.GridCapacity(t.GridLayout)
-	results := make([]map[string]string, 0, len(ordered))
+	results := make([]OpenTeamResult, 0, len(ordered))
 	for _, cfg := range ordered {
-		row := map[string]string{
-			"agentName": cfg.Name,
-			"cliType":   cfg.CLIType,
-			"slotIndex": strconv.Itoa(cfg.SlotIndex),
-		}
+		res := OpenTeamResult{AgentName: cfg.Name, CLIType: cfg.CLIType, SlotIndex: cfg.SlotIndex}
 		if capacity >= 0 && cfg.SlotIndex >= capacity {
-			row["error"] = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
+			res.Error = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
-			results = append(results, row)
+			results = append(results, res)
 			continue
 		}
 		sessionID, err := a.CreateTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex)
 		if err != nil {
-			row["error"] = err.Error()
+			res.Error = err.Error()
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
 		} else {
-			row["sessionID"] = sessionID
+			res.SessionID = sessionID
 		}
-		results = append(results, row)
+		results = append(results, res)
 	}
 	return results, nil
 }

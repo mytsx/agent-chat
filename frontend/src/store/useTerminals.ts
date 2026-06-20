@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
+import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
 import {
   CreateTerminal,
@@ -27,7 +28,7 @@ interface TerminalsState {
     slotIndex?: number,
     useWorktree?: boolean
   ) => Promise<string>;
-  openTeamFromConfig: (teamID: string) => Promise<Record<string, string>[]>;
+  openTeamFromConfig: (teamID: string) => Promise<main.OpenTeamResult[]>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
@@ -102,22 +103,19 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   openTeamFromConfig: async (teamID) => {
-    const results = (await OpenTeamFromConfig(teamID)) as Record<string, string>[];
+    const results = await OpenTeamFromConfig(teamID);
     const existing = get().sessions[teamID] ?? [];
     const newSessions: TerminalSession[] = [];
 
     for (const row of results) {
       if (row.error || !row.sessionID) continue;
-      const parsedSlot = Number.parseInt(row.slotIndex ?? "", 10);
       newSessions.push({
         sessionID: row.sessionID,
         teamID,
-        agentName: row.agentName ?? "",
+        agentName: row.agentName,
         cliType: (row.cliType || "shell") as CLIType,
         index: existing.length + newSessions.length,
-        slotIndex: Number.isNaN(parsedSlot)
-          ? existing.length + newSessions.length
-          : parsedSlot,
+        slotIndex: row.slotIndex,
       });
     }
 

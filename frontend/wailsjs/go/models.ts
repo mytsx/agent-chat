@@ -23,6 +23,31 @@ export namespace cli {
 
 }
 
+export namespace main {
+	
+	export class OpenTeamResult {
+	    agentName: string;
+	    cliType: string;
+	    slotIndex: number;
+	    sessionID: string;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new OpenTeamResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.agentName = source["agentName"];
+	        this.cliType = source["cliType"];
+	        this.slotIndex = source["slotIndex"];
+	        this.sessionID = source["sessionID"];
+	        this.error = source["error"];
+	    }
+	}
+
+}
+
 export namespace prompt {
 	
 	export class Prompt {

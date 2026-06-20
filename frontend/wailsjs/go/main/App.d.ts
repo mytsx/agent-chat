@@ -4,6 +4,7 @@ import {prompt} from '../models';
 import {team} from '../models';
 import {cli} from '../models';
 import {types} from '../models';
+import {main} from '../models';
 
 export function CloseTerminal(arg1:string):Promise<void>;
 
@@ -41,7 +42,7 @@ export function ListTeams():Promise<Array<team.Team>>;
 
 export function OpenDirectoryDialog():Promise<string>;
 
-export function OpenTeamFromConfig(arg1:string):Promise<Array<Record<string, string>>>;
+export function OpenTeamFromConfig(arg1:string):Promise<Array<main.OpenTeamResult>>;
 
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 
