@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	ptymgr "desktop/internal/pty"
@@ -20,10 +21,16 @@ const (
 	NotifyCooldown = 3 * time.Second
 )
 
+// ackShortWordMaxRunes: bu uzunluk veya altındaki ack pattern'leri (örn. "ok")
+// tam kelime olarak eşleşmeli — yoksa "okul", "doktor", "cok" gibi alakasız
+// kelimelerin içinde alt-metin olarak eşleşip mesajı yanlışlıkla ACK sayar.
+const ackShortWordMaxRunes = 3
+
 // ackPatterns - short acknowledgment messages to skip.
-// Substring matching (strings.Contains) over a small fixed set; a slice is the
-// fastest idiomatic structure here — a map gives O(1) only for exact-key lookups,
-// not "contains", and map iteration is measurably slower (see bench: ~2x).
+// Bir slice burada en hızlı idiomatic yapıdır — map yalnız tam-eşitlik
+// aramasında O(1) verir, "contains" değil, ve map iterasyonu ölçülebilir
+// biçimde daha yavaştır (bench: ~2x). Eşleştirme matchesAckPattern ile
+// kelime-sınırı duyarlı yapılır (bkz. aşağıdaki yorum).
 var ackPatterns = []string{
 	"tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
 	"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
@@ -33,10 +40,57 @@ var ackPatterns = []string{
 }
 
 // questionPatterns - patterns indicating questions, should always be notified.
+// Not: questionPatterns kasıtlı olarak substring (strings.Contains) ile eşleşir.
+// Buradaki yanlış-pozitifin sonucu "fazladan bildirim" olduğundan (zararsız),
+// ack tarafındaki "sessiz atlama" riskinin aksine, kelime-sınırı uygulanmadı.
 var questionPatterns = []string{
 	"?", "nasil", "neden", "ne zaman", "nerede", "kim", "hangi",
 	"yapabilir mi", "mumkun mu", "var mi", "bilir mi", "ister mi",
 	"how", "what", "when", "where", "who", "which", "can you", "could you",
+}
+
+// isWordRune: kelime-içi karakter mi (harf veya rakam). Türkçe dahil tüm
+// Unicode harfleri kapsar (unicode.IsLetter).
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+// matchesAckPattern: p, s içinde SOL tarafı kelime sınırında (kelime başı)
+// olacak şekilde geçiyor mu? Bu, Türkçe eklemeli ack'leri korur ("tesekkurler"
+// → "tesekkur" stem'ini yakalar) ama "doktor"/"soldu" gibi harf-önekli yanlış
+// eşleşmeleri eler. Çok kısa pattern'ler (<= ackShortWordMaxRunes, örn. "ok")
+// ek olarak SAĞ sınır da gerektirir; böylece "okul"/"okudum" elenirken
+// standalone "ok" yakalanır. s ve p küçük harfli (lowercased) varsayılır.
+//
+// Önemli: kelime-sınırı eşleşmesi substring eşleşmesinin ALT KÜMESİdir, yani bu
+// değişiklik yalnız skip→notify yönünde hareket eder (zararsız fazladan bildirim),
+// asla yeni notify→skip (zararlı sessiz atlama) üretmez.
+func matchesAckPattern(s, p string) bool {
+	requireRight := utf8.RuneCountInString(p) <= ackShortWordMaxRunes
+	from := 0
+	for {
+		i := strings.Index(s[from:], p)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(p)
+
+		leftOK := start == 0
+		if !leftOK {
+			r, _ := utf8.DecodeLastRuneInString(s[:start])
+			leftOK = !isWordRune(r)
+		}
+		rightOK := true
+		if requireRight && end < len(s) {
+			r, _ := utf8.DecodeRuneInString(s[end:])
+			rightOK = !isWordRune(r)
+		}
+		if leftOK && rightOK {
+			return true
+		}
+		from = start + 1
+	}
 }
 
 // AnalysisResult represents the decision about a message
@@ -142,7 +196,7 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	hasAck := false
 	if isShort {
 		for _, p := range ackPatterns {
-			if strings.Contains(contentLower, p) {
+			if matchesAckPattern(contentLower, p) {
 				hasAck = true
 				break
 			}
