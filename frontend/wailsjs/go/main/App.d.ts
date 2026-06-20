@@ -23,8 +23,6 @@ export function GetAgents(arg1:string):Promise<Record<string, types.Agent>>;
 
 export function GetGlobalPrompt():Promise<string>;
 
-export function IsGitRepo(arg1:string):Promise<boolean>;
-
 export function GetMessages(arg1:string):Promise<Array<types.Message>>;
 
 export function GetPrompt(arg1:string):Promise<prompt.Prompt>;
@@ -33,7 +31,11 @@ export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
 
+export function IsGitRepo(arg1:string):Promise<boolean>;
+
 export function ListPrompts():Promise<Array<prompt.Prompt>>;
+
+export function ListRooms():Promise<Array<types.RoomSummary>>;
 
 export function ListTeams():Promise<Array<team.Team>>;
 

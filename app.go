@@ -946,6 +946,20 @@ func (a *App) GetMessages(room string) []types.Message {
 	return msgs
 }
 
+// ListRooms returns structured summaries of all rooms (including orphan rooms
+// that no longer map to a team) for the desktop room browser.
+func (a *App) ListRooms() []types.RoomSummary {
+	if a.hubClient == nil {
+		return nil
+	}
+	rooms, err := a.hubClient.ListRoomsDetailed()
+	if err != nil {
+		log.Printf("[HUB] ListRooms error: %v", err)
+		return nil
+	}
+	return rooms
+}
+
 // GetAgents returns all agents from a room
 func (a *App) GetAgents(room string) map[string]types.Agent {
 	if a.hubClient == nil {

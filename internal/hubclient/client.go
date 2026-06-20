@@ -329,6 +329,21 @@ func (c *HubClient) ListRooms() (*types.Response, error) {
 	return c.Send(types.Request{Type: "list_rooms"})
 }
 
+// ListRoomsDetailed returns structured summaries for all rooms (desktop only).
+func (c *HubClient) ListRoomsDetailed() ([]types.RoomSummary, error) {
+	resp, err := c.Send(types.Request{Type: "list_rooms_detailed"})
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Rooms []types.RoomSummary `json:"rooms"`
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return nil, err
+	}
+	return data.Rooms, nil
+}
+
 // GetAgentsRaw returns raw agent data for a room.
 func (c *HubClient) GetAgentsRaw(room string) (map[string]types.Agent, error) {
 	resp, err := c.Send(types.Request{Type: "get_agents", Room: room})

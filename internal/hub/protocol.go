@@ -37,6 +37,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleGetLastMessageID(c, req)
 	case "list_rooms":
 		h.handleListRooms(c, req)
+	case "list_rooms_detailed":
+		h.handleListRoomsDetailed(c, req)
 	case "get_agents":
 		h.handleGetAgents(c, req)
 	case "get_messages_raw":
@@ -678,5 +680,22 @@ func (h *Hub) handleListRooms(c *Client, req types.Request) {
 	}
 
 	respData, _ := json.Marshal(map[string]string{"text": sb.String()})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
+// handleListRoomsDetailed returns structured room summaries for the desktop room
+// browser (orphan rooms included). Desktop-authorized only \u2014 agents must not see
+// other teams' history.
+func (h *Hub) handleListRoomsDetailed(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yaln\u0131zca yetkili desktop istemcisi oda listesini ayr\u0131nt\u0131l\u0131 okuyabilir")
+		return
+	}
+
+	h.mu.RLock()
+	summaries := ListRoomSummaries(h.rooms, h.defaultRoom)
+	h.mu.RUnlock()
+
+	respData, _ := json.Marshal(map[string]any{"rooms": summaries})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }

@@ -2,13 +2,14 @@ import { useState } from "react";
 import AgentStatus from "./AgentStatus";
 import MessageFeed from "./MessageFeed";
 import PromptLibrary from "./PromptLibrary";
+import RoomBrowser from "./RoomBrowser";
 
 interface Props {
   chatDir: string;
   onSendPrompt?: (sessionID: string, content: string) => void;
 }
 
-type SidebarTab = "status" | "messages" | "prompts";
+type SidebarTab = "status" | "messages" | "prompts" | "rooms";
 
 export default function Sidebar({ chatDir, onSendPrompt }: Props) {
   const [activeTab, setActiveTab] = useState<SidebarTab>("messages");
@@ -34,6 +35,12 @@ export default function Sidebar({ chatDir, onSendPrompt }: Props) {
         >
           Prompts
         </button>
+        <button
+          className={`sidebar-tab ${activeTab === "rooms" ? "sidebar-tab-active" : ""}`}
+          onClick={() => setActiveTab("rooms")}
+        >
+          Rooms
+        </button>
       </div>
 
       <div className="sidebar-content">
@@ -42,6 +49,7 @@ export default function Sidebar({ chatDir, onSendPrompt }: Props) {
         {activeTab === "prompts" && (
           <PromptLibrary onSendPrompt={onSendPrompt} />
         )}
+        {activeTab === "rooms" && <RoomBrowser />}
       </div>
     </div>
   );

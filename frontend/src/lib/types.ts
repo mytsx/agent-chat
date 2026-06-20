@@ -59,6 +59,15 @@ export interface Agent {
   last_seen: number;
 }
 
+// Structured room metadata for the room browser (mirrors types.RoomSummary).
+export interface RoomSummary {
+  name: string;
+  message_count: number;
+  agents: Record<string, Agent>;
+  last_activity: string;
+  is_default: boolean;
+}
+
 export interface TerminalSession {
   sessionID: string;
   teamID: string;
