@@ -19,21 +19,35 @@ const (
 	NotifyCooldown = 3 * time.Second
 )
 
-// ACK patterns - short acknowledgment messages to skip
-var ACKPatterns = []string{
-	"tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
-	"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
-	"thanks", "thank you", "got it", "okay", "perfect", "great",
-	"tamamdir", "anlasildi", "gorusuruz", "iyi calismalar",
-	"evet", "hayir", "peki", "olur", "elbette",
-}
+// ackPatterns - short acknowledgment messages to skip (map for O(1) lookup)
+var ackPatterns = func() map[string]bool {
+	patterns := []string{
+		"tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
+		"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
+		"thanks", "thank you", "got it", "okay", "perfect", "great",
+		"tamamdir", "anlasildi", "gorusuruz", "iyi calismalar",
+		"evet", "hayir", "peki", "olur", "elbette",
+	}
+	m := make(map[string]bool, len(patterns))
+	for _, p := range patterns {
+		m[p] = true
+	}
+	return m
+}()
 
-// Question patterns - these should always be notified
-var QuestionPatterns = []string{
-	"?", "nasil", "neden", "ne zaman", "nerede", "kim", "hangi",
-	"yapabilir mi", "mumkun mu", "var mi", "bilir mi", "ister mi",
-	"how", "what", "when", "where", "who", "which", "can you", "could you",
-}
+// questionPatterns - patterns indicating questions, should always be notified (map for O(1) lookup)
+var questionPatterns = func() map[string]bool {
+	patterns := []string{
+		"?", "nasil", "neden", "ne zaman", "nerede", "kim", "hangi",
+		"yapabilir mi", "mumkun mu", "var mi", "bilir mi", "ister mi",
+		"how", "what", "when", "where", "who", "which", "can you", "could you",
+	}
+	m := make(map[string]bool, len(patterns))
+	for _, p := range patterns {
+		m[p] = true
+	}
+	return m
+}()
 
 // AnalysisResult represents the decision about a message
 type AnalysisResult struct {
@@ -114,22 +128,24 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	contentLower := strings.ToLower(content)
 	expectsReply := msg.ExpectsReply
 
-	// Is it a question?
+	// Is it a question? Check map for O(1) lookup.
 	isQuestion := false
-	for _, p := range QuestionPatterns {
+	for p := range questionPatterns {
 		if strings.Contains(contentLower, p) {
 			isQuestion = true
 			break
 		}
 	}
 
-	// Is it a short acknowledgment?
+	// Is it a short acknowledgment? Check map for O(1) lookup.
 	isShort := len([]rune(content)) < AckMsgMaxLength
 	hasAck := false
-	for _, p := range ACKPatterns {
-		if strings.Contains(contentLower, p) {
-			hasAck = true
-			break
+	if isShort {
+		for p := range ackPatterns {
+			if strings.Contains(contentLower, p) {
+				hasAck = true
+				break
+			}
 		}
 	}
 	isAck := isShort && hasAck && !isQuestion
