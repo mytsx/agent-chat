@@ -11,7 +11,9 @@ const MESSAGE_CAP = 300;
 
 function relativeTime(iso: string): string {
   if (!iso) return "—";
-  const t = new Date(iso).getTime();
+  // Go emits microsecond precision (e.g. ".000000"); Safari/WKWebView return an
+  // Invalid Date for >3 fractional digits, so truncate to milliseconds first.
+  const t = new Date(iso.replace(/(\.\d{3})\d+/, "$1")).getTime();
   if (isNaN(t)) return "—";
   const sec = Math.floor((Date.now() - t) / 1000);
   if (sec < 60) return "az önce";
