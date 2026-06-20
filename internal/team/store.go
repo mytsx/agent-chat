@@ -83,6 +83,7 @@ func (s *Store) save() error {
 
 	tmpPath := s.filePath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath) // clean up a partially-written temp file
 		return err
 	}
 	if err := os.Rename(tmpPath, s.filePath); err != nil {
