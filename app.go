@@ -629,12 +629,23 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]map[string]string, error) {
 	}
 
 	ordered := team.AgentsInOpenOrder(t.Agents)
+	// Don't launch agents that fall outside the current fixed grid: a fixed grid
+	// only renders slots 0..capacity-1, so an over-capacity agent would spawn a PTY
+	// that can't be shown or closed from the UI. capacity < 0 means unlimited
+	// (custom layout), so nothing is skipped there.
+	capacity := team.GridCapacity(t.GridLayout)
 	results := make([]map[string]string, 0, len(ordered))
 	for _, cfg := range ordered {
 		row := map[string]string{
 			"agentName": cfg.Name,
 			"cliType":   cfg.CLIType,
 			"slotIndex": strconv.Itoa(cfg.SlotIndex),
+		}
+		if capacity >= 0 && cfg.SlotIndex >= capacity {
+			row["error"] = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
+			results = append(results, row)
+			continue
 		}
 		sessionID, err := a.CreateTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex)
 		if err != nil {

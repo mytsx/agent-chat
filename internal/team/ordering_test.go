@@ -83,6 +83,29 @@ func TestAgentsInOpenOrderEmpty(t *testing.T) {
 	}
 }
 
+func TestGridCapacity(t *testing.T) {
+	cases := []struct {
+		layout string
+		want   int
+	}{
+		{"1x1", 1},
+		{"2x2", 4},
+		{"2x3", 6},
+		{"3x4", 12},
+		{"custom", -1}, // unlimited
+		{"", -1},       // unparseable → unlimited (lenient, never wrongly skips)
+		{"garbage", -1},
+		{"2x0", -1},
+		{"0x2", -1},
+		{"2xabc", -1},
+	}
+	for _, c := range cases {
+		if got := GridCapacity(c.layout); got != c.want {
+			t.Errorf("GridCapacity(%q) = %d, want %d", c.layout, got, c.want)
+		}
+	}
+}
+
 // The input slice must not be mutated (returns a copy).
 func TestAgentsInOpenOrderDoesNotMutateInput(t *testing.T) {
 	in := []AgentConfig{

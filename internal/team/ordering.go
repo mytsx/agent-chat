@@ -1,6 +1,30 @@
 package team
 
-import "sort"
+import (
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// GridCapacity returns the number of slots a grid layout ("CxR" e.g. "2x3") can
+// display, or -1 for unlimited ("custom") and for any unparseable/invalid layout
+// (lenient: an unknown layout never causes agents to be wrongly skipped). Mirrors
+// the frontend gridCapacity (frontend/src/lib/types.ts).
+func GridCapacity(layout string) int {
+	if layout == "custom" {
+		return -1
+	}
+	parts := strings.Split(layout, "x")
+	if len(parts) != 2 {
+		return -1
+	}
+	cols, err1 := strconv.Atoi(parts[0])
+	rows, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || cols <= 0 || rows <= 0 {
+		return -1
+	}
+	return cols * rows
+}
 
 // AgentsInOpenOrder returns the team's agents ordered for reopening, as a copy
 // (the input is never mutated).

@@ -1,6 +1,7 @@
 package team
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -210,13 +211,10 @@ func TestLoadLegacyTeamsJSON(t *testing.T) {
 }
 
 // A no-op UpsertAgent (identical config) must skip the disk write. Proven
-// deterministically: after the first write the data dir is made read-only, so any
-// write attempt fails — a no-op upsert that skips the write still succeeds, while
-// a changed upsert would error.
+// deterministically and cross-platform: after seeding, the file is overwritten
+// out-of-band with a sentinel. A no-op upsert skips save() so the sentinel
+// survives; a changed upsert calls save() and replaces it with valid JSON.
 func TestUpsertAgentSkipsWriteWhenUnchanged(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("read-only dir does not block writes when running as root")
-	}
 	dir := t.TempDir()
 	s, _ := NewStore(dir)
 	tm, _ := s.Create("TeamA", "2x2", nil)
@@ -225,20 +223,31 @@ func TestUpsertAgentSkipsWriteWhenUnchanged(t *testing.T) {
 		t.Fatalf("seed upsert failed: %v", err)
 	}
 
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod failed: %v", err)
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
 	}
-	defer os.Chmod(dir, 0o700)
 
-	// Identical cfg → no change → must skip write and succeed.
+	// Identical cfg → no change → skip write → sentinel survives untouched.
 	if _, err := s.UpsertAgent(tm.ID, cfg); err != nil {
 		t.Fatalf("no-op upsert should skip the write and succeed, got: %v", err)
 	}
+	if raw, _ := os.ReadFile(filePath); !bytes.Equal(raw, sentinel) {
+		t.Fatalf("no-op upsert rewrote the file (sentinel gone): %s", raw)
+	}
 
-	// Sanity: a changed cfg DOES attempt a write and therefore fails on the
-	// read-only dir (confirms the test is actually exercising the write path).
-	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "A", CLIType: "claude", WorkDir: "/changed", SlotIndex: 1}); err == nil {
-		t.Fatal("changed upsert should attempt a write and fail on read-only dir")
+	// Changed cfg → writes → sentinel replaced with valid JSON reflecting change.
+	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "A", CLIType: "claude", WorkDir: "/changed", SlotIndex: 1}); err != nil {
+		t.Fatalf("changed upsert failed: %v", err)
+	}
+	raw, _ := os.ReadFile(filePath)
+	var disk []Team
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("changed upsert should rewrite valid JSON, got: %s", raw)
+	}
+	if len(disk) == 0 || len(disk[0].Agents) == 0 || disk[0].Agents[0].WorkDir != "/changed" {
+		t.Fatalf("changed upsert not persisted to disk: %+v", disk)
 	}
 }
 

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
+import { useTeams } from "./useTeams";
 import {
   CreateTerminal,
   CloseTerminal,
@@ -88,6 +89,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       },
     }));
 
+    // Backend persisted this agent into the team via UpsertAgent; re-pull the
+    // team so later grid updates don't echo a stale agents array.
+    await useTeams.getState().refreshTeam(teamID);
+
     return sessionID;
   },
 
@@ -119,6 +124,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         },
       }));
     }
+
+    // OpenTeamFromConfig re-persists each agent (CreateTerminal → UpsertAgent),
+    // possibly migrating legacy slot indices; refresh so the team store matches.
+    await useTeams.getState().refreshTeam(teamID);
 
     return results;
   },
