@@ -591,8 +591,10 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	// points at the worktree; reopen against the original repo with useWorktree=true
 	// instead. CreateWorktree reuses the existing worktree idempotently, and the
 	// persisted config keeps work_dir pointing at the repo (not the worktree).
+	// Guard wtRepo != "" so a missing repo path can never blank out workDir; in that
+	// case fall back to the existing workDir (the worktree) with useWorktree=false.
 	useWorktree := false
-	if wtDir != "" {
+	if wtDir != "" && wtRepo != "" {
 		workDir = wtRepo
 		useWorktree = true
 	}

@@ -209,6 +209,39 @@ func TestLoadLegacyTeamsJSON(t *testing.T) {
 	}
 }
 
+// A no-op UpsertAgent (identical config) must skip the disk write. Proven
+// deterministically: after the first write the data dir is made read-only, so any
+// write attempt fails — a no-op upsert that skips the write still succeeds, while
+// a changed upsert would error.
+func TestUpsertAgentSkipsWriteWhenUnchanged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("read-only dir does not block writes when running as root")
+	}
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+	cfg := AgentConfig{Name: "A", CLIType: "claude", WorkDir: "/repo", SlotIndex: 1}
+	if _, err := s.UpsertAgent(tm.ID, cfg); err != nil {
+		t.Fatalf("seed upsert failed: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod failed: %v", err)
+	}
+	defer os.Chmod(dir, 0o700)
+
+	// Identical cfg → no change → must skip write and succeed.
+	if _, err := s.UpsertAgent(tm.ID, cfg); err != nil {
+		t.Fatalf("no-op upsert should skip the write and succeed, got: %v", err)
+	}
+
+	// Sanity: a changed cfg DOES attempt a write and therefore fails on the
+	// read-only dir (confirms the test is actually exercising the write path).
+	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "A", CLIType: "claude", WorkDir: "/changed", SlotIndex: 1}); err == nil {
+		t.Fatal("changed upsert should attempt a write and fail on read-only dir")
+	}
+}
+
 // save() must be atomic: a successful save never leaves a stray .tmp file
 // behind and produces a fully-valid teams.json.
 func TestSaveIsAtomic(t *testing.T) {

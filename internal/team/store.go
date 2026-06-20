@@ -198,6 +198,12 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 				if cfg.Role == "" {
 					cfg.Role = existing.Role
 				}
+				// No-op: skip the disk write when nothing changed. OpenTeamFromConfig
+				// reopens N agents (each → CreateTerminal → UpsertAgent); without this
+				// an unchanged batch would rewrite teams.json N times.
+				if existing == cfg {
+					return s.teams[i], nil
+				}
 				s.teams[i].Agents[j] = cfg
 				if err := s.save(); err != nil {
 					return Team{}, err
