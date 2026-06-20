@@ -382,7 +382,7 @@ export default function TerminalGrid() {
       <div className="terminal-grid-toolbar">
         <GridSelector current={team.grid_layout} onChange={handleLayoutChange} />
         <div className="terminal-grid-actions">
-          {team.agents.length > 0 && teamSessions.length === 0 && (
+          {(team.agents?.length ?? 0) > 0 && teamSessions.length === 0 && (
             <button
               type="button"
               className="btn-sm"
