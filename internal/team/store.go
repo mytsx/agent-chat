@@ -275,6 +275,68 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 	return Team{}, fmt.Errorf("team not found: %s", id)
 }
 
+// maxCharterLen is the soft upper bound on a room charter (custom_prompt),
+// counted in runes so a multibyte (Turkish) character is never split mid-encoding.
+const maxCharterLen = 2000
+
+// sanitizeCharter cleans free-text room charter input before it is persisted and
+// later pasted verbatim into an agent's PTY at startup (sendStartupPrompt uses
+// bracketed paste). An embedded bracketed-paste terminator or a raw ESC could end
+// paste mode early and let the rest of the charter run as live keystrokes, so we
+// strip the bracketed-paste markers and every C0 control byte / DEL — but keep
+// newline and tab so multi-line charters survive. ValidateName is deliberately
+// NOT applied: a charter is free prose, not an identifier. Mirrors the InjectText
+// sanitization in internal/pty/manager.go. Finally the text is capped at
+// maxCharterLen runes.
+func sanitizeCharter(text string) string {
+	const (
+		bracketOpen  = "\x1b[200~"
+		bracketClose = "\x1b[201~"
+	)
+	// Remove the full bracketed-paste sequences first; otherwise the generic
+	// control strip below would drop only the ESC and leave the printable "[200~"
+	// tail behind.
+	text = strings.ReplaceAll(text, bracketOpen, "")
+	text = strings.ReplaceAll(text, bracketClose, "")
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r // preserve line breaks and tabs in multi-line charters
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1 // drop ESC and other C0 control bytes / DEL
+		}
+		return r
+	}, text)
+	if runes := []rune(text); len(runes) > maxCharterLen {
+		text = string(runes[:maxCharterLen])
+	}
+	return text
+}
+
+// SetCustomPrompt sets a team's room charter (custom_prompt) via a targeted
+// single-field update, mirroring SetManager. The positional Update is NOT extended
+// for this: its sole caller (TerminalGrid.handleLayoutChange) omits custom_prompt,
+// so widening Update's signature would reset the charter to "" on every grid-layout
+// change. The text is sanitized (sanitizeCharter) because it is pasted verbatim
+// into each agent's PTY at startup. The charter is injected into new agents only;
+// already-running agents are unaffected (composeAgentPrompt runs at startup).
+func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, t := range s.teams {
+		if t.ID == id {
+			s.teams[i].CustomPrompt = sanitizeCharter(text)
+			if err := s.save(); err != nil {
+				return Team{}, err
+			}
+			return s.teams[i], nil
+		}
+	}
+	return Team{}, fmt.Errorf("team not found: %s", id)
+}
+
 // Delete deletes a team
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()

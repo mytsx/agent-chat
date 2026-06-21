@@ -7,6 +7,7 @@ import {
   UpdateTeam,
   DeleteTeam,
   SetTeamManager,
+  SetCustomPrompt,
 } from "../../wailsjs/go/main/App";
 
 interface TeamsState {
@@ -28,6 +29,10 @@ interface TeamsState {
     agents: AgentConfig[]
   ) => Promise<void>;
   setTeamManager: (id: string, managerAgent: string) => Promise<void>;
+  // setCustomPrompt updates a room's charter (start-of-room context injected into
+  // each new agent's startup prompt). Uses the dedicated backend endpoint rather
+  // than updateTeam, which omits custom_prompt and would reset it on layout change.
+  setCustomPrompt: (id: string, text: string) => Promise<void>;
   refreshTeam: (id: string) => Promise<void>;
   deleteTeam: (id: string) => Promise<void>;
 }
@@ -71,6 +76,13 @@ export const useTeams = create<TeamsState>((set, get) => ({
 
   setTeamManager: async (id, managerAgent) => {
     const t = await SetTeamManager(id, managerAgent);
+    set((s) => ({
+      teams: s.teams.map((team) => (team.id === id ? t : team)),
+    }));
+  },
+
+  setCustomPrompt: async (id, text) => {
+    const t = await SetCustomPrompt(id, text);
     set((s) => ({
       teams: s.teams.map((team) => (team.id === id ? t : team)),
     }));

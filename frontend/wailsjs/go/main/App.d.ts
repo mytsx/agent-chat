@@ -52,6 +52,8 @@ export function RestartTerminal(arg1:string):Promise<string>;
 
 export function SendPromptToAgent(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
 
+export function SetCustomPrompt(arg1:string,arg2:string):Promise<team.Team>;
+
 export function SetGlobalPrompt(arg1:string):Promise<void>;
 
 export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;

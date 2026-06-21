@@ -1,25 +1,41 @@
 import { useState } from "react";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
+import { Team } from "../lib/types";
+import RoomCharterModal from "./RoomCharterModal";
 
 export default function TabBar() {
-  const { teams, activeTeamID, setActiveTeam, createTeam, deleteTeam } =
-    useTeams();
+  const {
+    teams,
+    activeTeamID,
+    setActiveTeam,
+    createTeam,
+    deleteTeam,
+    setCustomPrompt,
+  } = useTeams();
   const { removeAllForTeam } = useTerminals();
-  const [showNew, setShowNew] = useState(false);
-  const [newName, setNewName] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [editingTeam, setEditingTeam] = useState<Team | null>(null);
 
-  const handleCreate = async () => {
-    if (!newName.trim()) return;
-    await createTeam(newName.trim(), "2x2", []);
-    setNewName("");
-    setShowNew(false);
+  // Two-step create: the team is created first, then its charter is persisted via
+  // the dedicated SetCustomPrompt endpoint (kept separate so the charter has a
+  // single write path shared with editing).
+  const handleCreate = async (name: string, charter: string) => {
+    const t = await createTeam(name, "2x2", []);
+    if (charter.trim()) {
+      await setCustomPrompt(t.id, charter);
+    }
   };
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     await removeAllForTeam(id);
     await deleteTeam(id);
+  };
+
+  const handleEdit = (t: Team, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingTeam(t);
   };
 
   return (
@@ -31,6 +47,15 @@ export default function TabBar() {
           onClick={() => setActiveTeam(t.id)}
         >
           <span className="tab-name">{t.name}</span>
+          {t.id === activeTeamID && (
+            <button
+              className="tab-edit"
+              title="Oda açıklamasını düzenle"
+              onClick={(e) => handleEdit(t, e)}
+            >
+              ✎
+            </button>
+          )}
           {teams.length > 1 && (
             <button
               className="tab-close"
@@ -42,23 +67,28 @@ export default function TabBar() {
         </div>
       ))}
 
-      {showNew ? (
-        <div className="tab-new-input">
-          <input
-            autoFocus
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-              if (e.key === "Escape") setShowNew(false);
-            }}
-            placeholder="Team name..."
-          />
-        </div>
-      ) : (
-        <button className="tab-add" onClick={() => setShowNew(true)}>
-          +
-        </button>
+      <button className="tab-add" onClick={() => setShowCreate(true)}>
+        +
+      </button>
+
+      {showCreate && (
+        <RoomCharterModal
+          mode="create"
+          onClose={() => setShowCreate(false)}
+          onSubmit={handleCreate}
+        />
+      )}
+
+      {editingTeam && (
+        <RoomCharterModal
+          mode="edit"
+          initialName={editingTeam.name}
+          initialCharter={editingTeam.custom_prompt ?? ""}
+          onClose={() => setEditingTeam(null)}
+          onSubmit={(_name, charter) =>
+            setCustomPrompt(editingTeam.id, charter)
+          }
+        />
       )}
     </div>
   );

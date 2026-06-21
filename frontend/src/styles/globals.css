@@ -106,6 +106,21 @@ html, body, #root {
   color: white;
 }
 
+.tab-edit {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  border-radius: 2px;
+  line-height: 1;
+}
+
+.tab-edit:hover {
+  color: var(--accent);
+}
+
 .tab-add {
   background: none;
   border: 1px dashed var(--border);
@@ -121,22 +136,6 @@ html, body, #root {
 .tab-add:hover {
   border-color: var(--accent);
   color: var(--accent);
-}
-
-.tab-new-input {
-  -webkit-app-region: no-drag;
-  margin-left: 4px;
-}
-
-.tab-new-input input {
-  background: var(--bg-primary);
-  border: 1px solid var(--accent);
-  color: var(--text-primary);
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  width: 120px;
-  outline: none;
 }
 
 /* ============ Terminal Grid ============ */

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // newTestStore creates a Store backed by a temp dir for isolated tests.
@@ -442,5 +444,150 @@ func TestUpsertAgentConcurrent(t *testing.T) {
 	}
 	if len(reloaded.Agents) == 0 || len(reloaded.Agents) > 26 {
 		t.Fatalf("unexpected agent count after concurrent upserts: %d", len(reloaded.Agents))
+	}
+}
+
+// The charter (custom_prompt) is free text but is pasted verbatim into the agent
+// PTY at startup via bracketed paste (sendStartupPrompt). sanitizeCharter must
+// strip anything that could break that paste — raw ESC, the bracketed-paste
+// markers themselves, and other C0 control bytes — while preserving newline and
+// tab so multi-line charters survive. Mirrors the InjectText sanitization
+// (internal/pty/manager.go).
+func TestSanitizeCharter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain text unchanged", "Bu oda X projesi için kuruldu.", "Bu oda X projesi için kuruldu."},
+		{"newline and tab preserved", "satır1\nsatır2\tson", "satır1\nsatır2\tson"},
+		{"strips raw ESC", "a\x1bb", "ab"},
+		{"strips bracketed-paste close marker", "a\x1b[201~b", "ab"},
+		{"strips bracketed-paste open marker", "a\x1b[200~b", "ab"},
+		{"strips carriage return (keeps newline)", "a\r\nb", "a\nb"},
+		{"strips NUL and bell", "a\x00\x07b", "ab"},
+		{"strips DEL", "a\x7fb", "ab"},
+		{"empty stays empty", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeCharter(c.in); got != c.want {
+				t.Errorf("sanitizeCharter(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// The charter has a soft length cap. The cap is rune-based so a multibyte
+// (Turkish) character is never split mid-encoding.
+func TestSanitizeCharterCapsLengthRuneSafe(t *testing.T) {
+	in := strings.Repeat("ç", maxCharterLen+500)
+	got := sanitizeCharter(in)
+	if n := len([]rune(got)); n != maxCharterLen {
+		t.Fatalf("expected %d runes after cap, got %d", maxCharterLen, n)
+	}
+	// Must remain valid UTF-8 (no split multibyte rune at the boundary).
+	if !utf8.ValidString(got) {
+		t.Fatalf("capped charter is not valid UTF-8")
+	}
+}
+
+// SetCustomPrompt writes the room charter via a targeted single-field endpoint
+// (SetManager pattern) rather than the positional Update, which would reset the
+// charter on every grid-layout change. The value must round-trip through Get.
+func TestSetCustomPromptRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	const charter = "Bu oda ödeme servisi refactor'u için.\nKurallar: küçük PR'lar."
+	updated, err := s.SetCustomPrompt(tm.ID, charter)
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if updated.CustomPrompt != charter {
+		t.Fatalf("returned CustomPrompt = %q, want %q", updated.CustomPrompt, charter)
+	}
+
+	got, err := s.Get(tm.ID)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.CustomPrompt != charter {
+		t.Fatalf("Get CustomPrompt = %q, want %q", got.CustomPrompt, charter)
+	}
+}
+
+// The charter must survive a store reload (persisted to teams.json, not just held
+// in memory).
+func TestSetCustomPromptPersistsToDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+
+	const charter = "Kalıcı oda misyonu."
+	if _, err := s.SetCustomPrompt(tm.ID, charter); err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("reload NewStore failed: %v", err)
+	}
+	reloaded, err := s2.Get(tm.ID)
+	if err != nil {
+		t.Fatalf("reload Get failed: %v", err)
+	}
+	if reloaded.CustomPrompt != charter {
+		t.Fatalf("reloaded CustomPrompt = %q, want %q", reloaded.CustomPrompt, charter)
+	}
+}
+
+// SetCustomPrompt must sanitize its input (it is pasted into the PTY at startup).
+func TestSetCustomPromptSanitizes(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+
+	updated, err := s.SetCustomPrompt(tm.ID, "misyon\x1b[201~\x00 bitiş")
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if want := "misyon bitiş"; updated.CustomPrompt != want {
+		t.Fatalf("CustomPrompt = %q, want sanitized %q", updated.CustomPrompt, want)
+	}
+}
+
+// Setting the charter must not disturb the team's other fields (name, agents,
+// manager). It is a single-field update.
+func TestSetCustomPromptPreservesOtherFields(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{
+		{Name: "Pilot", Role: "Lead", CLIType: "claude", SlotIndex: 0},
+	})
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+
+	updated, err := s.SetCustomPrompt(tm.ID, "yeni misyon")
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if updated.Name != "TeamA" {
+		t.Fatalf("Name changed: %q", updated.Name)
+	}
+	if updated.ManagerAgent != "Pilot" {
+		t.Fatalf("ManagerAgent changed: %q", updated.ManagerAgent)
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0].Name != "Pilot" || updated.Agents[0].Role != "Lead" {
+		t.Fatalf("Agents changed: %+v", updated.Agents)
+	}
+}
+
+func TestSetCustomPromptUnknownTeam(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.SetCustomPrompt("does-not-exist", "x"); err == nil {
+		t.Fatal("expected error for unknown team, got nil")
 	}
 }
