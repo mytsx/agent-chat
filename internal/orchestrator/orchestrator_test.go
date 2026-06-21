@@ -310,6 +310,7 @@ func TestNotifyAgent_Batching(t *testing.T) {
 func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-11111111")
 
 	o.mu.Lock()
 	o.lastNotified[key] = time.Now()

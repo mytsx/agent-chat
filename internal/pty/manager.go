@@ -300,8 +300,34 @@ func (m *Manager) RegisterUserInput(sessionID string) {
 	session.lastUserInputNano.Store(time.Now().UnixNano())
 }
 
+// WriteUserInput writes a user keystroke to the PTY and updates the pending-input
+// flag ATOMICALLY under the per-session write mutex. submit=true means the
+// keystroke submits/clears the line (Enter or Ctrl+C) → flag cleared; otherwise
+// the flag is set (input pending). Doing the write and the flag update under the
+// same lock keeps the flag consistent with concurrent keystrokes' write ordering,
+// so a racing keystroke can't have its flag update separated from its write and
+// clobbered (review CX4).
+func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) error {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	err := m.writeLocked(session, data)
+	if submit {
+		session.lastUserInputNano.Store(0)
+	} else {
+		session.lastUserInputNano.Store(time.Now().UnixNano())
+	}
+	return err
+}
+
 // ClearUserInput marks a session's input line as empty (e.g. the user pressed
-// Enter and submitted their line). After this, UserTypingRecently reports false,
+// Enter and submitted their line). After this, HasPendingInput reports false,
 // so a pending notification can be injected safely.
 func (m *Manager) ClearUserInput(sessionID string) {
 	m.mu.RLock()

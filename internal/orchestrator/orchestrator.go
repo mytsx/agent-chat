@@ -206,6 +206,15 @@ func (o *Orchestrator) hasPendingInput(sessionID string) bool {
 	return false
 }
 
+// isCurrentSessionLocked reports whether sessionID is still the session bound to
+// (chatDir, agentName). Caller MUST hold o.mu. Used to drop stale timer/inject
+// callbacks after an agent is unregistered or restarted with a new sessionID
+// (review GR2/GR3).
+func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID string) bool {
+	sessions, ok := o.agentSessions[chatDir]
+	return ok && sessions[agentName] == sessionID
+}
+
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
@@ -463,13 +472,14 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 			agentName, pending, withinCooldown, pendingCount)
 		return
 	}
+	// Reserve the cooldown UNDER THE LOCK, before the slow PTY injection, so a
+	// concurrent notifyAgent for the same target sees the cooldown and batches
+	// instead of injecting a duplicate (review CX2).
+	o.lastNotified[key] = time.Now()
 	o.mu.Unlock()
 
 	// Outside cooldown and no pending input — inject immediately.
 	if o.tryInject(sessionID, buildPrompt(isBroadcast, fromAgent, agentName)) {
-		o.mu.Lock()
-		o.lastNotified[key] = time.Now()
-		o.mu.Unlock()
 		log.Printf("[ORCH] Notified agent=%s session=%s", agentName, ptymgr.ShortID(sessionID))
 		return
 	}
@@ -492,6 +502,13 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 	pending := o.hasPendingInput(sessionID)
 
 	o.mu.Lock()
+	if !o.isCurrentSessionLocked(chatDir, agentName, sessionID) {
+		// The agent was unregistered or restarted (now bound to a different
+		// sessionID) since this timer was armed. This callback is stale — drop it
+		// without touching the new session's pending state/timer (review GR2).
+		o.mu.Unlock()
+		return
+	}
 	if len(o.pendingMsgs[key]) == 0 {
 		// Nothing to flush — e.g. UnregisterAgent cleared the queue between the
 		// check above and acquiring the lock. Don't re-arm a stale timer (C2).
@@ -551,8 +568,26 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 
 	log.Printf("[ORCH] Flushing %d batched notifications for agent=%s", len(msgs), agentName)
 	if !o.tryInject(sessionID, prompt) {
+		if !o.hasPendingInput(sessionID) {
+			// tryInject failed but the user has NO pending line — so this was a
+			// write failure (e.g. a dead/exited PTY that is still registered), not
+			// a pending-input race. Re-deferring would retry every interval
+			// forever (the maxDeferral→UI path only triggers while pending). Surface
+			// it once via the UI fallback instead of looping (review CX3).
+			log.Printf("[ORCH] WARN: inject failed with no pending input (write error?); routing to UI agent=%s", agentName)
+			if o.onDeferredToUI != nil {
+				o.onDeferredToUI(sessionID, agentName, prompt)
+			}
+			return
+		}
 		// Raced into pending input → re-defer the whole batch.
 		o.mu.Lock()
+		if !o.isCurrentSessionLocked(chatDir, agentName, sessionID) {
+			// Agent was unregistered/restarted while we were injecting — don't
+			// resurrect a timer/pending state for the stale session (review GR3).
+			o.mu.Unlock()
+			return
+		}
 		// Prepend the older batch so chronological order is preserved if new
 		// messages were queued while we were injecting (review G3).
 		o.pendingMsgs[key] = append(msgs, o.pendingMsgs[key]...)

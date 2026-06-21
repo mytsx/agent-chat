@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -76,4 +77,40 @@ func TestRegisterClear_UnknownSessionNoPanic(t *testing.T) {
 	m := NewManager(nil)
 	m.RegisterUserInput("ghost")
 	m.ClearUserInput("ghost")
+}
+
+func TestWriteUserInput_SetsAndClearsPending(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer pr.Close()
+	defer pw.Close()
+
+	m := NewManager(nil)
+	sess := &PTYSession{ID: "s1", PTY: pw}
+	m.mu.Lock()
+	m.sessions["s1"] = sess
+	m.mu.Unlock()
+
+	if err := m.WriteUserInput("s1", []byte("a"), false); err != nil {
+		t.Fatalf("WriteUserInput: %v", err)
+	}
+	if !m.HasPendingInput("s1") {
+		t.Error("non-submit keystroke should mark input pending")
+	}
+
+	if err := m.WriteUserInput("s1", []byte("\r"), true); err != nil {
+		t.Fatalf("WriteUserInput submit: %v", err)
+	}
+	if m.HasPendingInput("s1") {
+		t.Error("submit keystroke should clear the pending flag")
+	}
+}
+
+func TestWriteUserInput_UnknownSession(t *testing.T) {
+	m := NewManager(nil)
+	if err := m.WriteUserInput("ghost", []byte("x"), false); err == nil {
+		t.Error("expected error for unknown session")
+	}
 }

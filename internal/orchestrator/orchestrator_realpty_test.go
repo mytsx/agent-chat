@@ -68,3 +68,47 @@ func TestTryInject_ReturnsFalseOnWriteError(t *testing.T) {
 		t.Error("tryInject should return false when the PTY write fails (notification not delivered)")
 	}
 }
+
+// CX3: when flushPending's injection fails because the PTY write errored (dead
+// session, no pending input), it must route to the UI fallback ONCE rather than
+// re-arming a retry timer forever.
+func TestFlushPending_WriteFailureRoutesToUINotLoop(t *testing.T) {
+	m := ptymgr.NewManager(func(string, []byte) {})
+	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
+	if err != nil {
+		t.Skipf("cannot start cat PTY: %v", err)
+	}
+	defer m.Close(id)
+
+	// Close the PTY so writes fail, but keep the session registered.
+	if s := m.GetSession(id); s != nil && s.PTY != nil {
+		_ = s.PTY.Close()
+	}
+
+	o := New(m)
+	o.RegisterAgent("/rooms/t", "agent-1", id)
+	uiCalls := 0
+	o.SetDeferredHandler(func(_, _, _ string) { uiCalls++ })
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
+	o.mu.Unlock()
+
+	o.flushPending("/rooms/t", "agent-1", id)
+
+	o.mu.Lock()
+	_, hasTimer := o.pendingTimers[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if uiCalls != 1 {
+		t.Errorf("write failure should route to UI exactly once, got %d", uiCalls)
+	}
+	if hasTimer {
+		t.Error("write failure must NOT re-arm a retry timer (would loop forever)")
+	}
+}

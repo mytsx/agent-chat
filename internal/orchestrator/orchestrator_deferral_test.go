@@ -87,6 +87,7 @@ func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
 	o.mu.Lock()
 	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
@@ -121,6 +122,7 @@ func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
 	o.mu.Lock()
 	// pendingMsgs[key] intentionally empty/absent; stale timer + defer stamp present.
@@ -159,6 +161,7 @@ func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 		uiPrompts = append(uiPrompts, prompt)
 	})
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
 	o.mu.Lock()
 	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
@@ -200,6 +203,7 @@ func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.pendingInputFunc = func(string) bool { return false } // input line cleared
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
 	o.mu.Lock()
 	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}, {from: "agent-3"}}
@@ -224,6 +228,39 @@ func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	}
 }
 
+// GR2: when an agent is restarted (same chatDir/agentName, new sessionID), an
+// old timer firing with the STALE sessionID must not flush the new session's
+// pending messages to the dead old session.
+func TestFlushPending_StaleSessionDropped(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.pendingInputFunc = func(string) bool { return false }
+	// The agent is now bound to the NEW session.
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-NEW")
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
+	o.mu.Unlock()
+
+	// An old timer fires with the STALE sessionID.
+	o.flushPending("/rooms/t", "agent-1", "sess-OLD")
+
+	o.mu.Lock()
+	remaining := len(o.pendingMsgs[key])
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if len(*sent) != 0 {
+		t.Errorf("stale session: must not flush to the old session, got %d", len(*sent))
+	}
+	if remaining != 1 {
+		t.Errorf("stale flush must leave the new session's pending intact, got %d", remaining)
+	}
+}
+
 // When a flush races into pending input (outside check passed, but tryInject's
 // atomic pre-check sees pending), the batch must be re-deferred preserving
 // chronological order (old msgs first) and the ORIGINAL deferStartedAt (so
@@ -238,6 +275,7 @@ func TestFlushPending_RaceReDefersPreservingOrderAndCap(t *testing.T) {
 		return calls > 1
 	}
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 	orig := time.Now().Add(-100 * time.Millisecond)
 
 	o.mu.Lock()
@@ -273,6 +311,7 @@ func TestFlushPending_SingleMessageWording(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.pendingInputFunc = func(string) bool { return false }
 	key := "/rooms/t:agent-1"
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
 	o.mu.Lock()
 	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}

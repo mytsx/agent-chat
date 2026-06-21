@@ -821,26 +821,20 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 			session.AgentName, len(raw), raw, data)
 	}
 
-	// Track pending user input so the orchestrator can defer notification
-	// injection and avoid splitting a half-typed line (issue #15). Focus events
-	// are not user typing; a trailing CR/LF submits the line.
-	switch {
-	case data == "\x1b[I" || data == "\x1b[O":
-		// terminal focus in/out — not user typing, ignore
-	case data == "\x03" || strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n"):
-		// Enter submits the line; Ctrl+C (\x03) aborts/clears it in shells and the
-		// supported Ink TUIs. Either way the input buffer ends up empty. Write the
-		// byte FIRST, then clear the pending flag — clearing before the byte is
-		// serialized would briefly mark the (still-unsubmitted) line as safe,
-		// letting an injection win the write mutex and corrupt it (review C5/G1).
-		err := a.ptyManager.Write(sessionID, []byte(data))
-		a.ptyManager.ClearUserInput(sessionID)
-		return err
-	default:
-		a.ptyManager.RegisterUserInput(sessionID)
+	// Focus events are not user typing — write them without touching the pending
+	// flag.
+	if data == "\x1b[I" || data == "\x1b[O" {
+		return a.ptyManager.Write(sessionID, []byte(data))
 	}
 
-	return a.ptyManager.Write(sessionID, []byte(data))
+	// Track pending user input so the orchestrator can defer notification
+	// injection and avoid splitting a half-typed line (issue #15). Enter (CR/LF)
+	// and Ctrl+C (\x03) submit/clear the line; anything else is pending input.
+	// WriteUserInput writes the bytes and updates the flag together under the
+	// session write mutex, so concurrent keystrokes can't desync the flag from
+	// the write ordering (review C5/G1/CX4).
+	submit := data == "\x03" || strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n")
+	return a.ptyManager.WriteUserInput(sessionID, []byte(data), submit)
 }
 
 // ResizeTerminal resizes a terminal
