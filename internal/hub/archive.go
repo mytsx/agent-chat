@@ -156,12 +156,12 @@ func (h *Hub) appendArchive(room string, msgs []types.Message) error {
 	if err != nil {
 		return fmt.Errorf("open archive %s: %w", room, err)
 	}
+	// defer is a safety net against a panic leaking the fd; the explicit Close
+	// below reports a Close-time failure (e.g. ENOSPC surfacing on flush) on
+	// this durability path. The double close on the success path is harmless.
+	defer f.Close()
 
-	// Close explicitly (not via defer): on this durability path a Close-time
-	// failure — e.g. ENOSPC surfacing when buffered data is flushed — must be
-	// reported, not silently dropped.
 	if _, err := f.Write(buf.Bytes()); err != nil {
-		f.Close()
 		return fmt.Errorf("append archive %s: %w", room, err)
 	}
 	if err := f.Close(); err != nil {
