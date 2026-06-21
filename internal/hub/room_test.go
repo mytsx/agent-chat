@@ -47,6 +47,65 @@ func TestRoomManagerTimeoutClearsLock(t *testing.T) {
 	}
 }
 
+func TestRoomTouchManagerHeartbeat_CaseInsensitive(t *testing.T) {
+	r := NewRoomState()
+
+	if _, _, err := r.Join("Pilot", "manager"); err != nil {
+		t.Fatalf("manager join should succeed: %v", err)
+	}
+
+	// The manager is locked under its join spelling ("Pilot"), but a caller may
+	// pass the configured spelling ("pilot"). Manager identity is casing-independent.
+	if !r.TouchManagerHeartbeat("pilot") {
+		t.Fatalf("TouchManagerHeartbeat should recognize a case-variant manager name")
+	}
+}
+
+func TestRoomGetActiveManagerAndTouch_CaseInsensitiveRefresh(t *testing.T) {
+	r := NewRoomState()
+
+	if _, _, err := r.Join("Pilot", "manager"); err != nil {
+		t.Fatalf("manager join should succeed: %v", err)
+	}
+
+	r.mu.Lock()
+	stale := types.Now() - 100
+	r.managerLastSeen = stale
+	r.mu.Unlock()
+
+	if active := r.GetActiveManagerAndTouch("pilot"); active != "Pilot" {
+		t.Fatalf("expected active manager Pilot, got %q", active)
+	}
+
+	r.mu.RLock()
+	refreshed := r.managerLastSeen
+	r.mu.RUnlock()
+	if refreshed <= stale {
+		t.Fatalf("expected heartbeat refresh for case-variant manager name, lastSeen %v not refreshed from %v", refreshed, stale)
+	}
+}
+
+func TestRoomResetManagerLockIfDifferent_CaseInsensitiveKeepsLock(t *testing.T) {
+	r := NewRoomState()
+
+	if _, _, err := r.Join("Pilot", "manager"); err != nil {
+		t.Fatalf("manager join should succeed: %v", err)
+	}
+
+	// Re-affirming the same manager via its configured (lowercase) spelling must
+	// NOT clear the active lock.
+	r.ResetManagerLockIfDifferent("pilot")
+	if got := r.GetActiveManager(); got != "Pilot" {
+		t.Fatalf("expected manager lock to survive case-variant re-affirm, got %q", got)
+	}
+
+	// A genuinely different manager name still clears the lock.
+	r.ResetManagerLockIfDifferent("someone-else")
+	if got := r.GetActiveManager(); got != "" {
+		t.Fatalf("expected lock cleared for a different manager, got %q", got)
+	}
+}
+
 func TestRoomSendMessage_InterceptionMetadata(t *testing.T) {
 	r := NewRoomState()
 

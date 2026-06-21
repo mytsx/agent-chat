@@ -221,7 +221,7 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	}
 
 	delete(r.agents, agentName)
-	if r.managerAgent == agentName {
+	if sameAgentName(r.managerAgent, agentName) {
 		r.managerAgent = ""
 		r.managerLastSeen = 0
 	}
@@ -253,7 +253,7 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	active := r.getActiveManagerLocked()
-	if active != "" && active == agentName {
+	if sameAgentName(active, agentName) {
 		r.managerLastSeen = types.Now()
 	}
 	return active
@@ -263,7 +263,7 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.getActiveManagerLocked() == agentName {
+	if r.isActiveManagerLocked(agentName) {
 		r.managerLastSeen = types.Now()
 		return true
 	}
@@ -271,12 +271,13 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 }
 
 // ResetManagerLockIfDifferent clears active manager lock unless it matches managerAgent.
-// If managerAgent is empty, the lock is always cleared.
+// The match is case-insensitive (sameAgentName): re-affirming the same manager via a
+// different spelling — e.g. configured "pilot" while an agent is locked as "Pilot" —
+// must NOT drop the lock. If managerAgent is empty, the lock is always cleared.
 func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	managerAgent = strings.TrimSpace(managerAgent)
-	if managerAgent != "" && r.managerAgent == managerAgent {
+	if sameAgentName(r.managerAgent, managerAgent) {
 		return
 	}
 	if r.managerAgent != "" || r.managerLastSeen != 0 {
@@ -471,6 +472,28 @@ func (r *RoomState) copyAgentsLocked() map[string]types.Agent {
 func (r *RoomState) getActiveManagerLocked() string {
 	r.clearManagerIfStale()
 	return r.managerAgent
+}
+
+// isActiveManagerLocked reports whether name is the room's active manager,
+// resolving a stale lock first and comparing case-insensitively. Must hold mu.
+func (r *RoomState) isActiveManagerLocked(name string) bool {
+	return sameAgentName(r.getActiveManagerLocked(), name)
+}
+
+// sameAgentName reports whether two agent names denote the same identity,
+// comparing case-insensitively after trimming surrounding whitespace. Empty
+// names never match — an absent manager lock is nobody's identity. Manager
+// identity must not depend on casing: an agent configured as "pilot" and one
+// that joins as "Pilot" are the same agent. This keeps the hub (the routing
+// authority) consistent with team.Team.IsManagerAgent and app.go's
+// resolveManagerIntent, which already normalize the same way.
+func sameAgentName(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.EqualFold(a, b)
 }
 
 // sanitize strips ANSI escape sequences and control characters.
