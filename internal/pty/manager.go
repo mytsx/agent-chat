@@ -30,6 +30,15 @@ type PTYSession struct {
 	WorktreeRepo   string // main repo directory (for worktree cleanup)
 	done           chan struct{}
 	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
+
+	// lastUserInputNano is the unix nano timestamp of the last *user* keystroke
+	// (set on the WriteToTerminal path), kept separate from lastOutputNano which
+	// only tracks CLI output. A value of 0 means the input line is considered
+	// empty (never typed, or submitted via Enter) — see ClearUserInput.
+	lastUserInputNano atomic.Int64
+	// writeMu serializes writes to this session's PTY so a multi-write
+	// notification injection is not interleaved with user keystrokes.
+	writeMu sync.Mutex
 }
 
 // OutputHandler is called when PTY produces output
@@ -200,7 +209,9 @@ func validUTF8Len(b []byte) int {
 	return n
 }
 
-// Write writes data to a PTY session's stdin
+// Write writes data to a PTY session's stdin. The per-session write mutex
+// ensures this write is not interleaved with a concurrent notification
+// injection (see WriteAtomic) or another Write.
 func (m *Manager) Write(sessionID string, data []byte) error {
 	m.mu.RLock()
 	session, ok := m.sessions[sessionID]
@@ -210,6 +221,35 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	return m.writeLocked(session, data)
+}
+
+// WriteAtomic runs fn while holding the session's per-session write mutex, so
+// every write fn performs lands as one uninterrupted block relative to user
+// keystrokes and other injections. fn is given a write function that performs
+// raw PTY writes — the mutex is already held, so do NOT call Manager.Write from
+// inside fn (it would deadlock).
+func (m *Manager) WriteAtomic(sessionID string, fn func(write func([]byte) error) error) error {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	return fn(func(data []byte) error {
+		return m.writeLocked(session, data)
+	})
+}
+
+// writeLocked performs the raw PTY write plus debug logging. Callers must hold
+// session.writeMu.
+func (m *Manager) writeLocked(session *PTYSession, data []byte) error {
 	// Debug logging for CLI sessions
 	if session.CLIType != "" {
 		preview := data
@@ -217,7 +257,7 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 			preview = preview[:120]
 		}
 		log.Printf("[PTY-WRITE] session=%s cli=%s agent=%s len=%d hex=%s",
-			ShortID(sessionID), session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
+			ShortID(session.ID), session.CLIType, session.AgentName, len(data), hex.EncodeToString(preview))
 	}
 
 	_, err := session.PTY.Write(data)
@@ -245,6 +285,74 @@ func (m *Manager) WaitForIdle(sessionID string, idleDuration, maxWait time.Durat
 		time.Sleep(500 * time.Millisecond)
 	}
 	return false
+}
+
+// RegisterUserInput records that the user just typed into a session's terminal.
+// Used by the orchestrator to defer notification injection while the user is
+// actively typing, so notifications don't split the user's half-typed input.
+func (m *Manager) RegisterUserInput(sessionID string) {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	session.lastUserInputNano.Store(time.Now().UnixNano())
+}
+
+// WriteUserInput writes a user keystroke to the PTY and updates the pending-input
+// flag ATOMICALLY under the per-session write mutex. submit=true means the
+// keystroke submits/clears the line (Enter or Ctrl+C) → flag cleared; otherwise
+// the flag is set (input pending). Doing the write and the flag update under the
+// same lock keeps the flag consistent with concurrent keystrokes' write ordering,
+// so a racing keystroke can't have its flag update separated from its write and
+// clobbered (review CX4).
+func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) error {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	err := m.writeLocked(session, data)
+	if submit {
+		session.lastUserInputNano.Store(0)
+	} else {
+		session.lastUserInputNano.Store(time.Now().UnixNano())
+	}
+	return err
+}
+
+// ClearUserInput marks a session's input line as empty (e.g. the user pressed
+// Enter and submitted their line). After this, HasPendingInput reports false,
+// so a pending notification can be injected safely.
+func (m *Manager) ClearUserInput(sessionID string) {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	session.lastUserInputNano.Store(0)
+}
+
+// HasPendingInput reports whether the session has user-typed input that has not
+// yet been submitted (Enter). It is true from the first keystroke until
+// ClearUserInput is called (on Enter). There is deliberately NO quiet window: a
+// line the user typed and then paused on is still sitting in the input buffer,
+// so injecting into it would corrupt it (issue #15 review: C3). Returns false
+// for unknown sessions or when the buffer is empty.
+func (m *Manager) HasPendingInput(sessionID string) bool {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	return session.lastUserInputNano.Load() != 0
 }
 
 // Resize resizes a PTY session
@@ -291,6 +399,11 @@ func (m *Manager) Close(sessionID string) error {
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
 
+	// Hold the per-session write mutex across the graceful-exit write and the
+	// fd close so we never tear the PTY down mid-injection: an in-flight
+	// Write/WriteAtomic finishes its whole block first, and the graceful-exit
+	// command itself is not interleaved with another writer.
+	session.writeMu.Lock()
 	// Ask the CLI to exit itself first for clean shutdown.
 	if exitCmd := gracefulExitCommand(session.CLIType); exitCmd != "" && session.PTY != nil {
 		if _, err := session.PTY.Write([]byte(exitCmd)); err != nil {
@@ -305,6 +418,7 @@ func (m *Manager) Close(sessionID string) error {
 	if session.PTY != nil {
 		_ = session.PTY.Close()
 	}
+	session.writeMu.Unlock()
 
 	// Terminate only this terminal's command/process group.
 	if err := terminateCommandTree(session.Cmd, 2*time.Second); err != nil {

@@ -70,6 +70,16 @@ func (a *App) startup(ctx context.Context) {
 
 	// Initialize orchestrator
 	a.orchestrator = orchestrator.New(a.ptyManager)
+	// UI fallback: when a notification can't be safely injected (the user kept
+	// typing past the deferral cap), surface it in the frontend instead of
+	// corrupting the user's input line.
+	a.orchestrator.SetDeferredHandler(func(sessionID, agentName, prompt string) {
+		runtime.EventsEmit(a.ctx, "notification:deferred", map[string]string{
+			"sessionID": sessionID,
+			"agentName": agentName,
+			"prompt":    prompt,
+		})
+	})
 
 	// Initialize stores
 	a.promptStore, _ = prompt.NewStore(a.dataDir)
@@ -775,14 +785,27 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
 		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
 
-	// Claude/Gemini: bracketed paste
+	// Claude/Gemini: bracketed paste. The paste block is a single (atomic) Write;
+	// the 200ms settle then runs OUTSIDE any held lock so a user keystroke during
+	// startup is never blocked. There's no conditional-CR here (the startup prompt
+	// must always submit), so the two writes don't need to be one atomic block.
 	const (
 		bracketOpen  = "\x1b[200~"
 		bracketClose = "\x1b[201~"
 	)
-	a.ptyManager.Write(sessionID, []byte(bracketOpen+composed+bracketClose))
+	if err := a.ptyManager.Write(sessionID, []byte(bracketOpen+composed+bracketClose)); err != nil {
+		log.Printf("[STARTUP] prompt write error cli=%s agent=%s: %v", cliType, agentName, err)
+		return
+	}
 	time.Sleep(200 * time.Millisecond)
-	a.ptyManager.Write(sessionID, []byte("\r"))
+	if err := a.ptyManager.Write(sessionID, []byte("\r")); err != nil {
+		log.Printf("[STARTUP] prompt CR write error cli=%s agent=%s: %v", cliType, agentName, err)
+	}
+	// The startup CR submits the line; if the user happened to type during the
+	// startup wait, that input was submitted along with the prompt. Mark the
+	// buffer empty so later notifications aren't deferred to the UI forever
+	// waiting for an Enter that effectively already happened (review CR2).
+	a.ptyManager.ClearUserInput(sessionID)
 }
 
 // WriteToTerminal writes data to a terminal
@@ -797,7 +820,21 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 		log.Printf("[USER-INPUT] copilot agent=%s len=%d hex=%x ascii=%q",
 			session.AgentName, len(raw), raw, data)
 	}
-	return a.ptyManager.Write(sessionID, []byte(data))
+
+	// Focus events are not user typing — write them without touching the pending
+	// flag.
+	if data == "\x1b[I" || data == "\x1b[O" {
+		return a.ptyManager.Write(sessionID, []byte(data))
+	}
+
+	// Track pending user input so the orchestrator can defer notification
+	// injection and avoid splitting a half-typed line (issue #15). Enter (CR/LF)
+	// and Ctrl+C (\x03) submit/clear the line; anything else is pending input.
+	// WriteUserInput writes the bytes and updates the flag together under the
+	// session write mutex, so concurrent keystrokes can't desync the flag from
+	// the write ordering (review C5/G1/CX4).
+	submit := data == "\x03" || strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n")
+	return a.ptyManager.WriteUserInput(sessionID, []byte(data), submit)
 }
 
 // ResizeTerminal resizes a terminal

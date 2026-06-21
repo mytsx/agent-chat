@@ -43,6 +43,12 @@ function AppContent() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
+  // Notifications that couldn't be injected into a terminal because the user kept
+  // a pending input line past the deferral cap — surfaced here so they aren't
+  // silently lost. A queue (not a single value) so concurrent deferrals from
+  // multiple sessions don't overwrite each other (review C4).
+  const [deferredNotices, setDeferredNotices] = useState<Array<{ id: number; agentName: string; prompt: string }>>([]);
+  const deferredIdRef = useRef(0);
 
   const toggleSidebar = () => {
     if (sidebarRef.current) {
@@ -95,11 +101,22 @@ function AppContent() {
           setWorktreeNotice({ agentName: data.agentName, worktreeDir: data.worktreeDir });
         }
       });
+      EventsOn("notification:deferred", (data: { agentName?: string; prompt?: string }) => {
+        if (data?.agentName) {
+          const agentName = data.agentName;
+          const prompt = data.prompt ?? "";
+          // Increment the ref OUTSIDE the state updater: updaters must be pure, and
+          // React StrictMode double-invokes them in dev (would skip IDs) — review G2.
+          const nextId = deferredIdRef.current++;
+          setDeferredNotices((prev) => [...prev, { id: nextId, agentName, prompt }]);
+        }
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
           EventsOff("agents:updated");
           EventsOff("worktree:dirty");
+          EventsOff("notification:deferred");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
@@ -128,6 +145,10 @@ function AppContent() {
   const chatDir = activeTeam?.name || "default";
 
   const dismissWorktreeNotice = useCallback(() => setWorktreeNotice(null), []);
+  const dismissDeferredNotice = useCallback(
+    (id: number) => setDeferredNotices((prev) => prev.filter((n) => n.id !== id)),
+    []
+  );
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
@@ -145,6 +166,14 @@ function AppContent() {
           <button type="button" onClick={dismissWorktreeNotice}>×</button>
         </div>
       )}
+      {deferredNotices.map((notice) => (
+        <div key={notice.id} className="deferred-notice" title={notice.prompt}>
+          <span>
+            🔔 <strong>{notice.agentName}</strong> için yeni mesaj bildirimi siz yazarken ertelendi ve terminale otomatik iletilemedi — agent&apos;a elle haber verebilir veya <code>read_messages</code> demesini bekleyebilirsiniz.
+          </span>
+          <button type="button" onClick={() => dismissDeferredNotice(notice.id)}>×</button>
+        </div>
+      ))}
       <TabBar />
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">
