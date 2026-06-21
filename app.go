@@ -865,6 +865,18 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	for _, e := range errs {
 		log.Printf("[BROADCAST] session error: %s", e)
 	}
+	return broadcastOutcomeError(injected, errs)
+}
+
+// broadcastOutcomeError reports a broadcast as failed only when EVERY target
+// errored (injected == 0 with at least one error) — so the UI keeps the user's
+// typed text and surfaces the failure instead of silently clearing it. A
+// zero-injection run with no errors (e.g. every agent is an observer) is a no-op,
+// not an error.
+func broadcastOutcomeError(injected int, errs []string) error {
+	if injected == 0 && len(errs) > 0 {
+		return fmt.Errorf("hiçbir terminale gönderilemedi: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }
 
@@ -905,16 +917,25 @@ func isObserverRole(role string) bool {
 // (no agent treated as observer) so a transient store error never silently drops
 // every target.
 func (a *App) broadcastRoleLookup(teamID string) func(agentName string) string {
+	empty := func(string) string { return "" }
+	if a.teamStore == nil {
+		return empty
+	}
 	t, err := a.teamStore.Get(teamID)
 	if err != nil {
 		log.Printf("[BROADCAST] takım rolleri okunamadı team=%s: %v", teamID, err)
-		return func(string) string { return "" }
+		return empty
 	}
+	// Key by a normalized (lower-cased, trimmed) name so a PTY whose AgentName
+	// drifts in casing/whitespace still resolves to its role — matching
+	// composeAgentPrompt's EqualFold+TrimSpace lookup and the casing-independent
+	// manager identity (#22). Otherwise an observer could dodge the filter.
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 	roles := make(map[string]string, len(t.Agents))
 	for _, ag := range t.Agents {
-		roles[ag.Name] = ag.Role
+		roles[norm(ag.Name)] = ag.Role
 	}
-	return func(name string) string { return roles[name] }
+	return func(name string) string { return roles[norm(name)] }
 }
 
 // ResizeTerminal resizes a terminal

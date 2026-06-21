@@ -112,13 +112,13 @@ func TestBroadcastToSessions_PassesSubmitFlag(t *testing.T) {
 
 func TestIsObserverRole(t *testing.T) {
 	cases := map[string]bool{
-		"observer":   true,
-		"Observer":   true,
-		"OBSERVER":   true,
+		"observer":    true,
+		"Observer":    true,
+		"OBSERVER":    true,
 		"  observer ": true,
-		"Developer":  false,
-		"manager":    false,
-		"":           false,
+		"Developer":   false,
+		"manager":     false,
+		"":            false,
 	}
 	for role, want := range cases {
 		if got := isObserverRole(role); got != want {
@@ -167,5 +167,44 @@ func TestBroadcastRoleLookup(t *testing.T) {
 	}
 	if got := roleOf("Unknown"); got != "" {
 		t.Errorf("roleOf(Unknown) = %q, want empty", got)
+	}
+
+	// Name matching must be case/whitespace-insensitive, mirroring
+	// composeAgentPrompt's EqualFold+TrimSpace lookup — otherwise a PTY whose
+	// AgentName drifts in casing would dodge the observer filter and leak a
+	// broadcast to an observer.
+	if got := roleOf("alice"); got != "Developer" {
+		t.Errorf("roleOf(alice) = %q, want Developer (case-insensitive)", got)
+	}
+	if !isObserverRole(roleOf("  WATCHER ")) {
+		t.Error("'  WATCHER ' must resolve to the observer role (case/space-insensitive)")
+	}
+}
+
+// broadcastRoleLookup must not panic when teamStore is nil (defensive guard for
+// tests / unexpected init failure); it returns an all-empty resolver.
+func TestBroadcastRoleLookup_NilTeamStore(t *testing.T) {
+	a := &App{teamStore: nil}
+	roleOf := a.broadcastRoleLookup("any-team")
+	if got := roleOf("Alice"); got != "" {
+		t.Errorf("nil-teamStore roleOf(Alice) = %q, want empty", got)
+	}
+}
+
+// A broadcast is only an error when EVERY target failed (injected==0 with
+// errors); partial success or an all-observer no-op must return nil so the UI
+// doesn't keep a false error.
+func TestBroadcastOutcomeError(t *testing.T) {
+	if err := broadcastOutcomeError(0, []string{"Ghost: session not found"}); err == nil {
+		t.Error("all-failed broadcast (injected=0, errs>0) must return an error")
+	}
+	if err := broadcastOutcomeError(2, []string{"Ghost: session not found"}); err != nil {
+		t.Errorf("partial success (injected>0) must return nil, got %v", err)
+	}
+	if err := broadcastOutcomeError(0, nil); err != nil {
+		t.Errorf("no targets / all observers (injected=0, no errs) must return nil, got %v", err)
+	}
+	if err := broadcastOutcomeError(3, nil); err != nil {
+		t.Errorf("full success must return nil, got %v", err)
 	}
 }
