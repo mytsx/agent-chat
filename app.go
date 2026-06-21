@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"desktop/internal/cli"
 	"desktop/internal/git"
@@ -839,6 +840,154 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 	// the write ordering (review C5/G1/CX4).
 	submit := data == "\x03" || strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n")
 	return a.ptyManager.WriteUserInput(sessionID, []byte(data), submit)
+}
+
+// BroadcastToTeam injects the same text into every agent terminal of a team at
+// once, as if the user typed it into each one. It is NOT a chat message: the text
+// goes straight to each PTY's input line (raw fan-out, hub bypass) so it never
+// appears in room history. With submit=false (the UI default) the text is left
+// pending for the user to confirm in each terminal; submit=true also presses
+// Enter. Observer agents (#17) are excluded. Per-session failures are logged but
+// never abort the broadcast — one dead PTY must not cancel the rest.
+// maxBroadcastChars caps a broadcast's length, mirroring BroadcastBar's
+// textarea maxLength. Enforced server-side too (defense-in-depth) so the bound
+// doesn't depend on a single frontend attribute — and so the copilot
+// char-by-char path (which holds the session write mutex ~5ms/char) can't be
+// driven to lock a terminal for an unbounded time.
+const maxBroadcastChars = 1000
+
+func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("broadcast metni boş olamaz")
+	}
+	if utf8.RuneCountInString(text) > maxBroadcastChars {
+		return fmt.Errorf("broadcast metni çok uzun (en fazla %d karakter) ✂️", maxBroadcastChars)
+	}
+	sessions := a.ptyManager.GetSessionsByTeam(teamID)
+	if len(sessions) == 0 {
+		return fmt.Errorf("takımda açık terminal yok 📭")
+	}
+
+	roleOf := a.broadcastRoleLookup(teamID)
+	injected, errs := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
+
+	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
+		teamID, injected, len(sessions), submit, len(errs))
+	for _, e := range errs {
+		log.Printf("[BROADCAST] session error: %s", e)
+	}
+
+	// Partial failure (some PTYs got it, some didn't) is NOT a whole-broadcast
+	// error — the text still cleared on most terminals and re-sending would
+	// double-inject into the ones that succeeded. Surface it as a non-blocking
+	// advisory instead (mirrors the worktree:dirty / notification:deferred notice
+	// pattern) so the user learns which agents were missed.
+	if injected > 0 && len(errs) > 0 {
+		runtime.EventsEmit(a.ctx, "broadcast:partial", map[string]interface{}{
+			"teamID":   teamID,
+			"injected": injected,
+			"total":    len(sessions),
+			"errors":   errs,
+		})
+	}
+	return broadcastOutcomeError(injected, errs)
+}
+
+// broadcastOutcomeError reports a broadcast as failed only when EVERY target
+// errored (injected == 0 with at least one error) — so the UI keeps the user's
+// typed text and surfaces the failure instead of silently clearing it. A
+// zero-injection run with no errors (e.g. every agent is an observer) is a no-op,
+// not an error.
+func broadcastOutcomeError(injected int, errs []string) error {
+	if injected == 0 && len(errs) > 0 {
+		return fmt.Errorf("hiçbir terminale gönderilemedi: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// broadcastToSessions injects text into every session that should receive a
+// broadcast, skipping observer-role agents (#17-forward-wired: no agent has the
+// observer role today, so the filter is currently a no-op). Per-session inject
+// errors are collected but never abort the fan-out. Returns the number of
+// sessions injected and any per-session error strings.
+func broadcastToSessions(
+	sessions []*ptymgr.PTYSession,
+	text string,
+	submit bool,
+	roleOf func(agentName string) string,
+	inject func(sessionID, text string, submit bool) error,
+) (injected int, errs []string) {
+	// Inject into every target concurrently: each session has its own PTY fd and
+	// write mutex, so parallel writes don't contend, and the slow paths (copilot's
+	// per-char sleeps, submit=true's 200ms settle) no longer serialize on the
+	// Wails IPC goroutine — wall-clock becomes the slowest single session instead
+	// of the sum (review: Gemini HIGH). Each goroutine writes its own outcomes
+	// slot (distinct indices → race-free; wg.Wait establishes the happens-before),
+	// so no shared counter/slice needs locking and error order stays deterministic.
+	type outcome struct {
+		agentName string
+		err       error
+		skipped   bool
+	}
+	outcomes := make([]outcome, len(sessions))
+	var wg sync.WaitGroup
+	for i, s := range sessions {
+		if isObserverRole(roleOf(s.AgentName)) {
+			outcomes[i].skipped = true
+			continue
+		}
+		wg.Add(1)
+		go func(i int, sess *ptymgr.PTYSession) {
+			defer wg.Done()
+			outcomes[i] = outcome{agentName: sess.AgentName, err: inject(sess.ID, text, submit)}
+		}(i, s)
+	}
+	wg.Wait()
+
+	for _, o := range outcomes {
+		if o.skipped {
+			continue
+		}
+		if o.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", o.agentName, o.err))
+			continue
+		}
+		injected++
+	}
+	return injected, errs
+}
+
+// isObserverRole reports whether a team role designates an observer agent, which
+// must be excluded from broadcasts (#17). Compared case-insensitively so the
+// observer feature can store the role in any casing.
+func isObserverRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), "observer")
+}
+
+// broadcastRoleLookup returns a role resolver for a team's agents, used to filter
+// observers out of a broadcast. A team-load failure yields an all-empty resolver
+// (no agent treated as observer) so a transient store error never silently drops
+// every target.
+func (a *App) broadcastRoleLookup(teamID string) func(agentName string) string {
+	empty := func(string) string { return "" }
+	if a.teamStore == nil {
+		return empty
+	}
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		log.Printf("[BROADCAST] takım rolleri okunamadı team=%s: %v", teamID, err)
+		return empty
+	}
+	// Key by a normalized (lower-cased, trimmed) name so a PTY whose AgentName
+	// drifts in casing/whitespace still resolves to its role — matching
+	// composeAgentPrompt's EqualFold+TrimSpace lookup and the casing-independent
+	// manager identity (#22). Otherwise an observer could dodge the filter.
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	roles := make(map[string]string, len(t.Agents))
+	for _, ag := range t.Agents {
+		roles[norm(ag.Name)] = ag.Role
+	}
+	return func(name string) string { return roles[norm(name)] }
 }
 
 // ResizeTerminal resizes a terminal

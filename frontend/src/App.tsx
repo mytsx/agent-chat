@@ -6,6 +6,7 @@ import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
 // useTerminals imported by PromptLibrary for target picker
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
+import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
 import Sidebar from "./components/Sidebar";
 import "./styles/globals.css";
@@ -49,6 +50,11 @@ function AppContent() {
   // multiple sessions don't overwrite each other (review C4).
   const [deferredNotices, setDeferredNotices] = useState<Array<{ id: number; agentName: string; prompt: string }>>([]);
   const deferredIdRef = useRef(0);
+  // Partial-broadcast advisories: some terminals got the broadcast, some didn't.
+  // Non-fatal (the text still cleared on the rest), surfaced as a dismissable
+  // queue so the user learns which agents were missed without losing their input.
+  const [broadcastNotices, setBroadcastNotices] = useState<Array<{ id: number; injected: number; total: number; errors: string[] }>>([]);
+  const broadcastIdRef = useRef(0);
 
   const toggleSidebar = () => {
     if (sidebarRef.current) {
@@ -111,12 +117,23 @@ function AppContent() {
           setDeferredNotices((prev) => [...prev, { id: nextId, agentName, prompt }]);
         }
       });
+      EventsOn("broadcast:partial", (data: { injected?: number; total?: number; errors?: string[] }) => {
+        const injected = data?.injected ?? 0;
+        const total = data?.total ?? 0;
+        const errors = data?.errors ?? [];
+        if (errors.length === 0) return;
+        // Increment the ref OUTSIDE the state updater (StrictMode double-invokes
+        // updaters in dev), matching the deferred-notice handler.
+        const nextId = broadcastIdRef.current++;
+        setBroadcastNotices((prev) => [...prev, { id: nextId, injected, total, errors }]);
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
           EventsOff("agents:updated");
           EventsOff("worktree:dirty");
           EventsOff("notification:deferred");
+          EventsOff("broadcast:partial");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
@@ -149,6 +166,10 @@ function AppContent() {
     (id: number) => setDeferredNotices((prev) => prev.filter((n) => n.id !== id)),
     []
   );
+  const dismissBroadcastNotice = useCallback(
+    (id: number) => setBroadcastNotices((prev) => prev.filter((n) => n.id !== id)),
+    []
+  );
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
@@ -174,7 +195,20 @@ function AppContent() {
           <button type="button" onClick={() => dismissDeferredNotice(notice.id)}>×</button>
         </div>
       ))}
+      {broadcastNotices.map((notice) => (
+        <div
+          key={notice.id}
+          className="broadcast-notice"
+          title={notice.errors.join("\n")}
+        >
+          <span>
+            📢 Toplu mesaj <strong>{notice.injected}/{notice.total}</strong> terminale iletildi — {notice.errors.length} terminale ulaşmadı: <code>{notice.errors.map((e) => e.split(":")[0]).join(", ")}</code>
+          </span>
+          <button type="button" onClick={() => dismissBroadcastNotice(notice.id)}>×</button>
+        </div>
+      ))}
       <TabBar />
+      <BroadcastBar />
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">
           <Panel minSize="30%">

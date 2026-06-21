@@ -326,6 +326,96 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 	return err
 }
 
+// InjectText writes text into a session's input line as if the user typed it,
+// using the same bracketed-paste mechanics as a notification injection. It is the
+// fan-out primitive behind App.BroadcastToTeam.
+//
+// submit=true appends a settle + CR to submit the line and clears the
+// pending-input flag; submit=false leaves the text un-submitted (flag SET) so the
+// user can confirm in each terminal and a later notification injection won't
+// split it. Unlike the orchestrator's tryInject this does NOT skip on pending
+// input — a broadcast is an explicit, deliberate user action.
+//
+// The whole sequence runs under the per-session write mutex so it lands as one
+// uninterrupted block relative to user keystrokes and other injections.
+func (m *Manager) InjectText(sessionID, text string, submit bool) error {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+
+	if session.CLIType == "copilot" {
+		// Copilot's Ink/React TUI needs character-by-character input with no
+		// bracketed paste; the inter-char sleeps mirror the orchestrator's copilot
+		// injection path. Sent raw, control characters would act as live keys —
+		// a newline submits the line (splitting a multiline broadcast even with
+		// submit=false), Tab triggers autocomplete, ESC starts an escape sequence.
+		// So every C0 control / DEL is flattened to a space, keeping the injected
+		// text literal (review: Codex P2 + completeness sweep). \r\n collapses to a
+		// single space first so a CRLF doesn't become two.
+		flat := strings.ReplaceAll(text, "\r\n", " ")
+		flat = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
+			}
+			return r
+		}, flat)
+		if err := m.writeLocked(session, []byte("\x1b[I")); err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+		for _, c := range flat {
+			if err := m.writeLocked(session, []byte(string(c))); err != nil {
+				return err
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if submit {
+			time.Sleep(100 * time.Millisecond)
+			if err := m.writeLocked(session, []byte("\r")); err != nil {
+				return err
+			}
+		}
+	} else {
+		// claude/gemini/shell: text is delivered as one bracketed-paste block (modern
+		// shell readline treats it as a literal paste too). Strip any bracketed-paste
+		// markers the user's text itself contains so an embedded close sequence can't
+		// end paste mode early and let the tail run as live input (review:
+		// completeness sweep — paste integrity).
+		const (
+			bracketOpen  = "\x1b[200~"
+			bracketClose = "\x1b[201~"
+		)
+		safe := strings.ReplaceAll(text, bracketOpen, "")
+		safe = strings.ReplaceAll(safe, bracketClose, "")
+		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
+			return err
+		}
+		if submit {
+			// Let the Ink TUI register the paste before Enter (same settle as the
+			// startup prompt and tryInject paths).
+			time.Sleep(200 * time.Millisecond)
+			if err := m.writeLocked(session, []byte("\r")); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Mirror WriteUserInput's flag bookkeeping: a submitted line is cleared; an
+	// un-submitted broadcast becomes pending input so a notification can't split it.
+	if submit {
+		session.lastUserInputNano.Store(0)
+	} else {
+		session.lastUserInputNano.Store(time.Now().UnixNano())
+	}
+	return nil
+}
+
 // ClearUserInput marks a session's input line as empty (e.g. the user pressed
 // Enter and submitted their line). After this, HasPendingInput reports false,
 // so a pending notification can be injected safely.

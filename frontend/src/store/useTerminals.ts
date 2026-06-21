@@ -8,6 +8,7 @@ import {
   RestartTerminal,
   ResizeTerminal,
   WriteToTerminal,
+  BroadcastToTeam,
   DetectCLIs,
   OpenTeamFromConfig,
 } from "../../wailsjs/go/main/App";
@@ -32,6 +33,11 @@ interface TerminalsState {
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
+  broadcastToTeam: (
+    teamID: string,
+    text: string,
+    submit: boolean
+  ) => Promise<void>;
   resizeTerminal: (
     sessionID: string,
     cols: number,
@@ -178,6 +184,14 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   writeToTerminal: async (sessionID, data) => {
     await WriteToTerminal(sessionID, data);
+  },
+
+  // Fan-out the same text into every agent terminal of a team at once (raw PTY
+  // write, not a chat message). The backend handles per-cliType injection,
+  // observer exclusion, and per-session error tolerance; errors here are only
+  // preconditions (blank text / no open terminals) and propagate to the caller.
+  broadcastToTeam: async (teamID, text, submit) => {
+    await BroadcastToTeam(teamID, text, submit);
   },
 
   resizeTerminal: async (sessionID, cols, rows) => {
