@@ -649,6 +649,58 @@ func TestSetCustomPromptUnknownTeam(t *testing.T) {
 	}
 }
 
+// SetCustomPrompt must skip the disk write when the sanitized charter equals the
+// stored one (matches UpsertAgent's no-op optimization). This also covers the case
+// where the raw input differs but sanitizes to the same value (e.g. a trailing
+// control char is stripped), which the frontend isDirty check cannot detect.
+// Proven with the sentinel-file technique: a skipped write leaves the sentinel.
+func TestSetCustomPromptSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon"); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+
+	// Identical charter → skip write → sentinel survives.
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon"); err != nil {
+		t.Fatalf("no-op SetCustomPrompt should succeed: %v", err)
+	}
+	if raw, _ := os.ReadFile(filePath); !bytes.Equal(raw, sentinel) {
+		t.Fatalf("identical SetCustomPrompt rewrote the file: %s", raw)
+	}
+
+	// Raw differs but sanitizes to the same value → also skip.
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("rewrite sentinel failed: %v", err)
+	}
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon\x00"); err != nil {
+		t.Fatalf("sanitize-equal SetCustomPrompt should succeed: %v", err)
+	}
+	if raw, _ := os.ReadFile(filePath); !bytes.Equal(raw, sentinel) {
+		t.Fatalf("sanitize-equal SetCustomPrompt rewrote the file: %s", raw)
+	}
+
+	// A genuinely different charter must write valid JSON.
+	if _, err := s.SetCustomPrompt(tm.ID, "yeni misyon"); err != nil {
+		t.Fatalf("changed SetCustomPrompt failed: %v", err)
+	}
+	raw, _ := os.ReadFile(filePath)
+	var disk []Team
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("changed SetCustomPrompt should rewrite valid JSON: %s", raw)
+	}
+	if len(disk) != 1 || disk[0].CustomPrompt != "yeni misyon" {
+		t.Fatalf("changed charter not persisted: %+v", disk)
+	}
+}
+
 // When save() fails, SetCustomPrompt must roll back its in-memory mutation so the
 // store doesn't diverge from teams.json — composeAgentPrompt reads the in-memory
 // store, so a charter the UI thinks failed to save would otherwise still be

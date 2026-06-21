@@ -341,8 +341,12 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 
 	for i, t := range s.teams {
 		if t.ID == id {
+			sanitized := sanitizeCharter(text)
+			if s.teams[i].CustomPrompt == sanitized {
+				return s.teams[i], nil // no-op: skip the disk write (matches UpsertAgent)
+			}
 			prev := s.teams[i].CustomPrompt
-			s.teams[i].CustomPrompt = sanitizeCharter(text)
+			s.teams[i].CustomPrompt = sanitized
 			if err := s.save(); err != nil {
 				s.teams[i].CustomPrompt = prev // roll back so memory matches disk
 				return Team{}, err

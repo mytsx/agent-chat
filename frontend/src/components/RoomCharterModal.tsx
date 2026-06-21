@@ -36,11 +36,14 @@ export default function RoomCharterModal({
   const CHARTER_MAX = 2000;
   const charterLen = [...charter].length;
 
-  // Block submit past the cap: the backend silently truncates beyond CHARTER_MAX
-  // runes, so allowing submit would lose the tail without warning. (charterLen is
-  // declared above so this const has no temporal-dead-zone reference.)
+  // Submit is allowed only when there are unsaved changes, the (create-mode) name
+  // is non-empty, and the charter is within the cap. Gating on isDirty avoids a
+  // redundant save of an unchanged charter; the cap check avoids silent backend
+  // truncation. (charterLen is declared above so this const has no TDZ reference.)
   const canSubmit =
-    (isCreate ? name.trim().length > 0 : true) && charterLen <= CHARTER_MAX;
+    isDirty &&
+    (isCreate ? name.trim().length > 0 : true) &&
+    charterLen <= CHARTER_MAX;
 
   // Guard accidental dismissal (overlay click / Escape / Cancel) when the form
   // has unsaved edits, so a long charter isn't lost by a stray click. confirm()
