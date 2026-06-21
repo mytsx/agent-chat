@@ -134,6 +134,40 @@ func TestHandleReadSummary_ReturnsLatest(t *testing.T) {
 	}
 }
 
+// A continued manager is steered to read_summary instead of read_all_messages, so
+// read_summary must refresh the manager heartbeat like the other read/poll
+// handlers — otherwise an actively-polling manager goes stale after
+// managerTimeoutSec and routing is bypassed (#29 Codex review).
+func TestHandleReadSummary_RefreshesManagerHeartbeat(t *testing.T) {
+	dataDir := t.TempDir()
+	h := New(dataDir, "default", log.New(io.Discard, "", 0))
+	if _, err := summary.Write(dataDir, "r1", "özet"); err != nil {
+		t.Fatal(err)
+	}
+	rs := h.getOrCreateRoom("r1")
+	if _, _, err := rs.Join("mgr", "manager"); err != nil {
+		t.Fatal(err)
+	}
+	// Age the heartbeat but keep it within managerTimeoutSec (300s) so the manager
+	// is still active — read_summary should push it back toward "now".
+	rs.mu.Lock()
+	rs.managerLastSeen = types.Now() - 100
+	rs.mu.Unlock()
+
+	c := &Client{hub: h, send: make(chan []byte, 64), rooms: map[string]bool{}}
+	c.agentName = "mgr"
+	c.joinedRoom = "r1"
+	h.handleReadSummary(c, types.Request{ID: "1", Type: "read_summary", Room: "r1"})
+	_ = readResponse(t, c, "read_summary")
+
+	rs.mu.Lock()
+	age := types.Now() - rs.managerLastSeen
+	rs.mu.Unlock()
+	if age > 5 {
+		t.Fatalf("read_summary did not refresh the manager heartbeat: age=%.0fs", age)
+	}
+}
+
 func TestHandleReadSummary_WrongRoomRejected(t *testing.T) {
 	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}

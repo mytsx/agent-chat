@@ -771,6 +771,15 @@ func (h *Hub) handleReadSummary(c *Client, req types.Request) {
 		return
 	}
 
+	// A continued manager is steered here instead of read_all_messages, so refresh
+	// its heartbeat like the other read/poll handlers — otherwise an actively
+	// polling manager goes stale (managerTimeoutSec) and routing is bypassed.
+	if c.agentName != "" {
+		if rs := h.getRoom(room); rs != nil {
+			rs.TouchManagerHeartbeat(c.agentName)
+		}
+	}
+
 	doc, ok, err := summary.Latest(h.dataDir, room)
 	if err != nil {
 		h.logger.Printf("read_summary failed for %s: %v", room, err)

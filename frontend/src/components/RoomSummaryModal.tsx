@@ -60,6 +60,11 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     setError(null);
     setTranscript(null);
     setShowTranscript(false);
+    // Also clear in-flight busy flags so a switch mid-operation can't leave the
+    // new room's modal with disabled controls.
+    setBusyCopy(false);
+    setBusyTranscript(false);
+    setSaving(false);
     (async () => {
       const info = await loadSummary(room);
       if (!alive) return;
@@ -100,7 +105,7 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     } catch (e) {
       if (roomRef.current === r) setError(String(e));
     } finally {
-      if (roomRef.current === r) setBusyCopy(false);
+      setBusyCopy(false); // always clear — the operation finished regardless of room
     }
   };
 
@@ -123,7 +128,7 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
           setTranscript("");
         }
       } finally {
-        if (roomRef.current === r) setBusyTranscript(false);
+        setBusyTranscript(false); // always clear — operation finished
       }
     }
   };
@@ -142,7 +147,7 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     } catch (e) {
       if (roomRef.current === r) setError(String(e));
     } finally {
-      if (roomRef.current === r) setSaving(false);
+      setSaving(false); // always clear — operation finished
     }
   };
 
