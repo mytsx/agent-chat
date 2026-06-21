@@ -43,6 +43,9 @@ function AppContent() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
+  // Notification that couldn't be injected into a terminal because the user kept
+  // typing past the deferral cap — surfaced here so it isn't silently lost.
+  const [deferredNotice, setDeferredNotice] = useState<{ agentName: string; prompt: string } | null>(null);
 
   const toggleSidebar = () => {
     if (sidebarRef.current) {
@@ -95,11 +98,17 @@ function AppContent() {
           setWorktreeNotice({ agentName: data.agentName, worktreeDir: data.worktreeDir });
         }
       });
+      EventsOn("notification:deferred", (data: { agentName?: string; prompt?: string }) => {
+        if (data?.agentName) {
+          setDeferredNotice({ agentName: data.agentName, prompt: data.prompt ?? "" });
+        }
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
           EventsOff("agents:updated");
           EventsOff("worktree:dirty");
+          EventsOff("notification:deferred");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
@@ -128,6 +137,7 @@ function AppContent() {
   const chatDir = activeTeam?.name || "default";
 
   const dismissWorktreeNotice = useCallback(() => setWorktreeNotice(null), []);
+  const dismissDeferredNotice = useCallback(() => setDeferredNotice(null), []);
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
@@ -143,6 +153,14 @@ function AppContent() {
             <strong>{worktreeNotice.agentName}</strong> worktree&apos;si kirli olduğu için korunuyor: <code>{worktreeNotice.worktreeDir}</code>
           </span>
           <button type="button" onClick={dismissWorktreeNotice}>×</button>
+        </div>
+      )}
+      {deferredNotice && (
+        <div className="deferred-notice" title={deferredNotice.prompt}>
+          <span>
+            🔔 <strong>{deferredNotice.agentName}</strong> için yeni mesaj bildirimi siz yazarken ertelendi ve terminale otomatik iletilemedi — agent&apos;a elle haber verebilir veya <code>read_messages</code> demesini bekleyebilirsiniz.
+          </span>
+          <button type="button" onClick={dismissDeferredNotice}>×</button>
         </div>
       )}
       <TabBar />

@@ -27,20 +27,24 @@ type fakePTYManager struct {
 type sentNotification struct {
 	sessionID string
 	text      string
+	withCR    bool
 }
 
 func newTestOrchestrator() (*Orchestrator, *[]sentNotification) {
 	var sent []sentNotification
 	var mu sync.Mutex
 	o := &Orchestrator{
-		ptyManager:    nil,
-		agentSessions: make(map[string]map[string]string),
-		lastNotified:  make(map[string]time.Time),
-		pendingTimers: make(map[string]*time.Timer),
-		pendingMsgs:   make(map[string][]pendingNotification),
-		sendFunc: func(sessionID, text string) {
+		ptyManager:        nil,
+		agentSessions:     make(map[string]map[string]string),
+		lastNotified:      make(map[string]time.Time),
+		pendingTimers:     make(map[string]*time.Timer),
+		pendingMsgs:       make(map[string][]pendingNotification),
+		deferStartedAt:    make(map[string]time.Time),
+		typingQuietWindow: 50 * time.Millisecond,
+		maxDeferral:       200 * time.Millisecond,
+		injectFunc: func(sessionID, text string, withCR bool) {
 			mu.Lock()
-			sent = append(sent, sentNotification{sessionID, text})
+			sent = append(sent, sentNotification{sessionID, text, withCR})
 			mu.Unlock()
 		},
 	}
@@ -665,12 +669,13 @@ func TestUnregisterAgent_CleansCooldownState(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
 
-	// Create cooldown state
+	// Create cooldown + deferral state
 	key := "/rooms/t:agent-1"
 	o.mu.Lock()
 	o.lastNotified[key] = time.Now()
 	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
 	o.pendingTimers[key] = time.AfterFunc(10*time.Second, func() {})
+	o.deferStartedAt[key] = time.Now()
 	o.mu.Unlock()
 
 	// Unregister should clean everything
@@ -680,6 +685,7 @@ func TestUnregisterAgent_CleansCooldownState(t *testing.T) {
 	_, hasLN := o.lastNotified[key]
 	_, hasPM := o.pendingMsgs[key]
 	_, hasPT := o.pendingTimers[key]
+	_, hasDS := o.deferStartedAt[key]
 	o.mu.Unlock()
 
 	if hasLN {
@@ -690,6 +696,9 @@ func TestUnregisterAgent_CleansCooldownState(t *testing.T) {
 	}
 	if hasPT {
 		t.Error("pendingTimers should be cleaned up after unregister")
+	}
+	if hasDS {
+		t.Error("deferStartedAt should be cleaned up after unregister")
 	}
 }
 
