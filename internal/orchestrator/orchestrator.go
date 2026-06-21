@@ -293,13 +293,9 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 // is conditional: if the user is typing it is skipped, so a half-typed line is
 // never submitted early.
 func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
-	// Decision at call time (also the test contract). The real PTY path
-	// re-checks right before the CR to catch a keystroke that arrived while the
-	// write mutex was held.
-	sendCR := !o.userTyping(sessionID)
-
 	if o.injectFunc != nil {
-		o.injectFunc(sessionID, text, sendCR)
+		// Test seam — withCR reflects the call-time decision.
+		o.injectFunc(sessionID, text, !o.userTyping(sessionID))
 		return
 	}
 
@@ -308,21 +304,21 @@ func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
 		log.Printf("[ORCH] sendToTerminal: session not found id=%s", ptymgr.ShortID(sessionID))
 		return
 	}
+	agentName := session.AgentName
 
-	log.Printf("[ORCH] sendToTerminal: cli=%s agent=%s textLen=%d sendCR=%v",
-		session.CLIType, session.AgentName, len(text), sendCR)
+	log.Printf("[ORCH] sendToTerminal: cli=%s agent=%s textLen=%d", session.CLIType, agentName, len(text))
 
-	cliType := session.CLIType
-	err := o.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
-		switch cliType {
-		case "copilot":
-			// Send Focus In so Copilot's Ink TUI accepts input even if the
-			// terminal pane is not visually focused.
+	if session.CLIType == "copilot" {
+		// Copilot's Ink/React TUI needs character-by-character input; the whole
+		// sequence (focus-in + chars + CR) must be one atomic block, so a user
+		// keystroke can't interleave and garble the command. The inter-char
+		// sleeps therefore run under the write mutex. Injection only fires when
+		// the user is idle, so this rarely blocks anyone.
+		err := o.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
 			if err := write([]byte("\x1b[I")); err != nil {
 				return err
 			}
 			time.Sleep(50 * time.Millisecond)
-			// Copilot (Ink/React TUI): simulate keyboard input character by character.
 			for _, c := range text {
 				if err := write([]byte(string(c))); err != nil {
 					return err
@@ -330,26 +326,42 @@ func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
 				time.Sleep(5 * time.Millisecond)
 			}
 			time.Sleep(100 * time.Millisecond)
-		default:
-			// Claude/Gemini: bracketed paste
-			const (
-				bracketOpen  = "\x1b[200~"
-				bracketClose = "\x1b[201~"
-			)
-			if err := write([]byte(bracketOpen + text + bracketClose)); err != nil {
-				return err
+			if o.userTyping(sessionID) {
+				log.Printf("[ORCH] sendToTerminal: skipping CR, user resumed typing agent=%s", agentName)
+				return nil
 			}
-			time.Sleep(200 * time.Millisecond)
+			return write([]byte("\r"))
+		})
+		if err != nil {
+			log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
 		}
-		// Conditional trailing CR (re-checked at the last moment).
+		return
+	}
+
+	// Claude/Gemini: the bracketed-paste block is a single write, so the write
+	// mutex is held only briefly. The 200ms settle (giving the CLI's TUI time to
+	// register the paste before the CR submits it) runs OUTSIDE the lock, so a
+	// user keystroke is never blocked/lagged. The trailing CR is then written
+	// under the lock together with a final typing re-check, so a keystroke can't
+	// be submitted between the check and the CR.
+	const (
+		bracketOpen  = "\x1b[200~"
+		bracketClose = "\x1b[201~"
+	)
+	if err := o.ptyManager.Write(sessionID, []byte(bracketOpen+text+bracketClose)); err != nil {
+		log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
+		return
+	}
+	time.Sleep(200 * time.Millisecond)
+	err := o.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
 		if o.userTyping(sessionID) {
-			log.Printf("[ORCH] sendToTerminal: skipping CR, user resumed typing agent=%s", session.AgentName)
+			log.Printf("[ORCH] sendToTerminal: skipping CR, user resumed typing agent=%s", agentName)
 			return nil
 		}
 		return write([]byte("\r"))
 	})
 	if err != nil {
-		log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", session.AgentName, err)
+		log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
 	}
 }
 

@@ -785,21 +785,21 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
 		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
 
-	// Claude/Gemini: bracketed paste. WriteAtomic keeps the paste + trailing CR
-	// as one block so a user keystroke can't slip into the 200ms gap and corrupt
-	// the startup prompt (issue #15).
+	// Claude/Gemini: bracketed paste. The paste block is a single (atomic) Write;
+	// the 200ms settle then runs OUTSIDE any held lock so a user keystroke during
+	// startup is never blocked. There's no conditional-CR here (the startup prompt
+	// must always submit), so the two writes don't need to be one atomic block.
 	const (
 		bracketOpen  = "\x1b[200~"
 		bracketClose = "\x1b[201~"
 	)
-	if err := a.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
-		if err := write([]byte(bracketOpen + composed + bracketClose)); err != nil {
-			return err
-		}
-		time.Sleep(200 * time.Millisecond)
-		return write([]byte("\r"))
-	}); err != nil {
+	if err := a.ptyManager.Write(sessionID, []byte(bracketOpen+composed+bracketClose)); err != nil {
 		log.Printf("[STARTUP] prompt write error cli=%s agent=%s: %v", cliType, agentName, err)
+		return
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := a.ptyManager.Write(sessionID, []byte("\r")); err != nil {
+		log.Printf("[STARTUP] prompt CR write error cli=%s agent=%s: %v", cliType, agentName, err)
 	}
 }
 
