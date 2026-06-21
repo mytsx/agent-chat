@@ -327,17 +327,18 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 }
 
 // isC0C1Control reports C0 control bytes, DEL, and C1 control bytes (the 8-bit
-// forms of ESC-prefixed sequences, e.g. U+009B ≈ CSI). None may reach a PTY as
-// live input.
+// forms of ESC-prefixed sequences, e.g. U+009B ≈ CSI). These are unsafe as live
+// keystrokes and must be neutralized before injection; callers using bracketed
+// paste special-case \n and \t (themselves C0) beforehand to preserve them.
 func isC0C1Control(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 // isBidiOrFormatControl reports invisible Unicode bidi/format controls and the
-// line/paragraph separators (Trojan-Source class): they can make injected text a
-// human reviews differ from what the agent receives. Mirrors the set stripped by
-// team.sanitizeCharter (the room-charter startup path); kept local here to avoid a
-// cross-package dependency for the broadcast injection path.
+// line/paragraph separators (Trojan-Source class): they can make the text a human
+// reviews differ from the bytes the agent actually receives. Mirrors the set
+// stripped by team.sanitizeCharter (the room-charter startup path); kept local
+// here to avoid a cross-package dependency for the broadcast injection path.
 func isBidiOrFormatControl(r rune) bool {
 	switch r {
 	case 0x2028, 0x2029, // line / paragraph separators
