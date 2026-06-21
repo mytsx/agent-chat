@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"desktop/internal/types"
 
@@ -149,21 +148,19 @@ func (h *Hub) Shutdown() {
 	h.requestMu.Unlock()
 	h.inflightRequests.Wait()
 
-	// Wait for the writer to flush, then sweep up anything it left behind. With
-	// request handling quiesced the channel holds a bounded, fixed set
-	// (<= archiveBufferSize) of small batches that flush well under the timeout
-	// in any realistic case. The timeout is only a safety valve against a hung
-	// disk; if it ever fires, drainArchiveBacklog below still flushes whatever
-	// remains in the channel synchronously.
+	// Wait for the writer to fully drain, including a batch it has already
+	// dequeued and is mid-write on (which drainArchiveBacklog could not flush —
+	// it only sees jobs still in the channel). With request handling quiesced the
+	// remaining work is bounded (<= archiveBufferSize small batches), so this
+	// completes in milliseconds on any working disk. We intentionally do NOT cap
+	// this with a timeout: abandoning the drain would let the process exit and
+	// kill that in-flight write. The desktop parent already bounds a pathological
+	// hang (it SIGTERMs the hub, then SIGKILLs after a grace period).
 	h.mu.RLock()
 	archiveStarted := h.archiveStarted
 	h.mu.RUnlock()
 	if archiveStarted {
-		select {
-		case <-h.archiveDone:
-		case <-time.After(2 * time.Second):
-			h.logger.Println("Archive writer drain timed out; flushing remaining backlog synchronously")
-		}
+		<-h.archiveDone
 	}
 	h.drainArchiveBacklog()
 

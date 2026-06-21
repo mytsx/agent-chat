@@ -600,6 +600,17 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	}
 
 	roomState := h.getOrCreateRoom(room)
+
+	// Durable destructive clear: archive the current history synchronously and
+	// refuse to wipe if it cannot be preserved. Unlike the async truncate path,
+	// clear_room is a deliberate, irreversible command, so it must not report
+	// success while the only copy of the history fails to reach disk.
+	msgs := roomState.GetMessages()
+	if err := h.appendArchive(room, msgs); err != nil {
+		h.logger.Printf("clear_room aborted; archive failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("oda temizlenmedi: geçmiş arşivlenemedi: %v", err))
+		return
+	}
 	roomState.Clear()
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)

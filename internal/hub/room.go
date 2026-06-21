@@ -75,16 +75,17 @@ func (r *RoomState) nextID() int {
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	r.cleanupStaleLocked()
 
 	if _, exists := r.agents[agentName]; exists {
+		r.mu.Unlock()
 		return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", agentName)
 	}
 
 	if strings.EqualFold(strings.TrimSpace(role), "manager") {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
+			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
 		r.managerAgent = agentName
@@ -110,10 +111,16 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	r.messages = append(r.messages, sysMsg)
+	dropped := r.appendMessageLocked(sysMsg)
 	r.dirty = true
 
 	agentsCopy := r.copyAgentsLocked()
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 	return sysMsg, agentsCopy, nil
 }
 
@@ -144,29 +151,7 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 		ExpectsReply:    expectsReply,
 		Priority:        priority,
 	}
-	r.messages = append(r.messages, msg)
-
-	// Truncate if needed, capturing the dropped (oldest) messages as a cheap
-	// in-memory copy so they can be archived after the lock is released.
-	//
-	// Durability note: archiving is asynchronous (the design's hot-path
-	// requirement), so there is a small window where a crash after the periodic
-	// snapshot persists the truncated room but before the async writer drains
-	// would lose the dropped batch. The window is microseconds (the writer is
-	// always ready) versus the 5s snapshot interval; a crash-recovery queue is
-	// possible future work but is intentionally out of scope for Phase-A.
-	var dropped []types.Message
-	if len(r.messages) > maxMessagesInRoom {
-		cut := len(r.messages) - truncateToMessages
-		dropped = make([]types.Message, cut)
-		copy(dropped, r.messages[:cut])
-		// Move the retained tail into a fresh array rather than reslicing, so the
-		// old (large) backing array — which still holds the dropped messages —
-		// becomes garbage now instead of lingering until the next reallocation.
-		retained := make([]types.Message, truncateToMessages, maxMessagesInRoom+1)
-		copy(retained, r.messages[cut:])
-		r.messages = retained
-	}
+	dropped := r.appendMessageLocked(msg)
 
 	r.dirty = true
 	fn := r.archiveFn
@@ -176,6 +161,33 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 		fn(dropped)
 	}
 	return msg, nil
+}
+
+// appendMessageLocked appends msg and, if the room exceeds the cap, truncates to
+// the retained tail — returning the dropped (oldest) messages as a cheap copy so
+// the caller can archive them AFTER releasing the lock. The retained tail is
+// moved into a fresh array so the old backing array (holding the dropped
+// messages) becomes garbage immediately. Every append path (send, join, leave)
+// goes through here so the room is uniformly bounded, which keeps the manager's
+// bounded "read all" instruction able to cover the full retained history.
+//
+// Durability note: truncation archiving is asynchronous (the design's hot-path
+// requirement), so a crash after the periodic snapshot persists the truncated
+// room but before the async writer drains would lose the dropped batch. The
+// window is microseconds (the writer is always ready) versus the 5s snapshot
+// interval; a crash-recovery queue is possible future work, out of scope here.
+// Must hold r.mu.
+func (r *RoomState) appendMessageLocked(msg types.Message) (dropped []types.Message) {
+	r.messages = append(r.messages, msg)
+	if len(r.messages) > maxMessagesInRoom {
+		cut := len(r.messages) - truncateToMessages
+		dropped = make([]types.Message, cut)
+		copy(dropped, r.messages[:cut])
+		retained := make([]types.Message, truncateToMessages, maxMessagesInRoom+1)
+		copy(retained, r.messages[cut:])
+		r.messages = retained
+	}
+	return dropped
 }
 
 // ReadMessages returns filtered messages for an agent.
@@ -252,9 +264,9 @@ func (r *RoomState) ListAgents(agentName string) map[string]types.Agent {
 // Leave removes an agent from the room, returning a system message.
 func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if _, ok := r.agents[agentName]; !ok {
+		r.mu.Unlock()
 		return types.Message{}, false
 	}
 
@@ -272,9 +284,14 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	r.messages = append(r.messages, sysMsg)
+	dropped := r.appendMessageLocked(sysMsg)
 	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
 
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 	return sysMsg, true
 }
 
@@ -325,23 +342,18 @@ func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 	}
 }
 
-// Clear removes all messages and agents. The wiped messages are handed to
-// archiveFn (outside the lock) first, so a destructive clear does not lose
-// history.
+// Clear removes all messages and agents. It is a pure wipe: archiving the
+// history for this destructive path is the caller's responsibility
+// (handleClearRoom archives synchronously and refuses to clear on failure), so
+// a clear never silently loses history.
 func (r *RoomState) Clear() {
 	r.mu.Lock()
-	dropped := r.messages
 	r.messages = []types.Message{}
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
 	r.managerLastSeen = 0
 	r.dirty = true
-	fn := r.archiveFn
 	r.mu.Unlock()
-
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
 }
 
 // GetLastMessageID returns the highest message ID.

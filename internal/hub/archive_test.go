@@ -60,35 +60,73 @@ func TestSendMessageTruncateInvokesArchiveFn(t *testing.T) {
 	}
 }
 
-// TestClearInvokesArchiveFnBeforeClearing verifies Clear hands the full
-// message history to archiveFn before wiping the room.
-func TestClearInvokesArchiveFnBeforeClearing(t *testing.T) {
-	r := NewRoomState()
+// TestHandleClearRoom_AbortsOnArchiveFailure verifies the durable destructive
+// clear: when the history cannot be archived, clear_room fails and the room is
+// NOT wiped, so a clear never silently loses history.
+func TestHandleClearRoom_AbortsOnArchiveFailure(t *testing.T) {
+	tmp := t.TempDir()
+	badDataDir := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(badDataDir, []byte("x"), 0600); err != nil {
+		t.Fatalf("seed bad data dir: %v", err)
+	}
+	h := newArchiveHub(badDataDir)
+	h.desktopAuthToken = "secret"
 
-	var archived []types.Message
-	r.SetArchiveFn(func(msgs []types.Message) {
-		archived = append(archived, msgs...)
+	room := h.getOrCreateRoom("proj")
+	for i := 0; i < 3; i++ {
+		if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(desktop, types.Request{
+		ID:   "id",
+		Type: "identify",
+		Data: mustRawJSON(t, map[string]any{"client_type": "desktop", "auth_token": "secret"}),
 	})
+	if r := readResponse(t, desktop, "identify"); !r.Success {
+		t.Fatalf("desktop identify should succeed: %s", r.Error)
+	}
 
-	const n = 5
-	for i := 0; i < n; i++ {
-		if _, err := r.SendMessage("a", "all", "msg", false, "", SendOptions{}); err != nil {
+	h.handleRequest(desktop, types.Request{ID: "1", Type: "clear_room", Room: "proj"})
+	if resp := readResponse(t, desktop, "clear_room"); resp.Success {
+		t.Fatalf("expected clear_room to abort when the archive cannot be written")
+	}
+	if n := len(room.GetMessages()); n != 3 {
+		t.Fatalf("room must NOT be cleared when archive fails, but %d/3 messages remain", n)
+	}
+}
+
+// TestJoinTruncatesAndArchives verifies join goes through the shared cap/archive
+// path: a join that pushes the room over the cap truncates and archives the
+// dropped messages, keeping the room bounded (so the manager's bounded "read
+// all" always covers the full retained history).
+func TestJoinTruncatesAndArchives(t *testing.T) {
+	r := NewRoomState()
+	var archived []types.Message
+	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
+
+	// Fill to exactly the cap (no truncation yet).
+	for i := 0; i < maxMessagesInRoom; i++ {
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
-
-	r.Clear()
-
-	if len(archived) != n {
-		t.Fatalf("archived count = %d, want %d", len(archived), n)
+	if len(archived) != 0 {
+		t.Fatalf("no truncation expected at the cap, archived=%d", len(archived))
 	}
-	for i, m := range archived {
-		if m.ID != i+1 {
-			t.Fatalf("archived[%d].ID = %d, want %d", i, m.ID, i+1)
-		}
+
+	// A join system message pushes past the cap -> truncate.
+	if _, _, err := r.Join("bob", ""); err != nil {
+		t.Fatalf("join: %v", err)
 	}
-	if msgs := r.GetMessages(); len(msgs) != 0 {
-		t.Fatalf("room not cleared: %d messages remain", len(msgs))
+	wantDropped := maxMessagesInRoom + 1 - truncateToMessages
+	if len(archived) != wantDropped {
+		t.Fatalf("join truncation archived %d, want %d", len(archived), wantDropped)
+	}
+	if n := len(r.GetMessages()); n != truncateToMessages {
+		t.Fatalf("room not bounded after join truncation: %d, want %d", n, truncateToMessages)
 	}
 }
 
