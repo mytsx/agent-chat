@@ -798,14 +798,18 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 		return
 	}
 	time.Sleep(200 * time.Millisecond)
-	if err := a.ptyManager.Write(sessionID, []byte("\r")); err != nil {
+	// Submit the prompt AND clear the pending-input flag atomically under the
+	// session write mutex. A separate Write("\r")+ClearUserInput pair leaves a
+	// window where a concurrent user keystroke can set the flag between them and
+	// then be wrongly cleared here, letting a later notification inject into the
+	// user's freshly typed line (review CXF3 — same class as CX4). WriteUserInput
+	// with submit=true writes the CR and clears the flag as one locked operation.
+	// (The startup CR submits the line, so if the user typed during the startup
+	// wait that input was submitted with the prompt — the buffer ends up empty,
+	// review CR2.)
+	if err := a.ptyManager.WriteUserInput(sessionID, []byte("\r"), true); err != nil {
 		log.Printf("[STARTUP] prompt CR write error cli=%s agent=%s: %v", cliType, agentName, err)
 	}
-	// The startup CR submits the line; if the user happened to type during the
-	// startup wait, that input was submitted along with the prompt. Mark the
-	// buffer empty so later notifications aren't deferred to the UI forever
-	// waiting for an Enter that effectively already happened (review CR2).
-	a.ptyManager.ClearUserInput(sessionID)
 }
 
 // WriteToTerminal writes data to a terminal
