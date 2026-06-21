@@ -250,6 +250,13 @@ func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnl
 		if msg.ID <= sinceID {
 			continue
 		}
+		// user_prompt is a transcript-only record of a prompt already delivered to
+		// the target agent's PTY; surfacing it on read would make the agent
+		// re-handle its own instruction (#29). It stays in the raw read + the
+		// summary transcript, just not in agent-facing reads.
+		if msg.Type == types.MsgTypeUserPrompt {
+			continue
+		}
 		if unreadOnly && msg.From == agentName {
 			continue
 		}
@@ -273,9 +280,16 @@ func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int) {
 
 	var filtered []types.Message
 	for _, m := range r.messages {
-		if m.ID > sinceID {
-			filtered = append(filtered, m)
+		if m.ID <= sinceID {
+			continue
 		}
+		// Exclude transcript-only user_prompt records from the manager's read too,
+		// so a polling manager doesn't re-route a prompt the user already gave an
+		// agent directly (#29). Still present in raw read + summary transcript.
+		if m.Type == types.MsgTypeUserPrompt {
+			continue
+		}
+		filtered = append(filtered, m)
 	}
 
 	totalCount := len(filtered)

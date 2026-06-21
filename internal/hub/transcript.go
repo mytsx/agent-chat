@@ -46,24 +46,39 @@ func ReadFullTranscript(dataDir, room string, sinceID, limit int) ([]types.Messa
 		return nil, err
 	}
 
-	// Dedup by ID. Snapshots are applied last so they win over the archive on the
-	// (content-identical) overlap, where a message present in both the retained
-	// tail and the archive should resolve to its snapshot form.
-	byID := make(map[int]types.Message, len(archived)+len(snapped))
+	// Dedup keyed by (ID, Timestamp), NOT ID alone: clear_room resets a room's IDs
+	// back to 1, so the archive (pre-clear) and a later snapshot (post-clear) can
+	// hold the SAME id for DISTINCT messages — keying on ID alone would silently
+	// drop history. A genuine duplicate (same message in both the retained tail and
+	// the archive) shares id AND timestamp, so it still collapses to one. Snapshots
+	// are applied last so they win on a true-duplicate tie.
+	type key struct {
+		id int
+		ts string
+	}
+	byKey := make(map[key]types.Message, len(archived)+len(snapped))
 	for _, m := range archived {
-		byID[m.ID] = m
+		byKey[key{m.ID, m.Timestamp}] = m
 	}
 	for _, m := range snapped {
-		byID[m.ID] = m
+		byKey[key{m.ID, m.Timestamp}] = m
 	}
 
-	merged := make([]types.Message, 0, len(byID))
-	for _, m := range byID {
+	merged := make([]types.Message, 0, len(byKey))
+	for _, m := range byKey {
 		if m.ID > sinceID {
 			merged = append(merged, m)
 		}
 	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	// Order chronologically by timestamp (fixed-width, lexicographically sortable),
+	// ID as tiebreaker. Timestamp order survives a clear's ID reset, where ID-only
+	// ordering would interleave pre- and post-clear messages.
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Timestamp != merged[j].Timestamp {
+			return merged[i].Timestamp < merged[j].Timestamp
+		}
+		return merged[i].ID < merged[j].ID
+	})
 	if limit > 0 && len(merged) > limit {
 		merged = merged[len(merged)-limit:]
 	}

@@ -337,6 +337,31 @@ func TestEnqueueArchiveWritesViaWriter(t *testing.T) {
 	}
 }
 
+// TestFlushArchiveWaitsForWrites verifies the flush barrier: after flushArchive
+// returns, every previously-enqueued job is on disk. This is what makes the #29
+// transcript read (snapshot ∪ archive) honest right after a truncation — without
+// it the async writer can still be draining the just-dropped batch.
+func TestFlushArchiveWaitsForWrites(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+	go h.runArchiveWriter()
+	defer func() {
+		close(h.done)
+		<-h.archiveDone
+	}()
+
+	for i := 1; i <= 20; i++ {
+		h.enqueueArchive("room1", []types.Message{{ID: i, From: "a", To: "all", Content: "x"}})
+	}
+
+	h.flushArchive()
+
+	got := readArchiveLines(t, dir, "room1")
+	if len(got) != 20 {
+		t.Fatalf("after flush: %d archived lines on disk, want 20 (flush must drain the writer)", len(got))
+	}
+}
+
 // TestEnqueueArchiveEmptyDataDirSkips verifies enqueue is a no-op without a
 // data dir (so unit hubs built with New("", ...) never touch the filesystem).
 func TestEnqueueArchiveEmptyDataDirSkips(t *testing.T) {

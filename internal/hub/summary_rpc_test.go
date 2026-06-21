@@ -38,7 +38,9 @@ func TestHandleLogMessage_DesktopLogsUserPrompt(t *testing.T) {
 	if rs == nil {
 		t.Fatal("room not created by log_message")
 	}
-	msgs, _ := rs.ReadAllMessages(0, 0)
+	// Verify via the raw read: user_prompt is intentionally filtered from the
+	// agent-facing ReadAllMessages, but lands in the room/transcript.
+	msgs := rs.GetMessages()
 	if len(msgs) != 1 {
 		t.Fatalf("want 1 logged message, got %d", len(msgs))
 	}

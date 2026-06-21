@@ -159,6 +159,12 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 		return "", 0, true, nil
 	}
 
+	// Flush the async archive backlog to disk before snapshotting so a transcript
+	// read right after (GetRoomTranscript calls SaveSession first) sees the full
+	// snapshot ∪ archive — a just-truncated batch is otherwise still in-flight in
+	// the writer (#29). Done before sessionMu so no lock is held during the wait.
+	h.flushArchive()
+
 	// Validate the room name before touching the filesystem: it becomes a path
 	// segment (sessions/{room}/), so a traversal name must never reach disk.
 	if err := validation.ValidateName(room); err != nil {

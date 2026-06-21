@@ -49,6 +49,18 @@ func txWriteArchive(t *testing.T, dataDir, room string, msgs []types.Message) {
 	}
 }
 
+func txMsgT(id int, content, ts string) types.Message {
+	return types.Message{ID: id, From: "alice", To: "bob", Content: content, Timestamp: ts, Type: "direct"}
+}
+
+func txContents(msgs []types.Message) []string {
+	out := make([]string, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.Content
+	}
+	return out
+}
+
 func txIDs(msgs []types.Message) []int {
 	out := make([]int, len(msgs))
 	for i, m := range msgs {
@@ -137,6 +149,58 @@ func TestReadFullTranscriptArchiveOnly(t *testing.T) {
 	}
 	if want := []int{1, 2}; !eqInts(txIDs(got), want) {
 		t.Fatalf("ids = %v, want %v", txIDs(got), want)
+	}
+}
+
+// clear_room resets a room's message IDs back to 1, so the archive (pre-clear
+// IDs) and a later snapshot (post-clear IDs) can carry the SAME id for DISTINCT
+// messages. Dedup must not conflate them (that would silently drop history); it
+// keys on (ID, Timestamp) and orders chronologically (#29 Codex review).
+func TestReadFullTranscriptSurvivesClearIDReset(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "cleared"
+	// Pre-clear conversation, archived (IDs 1..3, earlier timestamps).
+	txWriteArchive(t, dataDir, room, []types.Message{
+		txMsgT(1, "eski-1", "2026-06-22T10:00:00.000000"),
+		txMsgT(2, "eski-2", "2026-06-22T10:00:01.000000"),
+		txMsgT(3, "eski-3", "2026-06-22T10:00:02.000000"),
+	})
+	// After clear, IDs restart at 1; the new session snapshot reuses ids 1..2 with
+	// LATER timestamps.
+	txWriteSnapshot(t, dataDir, room, "1700000100", []types.Message{
+		txMsgT(1, "yeni-1", "2026-06-22T11:00:00.000000"),
+		txMsgT(2, "yeni-2", "2026-06-22T11:00:01.000000"),
+	})
+
+	got, err := ReadFullTranscript(dataDir, room, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"eski-1", "eski-2", "eski-3", "yeni-1", "yeni-2"}
+	if g := txContents(got); len(g) != len(want) {
+		t.Fatalf("got %d messages, want %d (clear-reset ids must not conflate): %v", len(g), len(want), g)
+	}
+	for i, w := range want {
+		if got[i].Content != w {
+			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, got[i].Content, w, txContents(got))
+		}
+	}
+}
+
+// A true duplicate (same message present in BOTH archive and snapshot) still
+// dedupes — identical id AND timestamp.
+func TestReadFullTranscriptDedupsTrueDuplicate(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "dup"
+	txWriteArchive(t, dataDir, room, []types.Message{txMsgT(7, "x", "2026-06-22T10:00:00.000000")})
+	txWriteSnapshot(t, dataDir, room, "1700000100", []types.Message{txMsgT(7, "x", "2026-06-22T10:00:00.000000")})
+
+	got, err := ReadFullTranscript(dataDir, room, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("true duplicate not deduped: got %d, want 1: %v", len(got), txContents(got))
 	}
 }
 

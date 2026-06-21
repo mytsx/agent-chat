@@ -975,8 +975,11 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	// #29: record the broadcast in the room transcript (as a user_prompt to "all")
-	// so it feeds the session summary. Only when it reached at least one agent.
-	if injected > 0 {
+	// so it feeds the session summary — but ONLY when actually submitted. With
+	// submit=false (the UI default) InjectText just leaves draft text in each
+	// terminal that the user may still edit or never send; logging it would feed
+	// the summary instructions the agents never actually received.
+	if injected > 0 && submit {
 		a.logTeamBroadcast(teamID, text)
 	}
 	return broadcastOutcomeError(injected, errs)
