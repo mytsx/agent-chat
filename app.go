@@ -392,10 +392,13 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 
 	managerFromTeam := strings.TrimSpace(t.ManagerAgent)
 	if managerFromTeam != "" {
-		if managerFromPrompt && managerFromTeam != agentName {
+		// Case-insensitive: a manager saved as "Pilot" must still be recognized when
+		// reopened as "pilot" (e.g. after a case-only re-create), otherwise the agent
+		// would reopen as a normal agent instead of the manager.
+		if managerFromPrompt && !t.IsManagerAgent(agentName) {
 			return false, fmt.Errorf("team manager already set to '%s'; '%s' cannot use manager prompt", managerFromTeam, agentName)
 		}
-		return managerFromTeam == agentName, nil
+		return t.IsManagerAgent(agentName), nil
 	}
 
 	if managerFromPrompt {
@@ -545,7 +548,21 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		if origWorkDir != "" {
 			cfgWorkDir = origWorkDir
 		}
-		if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
+		// When reopening an existing worktree directly (restart), workDir points
+		// into our worktrees dir and origWorkDir is empty. The config was already
+		// captured correctly on the initial create, so skip persistence to avoid
+		// overwriting it with the worktree path + useWorktree=false. Use filepath.Rel
+		// (not raw string prefix) for a robust, normalized subdirectory check.
+		worktreesRoot := filepath.Join(a.dataDir, "worktrees")
+		isWorktreePath := false
+		if cfgWorkDir != "" {
+			if rel, err := filepath.Rel(worktreesRoot, cfgWorkDir); err == nil && !strings.HasPrefix(rel, "..") {
+				isWorktreePath = true
+			}
+		}
+		if origWorkDir == "" && isWorktreePath {
+			log.Printf("[TEAM] CreateTerminal: agent=%s worktree dizininde yeniden açıldı, config korunuyor", agentName)
+		} else if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
 			Name:        agentName,
 			PromptID:    promptID,
 			WorkDir:     cfgWorkDir,
@@ -586,16 +603,29 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	wtDir := session.WorktreeDir
 	wtRepo := session.WorktreeRepo
 
-	// Reconstruct the ORIGINAL create params. For a worktree agent, session.WorkDir
-	// points at the worktree; reopen against the original repo with useWorktree=true
-	// instead. CreateWorktree reuses the existing worktree idempotently, and the
-	// persisted config keeps work_dir pointing at the repo (not the worktree).
-	// Guard wtRepo != "" so a missing repo path can never blank out workDir; in that
-	// case fall back to the existing workDir (the worktree) with useWorktree=false.
-	useWorktree := false
-	if wtDir != "" && wtRepo != "" {
-		workDir = wtRepo
-		useWorktree = true
+	// A worktree-backed agent promoted to manager must restart in the MAIN repo, not
+	// the worktree (managers always run in main repo — see the isManager guard in
+	// CreateTerminal). For non-managers, reopen the existing worktree DIRECTLY (run
+	// the PTY in wtDir, useWorktree=false): recreating it via useWorktree=true would
+	// call git.CreateWorktree, which rejects a worktree whose branch has drifted from
+	// agent/<team>/<agent> — and since the old PTY is already closed below, that would
+	// leave the user with no terminal. The team config was already captured correctly
+	// on the initial create, and CreateTerminal skips re-persisting a worktree path
+	// (see its persist block), so it isn't corrupted.
+	isManager := false
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			isManager = t.IsManagerAgent(agentName)
+		}
+	}
+	if wtDir != "" {
+		if isManager {
+			if wtRepo != "" {
+				workDir = wtRepo
+			}
+		} else {
+			workDir = wtDir
+		}
 	}
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
@@ -605,9 +635,15 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex)
+	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex)
 	if err != nil {
 		return "", err
+	}
+
+	// Restore worktree info on the new session so future restarts still find it.
+	if s := a.ptyManager.GetSession(newSessionID); s != nil && wtDir != "" {
+		s.WorktreeDir = wtDir
+		s.WorktreeRepo = wtRepo
 	}
 
 	return newSessionID, nil

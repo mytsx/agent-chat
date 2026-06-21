@@ -40,6 +40,17 @@ type Team struct {
 	CreatedAt    string        `json:"created_at"`
 }
 
+// IsManagerAgent reports whether name is this team's manager, matching
+// case-insensitively (and trimming whitespace). Manager identity must not depend
+// on casing: an agent saved as "Pilot" and one named "pilot" are the same.
+func (t Team) IsManagerAgent(name string) bool {
+	mgr := strings.TrimSpace(t.ManagerAgent)
+	if mgr == "" {
+		return false
+	}
+	return strings.EqualFold(mgr, strings.TrimSpace(name))
+}
+
 // Store manages team/tab persistence
 type Store struct {
 	mu       sync.RWMutex
@@ -196,6 +207,11 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		prev := t.Agents // keep the old slice for rollback
 		for j, existing := range t.Agents {
 			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
+				// Match is case-insensitive, but keep the stored Name's original
+				// casing: Team.ManagerAgent holds that spelling and resolveManagerIntent
+				// compares it case-sensitively, so a case-only re-create must not
+				// rewrite the name and break manager recognition.
+				cfg.Name = existing.Name
 				// Preserve Role when the upsert payload omits it.
 				if cfg.Role == "" {
 					cfg.Role = existing.Role
