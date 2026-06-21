@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSummaries } from "../store/useSummaries";
 import {
   RenderSummaryPrompt,
@@ -31,6 +31,15 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
   const [transcript, setTranscript] = useState<string | null>(null);
   const [busyTranscript, setBusyTranscript] = useState(false);
   const [busyCopy, setBusyCopy] = useState(false);
+
+  // The async handlers below capture `room` at call time; if the prop changes
+  // (e.g. the active team switches while the modal is open) a late completion must
+  // not write the old room's data into the now-current room. roomRef always holds
+  // the latest room so handlers can drop stale results.
+  const roomRef = useRef(room);
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
 
   // Counted in code points to match the Go side; the backend stays source of truth.
   const SUMMARY_MAX = 8000;
@@ -77,19 +86,21 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
 
   const handleCopyPrompt = async () => {
     if (busyCopy) return;
+    const r = room;
     setBusyCopy(true);
     setError(null);
     setNotice(null);
     try {
-      const prompt = await RenderSummaryPrompt(room);
+      const prompt = await RenderSummaryPrompt(r);
+      if (roomRef.current !== r) return; // room switched mid-flight: drop stale result
       await navigator.clipboard.writeText(prompt);
       setNotice(
         "📋 Özet promptu panoya kopyalandı. Yeni/ayrı bir agent'a (oda dışı, tarafsız) yapıştır, çıkan özeti buraya geri yapıştır."
       );
     } catch (e) {
-      setError(String(e));
+      if (roomRef.current === r) setError(String(e));
     } finally {
-      setBusyCopy(false);
+      if (roomRef.current === r) setBusyCopy(false);
     }
   };
 
@@ -100,31 +111,38 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     }
     setShowTranscript(true);
     if (transcript === null && !busyTranscript) {
+      const r = room;
       setBusyTranscript(true);
       try {
-        setTranscript(await GetRoomTranscript(room));
+        const tx = await GetRoomTranscript(r);
+        if (roomRef.current !== r) return; // room switched: don't show stale transcript
+        setTranscript(tx);
       } catch (e) {
-        setError(String(e));
-        setTranscript("");
+        if (roomRef.current === r) {
+          setError(String(e));
+          setTranscript("");
+        }
       } finally {
-        setBusyTranscript(false);
+        if (roomRef.current === r) setBusyTranscript(false);
       }
     }
   };
 
   const handleSave = async () => {
     if (!canSave) return;
+    const r = room;
     setSaving(true);
     setError(null);
     try {
-      const info = await saveSummary(room, text);
+      const info = await saveSummary(r, text);
+      if (roomRef.current !== r) return; // room switched: don't apply to the new room's modal
       setInitialText(info.text);
       setGeneratedAt(info.created_at);
       setNotice("💾 Özet kaydedildi.");
     } catch (e) {
-      setError(String(e));
+      if (roomRef.current === r) setError(String(e));
     } finally {
-      setSaving(false);
+      if (roomRef.current === r) setSaving(false);
     }
   };
 

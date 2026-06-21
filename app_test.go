@@ -31,6 +31,23 @@ func recordingInject(failFor map[string]bool) (func(string, string, bool) error,
 func noRoles(string) string { return "" }
 
 // All non-observer sessions receive the injection with the broadcast text.
+func TestRenderSummaryPromptText_DoesNotReprocessTranscript(t *testing.T) {
+	// A transcript that itself mentions {{ROOM}}/{{TRANSCRIPT}} (agents editing
+	// prompt templates) must survive verbatim — the fixed fields are rendered
+	// first and the transcript is inserted last, never reprocessed.
+	template := "Oda: {{ROOM}}\n--- TRANSCRIPT ---\n{{TRANSCRIPT}}"
+	transcript := "alice: lütfen {{ROOM}} ve {{TRANSCRIPT}} placeholderlarını koru"
+
+	got := renderSummaryPromptText(template, "takim-a", transcript)
+
+	if !strings.Contains(got, "Oda: takim-a") {
+		t.Fatalf("ROOM not rendered: %q", got)
+	}
+	if !strings.Contains(got, "lütfen {{ROOM}} ve {{TRANSCRIPT}} placeholderlarını koru") {
+		t.Fatalf("transcript content was reprocessed/corrupted: %q", got)
+	}
+}
+
 func TestBroadcastToSessions_InjectsAllNonObserver(t *testing.T) {
 	sessions := []*ptymgr.PTYSession{
 		{ID: "a", AgentName: "Alice"},

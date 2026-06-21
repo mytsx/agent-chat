@@ -112,8 +112,8 @@ func readArchiveForRoom(dataDir, room string) ([]types.Message, error) {
 			continue
 		}
 		var m types.Message
-		if err := json.Unmarshal(line, &m); err != nil {
-			return nil, fmt.Errorf("transcript: parse archive line: %w", err)
+		if json.Unmarshal(line, &m) != nil {
+			continue // skip a corrupt/partial line, keep the rest (graceful degradation)
 		}
 		out = append(out, m)
 	}

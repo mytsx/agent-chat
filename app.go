@@ -976,11 +976,20 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	// #29: record the broadcast in the room transcript (as a user_prompt to "all")
-	// so it feeds the session summary — but ONLY on a full, submitted delivery.
-	// submit=false (the UI default) just leaves draft text the user may edit or
-	// never send; and on a partial failure (len(errs)>0) some agents never got it,
-	// so logging a single "to all" record would misrepresent who received it.
-	if injected > 0 && submit && len(errs) == 0 {
+	// so it feeds the session summary — but ONLY on a full, submitted delivery to
+	// at least one AI agent. submit=false (the UI default) just leaves draft text
+	// the user may edit or never send; a partial failure (len(errs)>0) means some
+	// agents never got it; and a team of only plain shells has no room participant
+	// to address, so logging would put shell commands in the summary as if sent to
+	// agents. injected counts shells too, hence the explicit AI-target check.
+	hasAITarget := false
+	for _, s := range sessions {
+		if s.CLIType != string(cli.CLIShell) && !isObserverRole(roleOf(s.AgentName)) {
+			hasAITarget = true
+			break
+		}
+	}
+	if injected > 0 && submit && len(errs) == 0 && hasAITarget {
 		a.logTeamBroadcast(teamID, text)
 	}
 	return broadcastOutcomeError(injected, errs)
@@ -1366,10 +1375,19 @@ func (a *App) RenderSummaryPrompt(room string) (string, error) {
 	if strings.TrimSpace(transcript) == "" {
 		return "", fmt.Errorf("'%s' odasında özetlenecek mesaj yok", room)
 	}
-	return prompt.RenderPrompt(a.summaryPromptContent(), map[string]string{
-		"TRANSCRIPT": transcript,
-		"ROOM":       room,
-	}), nil
+	return renderSummaryPromptText(a.summaryPromptContent(), room, transcript), nil
+}
+
+// renderSummaryPromptText fills the summary prompt template, rendering the fixed
+// fields (ROOM) FIRST and inserting the (untrusted) transcript LAST via a single
+// replace. RenderPrompt iterates its var map in unspecified order, so passing
+// TRANSCRIPT and ROOM together risks expanding TRANSCRIPT first and then having
+// the ROOM pass rewrite any {{ROOM}} the transcript itself contains (agents
+// editing prompt templates). Inserting the transcript last leaves its content
+// verbatim.
+func renderSummaryPromptText(template, room, transcript string) string {
+	withVars := prompt.RenderPrompt(template, map[string]string{"ROOM": room})
+	return strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
 }
 
 // GetRoomSummary returns the room's newest saved session summary (#29).

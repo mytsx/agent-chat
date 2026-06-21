@@ -204,6 +204,32 @@ func TestReadFullTranscriptDedupsTrueDuplicate(t *testing.T) {
 	}
 }
 
+// One corrupt/partial JSONL line in the rolling archive must be skipped, not fail
+// the whole transcript read — otherwise a single damaged append blocks all future
+// summary generation for the room (mirrors the snapshot skip; #29 Codex review).
+func TestReadFullTranscriptSkipsMalformedArchiveLine(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "corruptarch"
+	dir := filepath.Join(dataDir, "hub-state", "archive")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	good1, _ := json.Marshal(txMsg(1, "a"))
+	good2, _ := json.Marshal(txMsg(2, "b"))
+	content := string(good1) + "\n{bozuk json line\n" + string(good2) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, room+".jsonl"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFullTranscript(dataDir, room, 0, 0)
+	if err != nil {
+		t.Fatalf("one corrupt archive line must not fail the whole read: %v", err)
+	}
+	if want := []int{1, 2}; !eqInts(txIDs(got), want) {
+		t.Fatalf("ids = %v, want %v (corrupt line skipped, valid kept)", txIDs(got), want)
+	}
+}
+
 func TestReadFullTranscriptMissingRoom(t *testing.T) {
 	dataDir := t.TempDir()
 	got, err := ReadFullTranscript(dataDir, "never-used", 0, 0)
