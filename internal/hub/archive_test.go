@@ -131,8 +131,8 @@ func TestJoinTruncatesAndArchives(t *testing.T) {
 }
 
 // TestArchiveFnNilNoPanic locks in backward compatibility: with no archiveFn
-// installed, truncation and Clear behave exactly as before (no panic, room
-// truncates to the retained tail, Clear empties it).
+// installed, truncation behaves exactly as before (no panic, room truncates to
+// the retained tail) and a full clear empties it.
 func TestArchiveFnNilNoPanic(t *testing.T) {
 	r := NewRoomState()
 
@@ -146,9 +146,30 @@ func TestArchiveFnNilNoPanic(t *testing.T) {
 		t.Fatalf("after truncate kept = %d, want %d", got, truncateToMessages)
 	}
 
-	r.Clear()
+	msgs := r.GetMessages()
+	r.ClearArchived(msgs[len(msgs)-1].ID) // wipe everything up to the last ID
 	if got := len(r.GetMessages()); got != 0 {
 		t.Fatalf("after clear kept = %d, want 0", got)
+	}
+}
+
+// TestClearArchivedKeepsNewerMessages verifies ClearArchived preserves messages
+// that arrived after the archived snapshot (ID > maxID) — the clear_room race fix.
+func TestClearArchivedKeepsNewerMessages(t *testing.T) {
+	r := NewRoomState()
+	for i := 0; i < 5; i++ {
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	// Archived snapshot covered IDs 1..3; messages 4 and 5 raced in afterwards.
+	r.ClearArchived(3)
+	got := r.GetMessages()
+	if len(got) != 2 {
+		t.Fatalf("ClearArchived(3) kept %d messages, want 2 (IDs 4,5)", len(got))
+	}
+	if got[0].ID != 4 || got[1].ID != 5 {
+		t.Fatalf("kept wrong messages: %+v", got)
 	}
 }
 
@@ -396,6 +417,27 @@ func TestClearRoomViaDesktopArchivesToDisk(t *testing.T) {
 	}
 	if n := len(room.GetMessages()); n != 0 {
 		t.Fatalf("room should be cleared, but %d messages remain", n)
+	}
+}
+
+// TestEnqueueArchiveAfterDoneWritesSynchronously verifies the shutdown done
+// check: a non-request enqueue arriving after the hub has begun shutting down
+// (e.g. runClientManager's Leave) is written synchronously instead of being
+// orphaned in a channel the writer may have already stopped draining. Looped so
+// a regression (dropping the done check) fails with near-certainty.
+func TestEnqueueArchiveAfterDoneWritesSynchronously(t *testing.T) {
+	const iterations = 30
+	for i := 0; i < iterations; i++ {
+		dir := t.TempDir()
+		h := newArchiveHub(dir)
+		close(h.done) // simulate shutdown; no writer running
+
+		h.enqueueArchive("room1", []types.Message{{ID: 1, From: "a", To: "all", Content: "x"}})
+
+		got := readArchiveLines(t, dir, "room1")
+		if len(got) != 1 {
+			t.Fatalf("iter %d: enqueue after done wrote %d messages, want 1 (lost to buffer)", i, len(got))
+		}
 	}
 }
 

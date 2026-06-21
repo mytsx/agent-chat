@@ -611,7 +611,13 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("oda temizlenmedi: geçmiş arşivlenemedi: %v", err))
 		return
 	}
-	roomState.Clear()
+	// Only wipe up to the archived snapshot's last ID, so a message sent while
+	// the archive I/O ran (lock released) is kept rather than lost.
+	maxID := 0
+	if n := len(msgs); n > 0 {
+		maxID = msgs[n-1].ID
+	}
+	roomState.ClearArchived(maxID)
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
 	respData, _ := json.Marshal(map[string]string{"text": text})

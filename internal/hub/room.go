@@ -342,18 +342,31 @@ func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 	}
 }
 
-// Clear removes all messages and agents. It is a pure wipe: archiving the
-// history for this destructive path is the caller's responsibility
-// (handleClearRoom archives synchronously and refuses to clear on failure), so
-// a clear never silently loses history.
-func (r *RoomState) Clear() {
+// ClearArchived wipes all agents and every message with ID <= maxID, keeping any
+// messages that arrived AFTER the snapshot was archived (ID > maxID). Archiving
+// the history for this destructive path is the caller's responsibility
+// (handleClearRoom archives synchronously and refuses to clear on failure); by
+// only wiping up to the archived maxID, a message that races the clear (sent
+// while the archive I/O ran with the lock released) is preserved rather than
+// silently lost. maxID <= 0 wipes all messages.
+func (r *RoomState) ClearArchived(maxID int) {
 	r.mu.Lock()
-	r.messages = []types.Message{}
+	defer r.mu.Unlock()
+	if maxID <= 0 {
+		r.messages = []types.Message{}
+	} else {
+		var remaining []types.Message
+		for _, m := range r.messages {
+			if m.ID > maxID {
+				remaining = append(remaining, m)
+			}
+		}
+		r.messages = remaining
+	}
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
 	r.managerLastSeen = 0
 	r.dirty = true
-	r.mu.Unlock()
 }
 
 // GetLastMessageID returns the highest message ID.

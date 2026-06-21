@@ -34,13 +34,20 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	if len(msgs) == 0 || h.dataDir == "" {
 		return
 	}
+	// If the hub is shutting down, write synchronously. Request-handler enqueues
+	// are bounded by Shutdown's inflightRequests wait, but NON-request callers
+	// (runClientManager's Leave on client disconnect) can also archive during
+	// shutdown; without this check their job could land in archiveCh after the
+	// writer has stopped and never be flushed.
+	select {
+	case <-h.done:
+		h.archiveBestEffort(room, msgs)
+		return
+	default:
+	}
 	// Hand off to the writer without blocking the caller. If the backlog is
 	// saturated, write synchronously rather than stall the message path — never
 	// drop. appendArchive serializes with the writer via archiveMu.
-	//
-	// No shutdown bookkeeping is needed here: every enqueueArchive originates in
-	// a request handler (truncate/clear via archiveFn), and Shutdown waits on
-	// inflightRequests before draining, so no job can be orphaned after drain.
 	select {
 	case h.archiveCh <- archiveJob{room: room, msgs: msgs}:
 	default:
@@ -125,15 +132,21 @@ func (h *Hub) appendArchive(room string, msgs []types.Message) error {
 		return fmt.Errorf("create archive dir: %w", err)
 	}
 
-	// Encode straight into the buffer (no per-message intermediate slice);
-	// Encoder.Encode appends the trailing newline for us.
+	// Marshal each message fully before appending its line. (A json.Encoder
+	// writing straight into the buffer would also be corruption-safe here —
+	// Encode marshals to an internal buffer and only writes on success, and
+	// bytes.Buffer never partial-writes — but building each complete line in
+	// memory first keeps the batch robust if the destination ever becomes a
+	// streaming writer, and a failed message is simply skipped.)
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
 	for _, m := range msgs {
-		if err := enc.Encode(m); err != nil {
+		line, err := json.Marshal(m)
+		if err != nil {
 			h.logger.Printf("Skipping unencodable archived message (room %s, id %d): %v", room, m.ID, err)
 			continue
 		}
+		buf.Write(line)
+		buf.WriteByte('\n')
 	}
 	if buf.Len() == 0 {
 		return nil
