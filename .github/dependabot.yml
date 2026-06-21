@@ -84,11 +84,10 @@ updates:
       time: "06:00"
       timezone: "Europe/Istanbul"
     # Supply-chain güvenliği: action sürümleri için bekleme süresi.
+    # NOT: github-actions ekosisteminde cooldown YALNIZ default-days destekler;
+    # semver-major/minor/patch-days desteklenmez (gomod/npm'de destekleniyor).
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 3
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
