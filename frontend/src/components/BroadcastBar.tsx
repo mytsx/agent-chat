@@ -57,7 +57,8 @@ export default function BroadcastBar() {
         onKeyDown={handleKeyDown}
         placeholder="Tüm agent terminallerine yazılacak metin…  (⌘/Ctrl+Enter ile gönder)"
         rows={1}
-        disabled={busy}
+        maxLength={1000}
+        disabled={busy || !activeTeamID}
       />
       <label
         className="broadcast-bar-toggle"

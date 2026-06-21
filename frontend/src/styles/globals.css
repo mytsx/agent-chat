@@ -1332,7 +1332,7 @@ html, body, #root {
 
 .broadcast-bar-input {
   flex: 1;
-  resize: none;
+  resize: vertical;
   min-height: 28px;
   max-height: 120px;
   padding: 5px 8px;

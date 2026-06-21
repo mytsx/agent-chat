@@ -352,12 +352,18 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 	if session.CLIType == "copilot" {
 		// Copilot's Ink/React TUI needs character-by-character input with no
 		// bracketed paste; the inter-char sleeps mirror the orchestrator's copilot
-		// injection path.
+		// injection path. A literal newline byte would submit the line, so embedded
+		// newlines are flattened to spaces — otherwise a multiline broadcast would
+		// submit its first line early even with submit=false, violating the
+		// no-premature-submit contract and splitting the message (review: Codex P2).
+		flat := strings.ReplaceAll(text, "\r\n", " ")
+		flat = strings.ReplaceAll(flat, "\n", " ")
+		flat = strings.ReplaceAll(flat, "\r", " ")
 		if err := m.writeLocked(session, []byte("\x1b[I")); err != nil {
 			return err
 		}
 		time.Sleep(50 * time.Millisecond)
-		for _, c := range text {
+		for _, c := range flat {
 			if err := m.writeLocked(session, []byte(string(c))); err != nil {
 				return err
 			}

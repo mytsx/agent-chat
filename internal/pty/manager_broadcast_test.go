@@ -140,6 +140,60 @@ func TestInjectText_CopilotSubmit(t *testing.T) {
 	}
 }
 
+// Copilot input is raw char-by-char with no bracketed paste, so a literal
+// newline byte would submit the line. Embedded newlines must be flattened to
+// spaces to preserve the no-premature-submit contract (submit=false) and keep a
+// multiline broadcast as one prompt.
+func TestInjectText_CopilotFlattensNewlines(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "copilot")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", "line1\nline2", false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := "\x1b[I" + "line1 line2"
+	if got != want {
+		t.Errorf("copilot output = %q, want %q (newline flattened to space, no submit)", got, want)
+	}
+}
+
+func TestInjectText_CopilotFlattenSubmit(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "copilot")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", "a\r\nb", true); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := "\x1b[I" + "a b" + "\r"
+	if got != want {
+		t.Errorf("copilot output = %q, want %q (CRLF→space, single trailing CR)", got, want)
+	}
+}
+
+// The bracketed-paste path (claude/gemini/shell) must PRESERVE newlines — paste
+// mode delivers multiline content without submitting, so no flattening there.
+func TestInjectText_BracketedPastePreservesNewline(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", "a\nb", false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := bpOpen + "a\nb" + bpClose
+	if got != want {
+		t.Errorf("output = %q, want %q (newline preserved inside paste)", got, want)
+	}
+}
+
 func TestInjectText_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.InjectText("ghost", "x", false); err == nil {
