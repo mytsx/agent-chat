@@ -43,3 +43,28 @@ func TestTryInject_HoldsWriteMutexAcrossSettle(t *testing.T) {
 		t.Errorf("concurrent write completed in %v — injection did NOT hold the mutex across the settle; a keystroke could be appended to the notification and submitted (CR1)", elapsed)
 	}
 }
+
+// tryInject must report false when the PTY write fails (e.g. the terminal is
+// closing), so the caller re-defers instead of treating the dropped
+// notification as delivered (review GR1).
+func TestTryInject_ReturnsFalseOnWriteError(t *testing.T) {
+	m := ptymgr.NewManager(func(string, []byte) {})
+	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
+	if err != nil {
+		t.Skipf("cannot start cat PTY: %v", err)
+	}
+	defer m.Close(id)
+
+	// Close the underlying PTY fd so writes fail, but keep the session in the map
+	// (so tryInject reaches the write path rather than the not-found path).
+	if s := m.GetSession(id); s != nil && s.PTY != nil {
+		_ = s.PTY.Close()
+	}
+
+	o := New(m)
+	o.pendingInputFunc = func(string) bool { return false }
+
+	if o.tryInject(id, "[agent-chat] hi") {
+		t.Error("tryInject should return false when the PTY write fails (notification not delivered)")
+	}
+}

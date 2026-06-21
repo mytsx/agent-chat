@@ -356,7 +356,6 @@ func (o *Orchestrator) tryInject(sessionID, text string) bool {
 			if o.hasPendingInput(sessionID) {
 				return nil
 			}
-			injected = true
 			if err := write([]byte("\x1b[I")); err != nil {
 				return err
 			}
@@ -368,7 +367,14 @@ func (o *Orchestrator) tryInject(sessionID, text string) bool {
 				time.Sleep(5 * time.Millisecond)
 			}
 			time.Sleep(100 * time.Millisecond)
-			return write([]byte("\r"))
+			if err := write([]byte("\r")); err != nil {
+				return err
+			}
+			// Only mark injected after every write succeeded, so a write failure
+			// (e.g. a closing PTY) is reported as not-injected and re-deferred
+			// rather than silently lost (review GR1).
+			injected = true
+			return nil
 		})
 		if err != nil {
 			log.Printf("[ORCH] tryInject write error agent=%s: %v", agentName, err)
@@ -394,12 +400,18 @@ func (o *Orchestrator) tryInject(sessionID, text string) bool {
 		if o.hasPendingInput(sessionID) {
 			return nil
 		}
-		injected = true
 		if err := write([]byte(bracketOpen + text + bracketClose)); err != nil {
 			return err
 		}
 		time.Sleep(200 * time.Millisecond)
-		return write([]byte("\r"))
+		if err := write([]byte("\r")); err != nil {
+			return err
+		}
+		// Only mark injected after every write succeeded, so a write failure
+		// (e.g. a closing PTY) is reported as not-injected and re-deferred
+		// rather than silently lost (review GR1).
+		injected = true
+		return nil
 	})
 	if err != nil {
 		log.Printf("[ORCH] tryInject write error agent=%s: %v", agentName, err)
