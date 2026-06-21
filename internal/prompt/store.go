@@ -193,6 +193,40 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 	s.save()
 }
 
+// SeedIfMissingByName creates a prompt with the given name only if no prompt with
+// that name exists yet. Unlike Seed (which fires only on an empty store), this is
+// idempotent and runs regardless of store contents, so a newly introduced default
+// prompt reaches users who already have a populated library. It never overwrites
+// an existing prompt, so user edits to the seeded prompt are preserved. created
+// reports whether a new prompt was added.
+func (s *Store) SeedIfMissingByName(name, content, category string, tags []string) (Prompt, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, p := range s.prompts {
+		if p.Name == name {
+			return p, false, nil
+		}
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	p := Prompt{
+		ID:        uuid.New().String(),
+		Name:      name,
+		Content:   content,
+		Category:  category,
+		Tags:      tags,
+		Variables: extractVariables(content),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.prompts = append(s.prompts, p)
+	if err := s.save(); err != nil {
+		return Prompt{}, false, err
+	}
+	return p, true, nil
+}
+
 // extractVariables finds {{VAR_NAME}} patterns in content
 func extractVariables(content string) []string {
 	var vars []string

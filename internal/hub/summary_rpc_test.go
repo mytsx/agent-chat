@@ -1,0 +1,158 @@
+package hub
+
+import (
+	"encoding/json"
+	"io"
+	"log"
+	"strings"
+	"testing"
+
+	"desktop/internal/summary"
+	"desktop/internal/types"
+)
+
+func desktopClient(h *Hub) *Client {
+	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	c.clientType = "desktop"
+	c.desktopAuthed = true
+	return c
+}
+
+func TestHandleLogMessage_DesktopLogsUserPrompt(t *testing.T) {
+	h, _ := newTestHubClient()
+	c := desktopClient(h)
+
+	req := types.Request{
+		ID:   "1",
+		Type: "log_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"to": "backend", "content": "şu dosyayı düzelt"}),
+	}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "log_message")
+	if !resp.Success {
+		t.Fatalf("expected success, got error: %s", resp.Error)
+	}
+
+	rs := h.getRoom("r1")
+	if rs == nil {
+		t.Fatal("room not created by log_message")
+	}
+	msgs, _ := rs.ReadAllMessages(0, 0)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 logged message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Type != "user_prompt" {
+		t.Errorf("Type = %q, want user_prompt", m.Type)
+	}
+	if m.From != "user" {
+		t.Errorf("From = %q, want user (server-forced sentinel)", m.From)
+	}
+	if m.To != "backend" {
+		t.Errorf("To = %q, want backend", m.To)
+	}
+	if m.Content != "şu dosyayı düzelt" {
+		t.Errorf("Content = %q", m.Content)
+	}
+}
+
+func TestHandleLogMessage_NonDesktopRejected(t *testing.T) {
+	h, c := newTestHubClient() // clientType "" — not desktop-authorized
+	req := types.Request{
+		ID:   "1",
+		Type: "log_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"to": "backend", "content": "x"}),
+	}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "log_message")
+	if resp.Success {
+		t.Fatal("expected non-desktop client to be rejected")
+	}
+}
+
+func TestHandleLogMessage_EmptyContentRejected(t *testing.T) {
+	h, _ := newTestHubClient()
+	c := desktopClient(h)
+	req := types.Request{
+		ID:   "1",
+		Type: "log_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"to": "backend", "content": "   "}),
+	}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "log_message")
+	if resp.Success {
+		t.Fatal("expected empty prompt to be rejected")
+	}
+}
+
+func TestHandleReadSummary_NoSummary(t *testing.T) {
+	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	c := desktopClient(h)
+	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "read_summary")
+	if !resp.Success {
+		t.Fatalf("want success, got error: %s", resp.Error)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(resp.Data, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body["text"], "özet yok") {
+		t.Fatalf("text = %q, want a no-summary notice", body["text"])
+	}
+}
+
+func TestHandleReadSummary_ReturnsLatest(t *testing.T) {
+	dataDir := t.TempDir()
+	h := New(dataDir, "default", log.New(io.Discard, "", 0))
+	if _, err := summary.Write(dataDir, "r1", "ESKI"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := summary.Write(dataDir, "r1", "ÖZET METNİ ✅"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := desktopClient(h)
+	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "read_summary")
+	if !resp.Success {
+		t.Fatalf("want success, got error: %s", resp.Error)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(resp.Data, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body["text"], "ÖZET METNİ ✅") {
+		t.Fatalf("text = %q, want latest summary", body["text"])
+	}
+}
+
+func TestHandleReadSummary_WrongRoomRejected(t *testing.T) {
+	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	c.agentName = "alice"
+	c.joinedRoom = "other-room"
+
+	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "read_summary")
+	if resp.Success {
+		t.Fatal("expected agent in a different room to be rejected")
+	}
+}
+
+func TestHandleReadSummary_UnidentifiedRejected(t *testing.T) {
+	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "read_summary")
+	if resp.Success {
+		t.Fatal("expected unidentified client to be rejected")
+	}
+}

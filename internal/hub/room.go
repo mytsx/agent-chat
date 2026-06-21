@@ -173,6 +173,35 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	return msg, nil
 }
 
+// LogUserPrompt records an out-of-band human→agent prompt in the transcript as a
+// "user_prompt" message (#29). Unlike SendMessage this is not agent traffic: no
+// manager routing, no expects_reply semantics — it is purely a record so the
+// prompts the user gave each agent become part of the summarized history. It goes
+// through the normal cap/archive path so it is snapshotted and archived like any
+// message. Callers MUST NOT re-inject it into agent terminals (it was already
+// delivered to the target agent's PTY); the orchestrator skips this type.
+func (r *RoomState) LogUserPrompt(from, to, content string) types.Message {
+	r.mu.Lock()
+	msg := types.Message{
+		ID:        r.nextID(),
+		From:      from,
+		To:        to,
+		Content:   content,
+		Timestamp: types.Timestamp(),
+		Type:      types.MsgTypeUserPrompt,
+		Priority:  "normal",
+	}
+	dropped := r.appendMessageLocked(msg)
+	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
+	return msg
+}
+
 // appendMessageLocked appends msg and, if the room exceeds the cap, truncates to
 // the retained tail — returning the dropped (oldest) messages as a cheap copy so
 // the caller can archive them AFTER releasing the lock. The retained tail is

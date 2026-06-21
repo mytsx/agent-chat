@@ -18,6 +18,19 @@ type RoomSummary struct {
 	IsDefault    bool             `json:"is_default"`
 }
 
+// Message Type values. system/broadcast/direct are produced by agent traffic;
+// user_prompt records an out-of-band human→agent prompt so the instructions the
+// user gave each agent become part of the summarized transcript (#29).
+const (
+	MsgTypeSystem     = "system"
+	MsgTypeBroadcast  = "broadcast"
+	MsgTypeDirect     = "direct"
+	MsgTypeUserPrompt = "user_prompt"
+)
+
+// UserPromptFrom is the sentinel "from" identity stamped on logged user prompts.
+const UserPromptFrom = "user"
+
 // Message represents a chat message.
 type Message struct {
 	ID              int    `json:"id"`

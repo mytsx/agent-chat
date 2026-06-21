@@ -240,6 +240,27 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	return mcp.NewToolResultText(extractText(resp.Data)), nil
 }
 
+func (h *toolHandlers) readSummary(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	room := request.GetString("room", "")
+
+	if err := validation.ValidateName(room); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	h.logger.Printf("read_summary: room=%q", room)
+
+	resp, err := h.storage.GetSummary(room)
+	if err != nil {
+		h.logger.Printf("read_summary: hub error: %v", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if !resp.Success {
+		return mcp.NewToolResultError(resp.Error), nil
+	}
+
+	return mcp.NewToolResultText(extractText(resp.Data)), nil
+}
+
 func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")

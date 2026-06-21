@@ -47,6 +47,11 @@ func (s *Storage) GetAllMessages(room string, sinceID, limit int) (*types.Respon
 	return s.client.GetAllMessages(s.resolveRoom(room), sinceID, limit)
 }
 
+// GetSummary reads the room's newest saved session summary via the hub.
+func (s *Storage) GetSummary(room string) (*types.Response, error) {
+	return s.client.GetSummary(s.resolveRoom(room))
+}
+
 // ListAgents lists agents via the hub.
 func (s *Storage) ListAgents(room, agentName string) (*types.Response, error) {
 	return s.client.ListAgents(s.resolveRoom(room), agentName)

@@ -623,6 +623,14 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 		return
 	}
 
+	// Skip user_prompt messages: they are a transcript record of a human→agent
+	// prompt that was ALREADY delivered to the target agent's PTY (#29). Injecting
+	// it would echo the prompt straight back into the terminals.
+	if msg.Type == types.MsgTypeUserPrompt {
+		log.Printf("[ORCH] Skipping user_prompt message (already delivered to PTY)")
+		return
+	}
+
 	// Manager-routed messages must always notify the manager target, even for ACK-like content.
 	if msg.RoutedByManager {
 		o.mu.Lock()

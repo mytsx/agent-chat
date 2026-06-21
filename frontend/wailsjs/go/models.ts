@@ -45,6 +45,26 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class RoomSummaryInfo {
+	    room: string;
+	    text: string;
+	    epoch: string;
+	    created_at: string;
+	    exists: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RoomSummaryInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.room = source["room"];
+	        this.text = source["text"];
+	        this.epoch = source["epoch"];
+	        this.created_at = source["created_at"];
+	        this.exists = source["exists"];
+	    }
+	}
 	export class SaveSessionResult {
 	    saved: boolean;
 	    count: number;

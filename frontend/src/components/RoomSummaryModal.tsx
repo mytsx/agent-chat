@@ -1,0 +1,197 @@
+import { useEffect, useState } from "react";
+import { useSummaries } from "../store/useSummaries";
+import {
+  RenderSummaryPrompt,
+  GetRoomTranscript,
+} from "../../wailsjs/go/main/App";
+
+interface RoomSummaryModalProps {
+  room: string;
+  onClose: () => void;
+}
+
+// RoomSummaryModal is the manual session-summary workflow (#29). The summary is
+// produced by a NEUTRAL observer, not a room worker: the user copies the rendered
+// summary prompt (transcript + instruction), pastes it into a FRESH agent/CLI,
+// then pastes the result back here and saves. "Continue" later injects the newest
+// saved summary into new agents. Reuses the shared .modal / .form-group styles.
+export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProps) {
+  const loadSummary = useSummaries((s) => s.loadSummary);
+  const saveSummary = useSummaries((s) => s.saveSummary);
+
+  const [text, setText] = useState("");
+  const [initialText, setInitialText] = useState("");
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [transcript, setTranscript] = useState<string | null>(null);
+  const [busyTranscript, setBusyTranscript] = useState(false);
+  const [busyCopy, setBusyCopy] = useState(false);
+
+  // Counted in code points to match the Go side; the backend stays source of truth.
+  const SUMMARY_MAX = 8000;
+  const len = [...text].length;
+  const isDirty = text !== initialText;
+  const canSave = isDirty && text.trim().length > 0 && len <= SUMMARY_MAX && !saving;
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const info = await loadSummary(room);
+      if (!alive) return;
+      if (info?.exists) {
+        setText(info.text);
+        setInitialText(info.text);
+        setGeneratedAt(info.created_at);
+      }
+      setLoading(false);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [room, loadSummary]);
+
+  const requestClose = () => {
+    if (
+      isDirty &&
+      !window.confirm("Kaydedilmemiş değişiklikler kaybolacak. Kapatılsın mı?")
+    ) {
+      return;
+    }
+    onClose();
+  };
+
+  const handleCopyPrompt = async () => {
+    if (busyCopy) return;
+    setBusyCopy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const prompt = await RenderSummaryPrompt(room);
+      await navigator.clipboard.writeText(prompt);
+      setNotice(
+        "📋 Özet promptu panoya kopyalandı. Yeni/ayrı bir agent'a (oda dışı, tarafsız) yapıştır, çıkan özeti buraya geri yapıştır."
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyCopy(false);
+    }
+  };
+
+  const handleToggleTranscript = async () => {
+    if (showTranscript) {
+      setShowTranscript(false);
+      return;
+    }
+    setShowTranscript(true);
+    if (transcript === null && !busyTranscript) {
+      setBusyTranscript(true);
+      try {
+        setTranscript(await GetRoomTranscript(room));
+      } catch (e) {
+        setError(String(e));
+        setTranscript("");
+      } finally {
+        setBusyTranscript(false);
+      }
+    }
+  };
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const info = await saveSummary(room, text);
+      setInitialText(info.text);
+      setGeneratedAt(info.created_at);
+      setNotice("💾 Özet kaydedildi.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={requestClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>📝 Session Özeti — {room}</h3>
+
+        <p className="form-hint">
+          Özeti <strong>tarafsız bir göz</strong> üretmeli. "Özet promptunu
+          kopyala" ile transcript + talimatı al, <strong>yeni/ayrı</strong> bir
+          agent'a yaptır, çıkan özeti aşağıya yapıştır ve kaydet. Kaydedilen son
+          özet, odaya devam edilirken yeni agent'lara otomatik verilir.
+        </p>
+
+        <div className="modal-actions" style={{ marginTop: 0 }}>
+          <button className="btn btn-secondary" onClick={handleCopyPrompt} disabled={busyCopy}>
+            {busyCopy ? "Hazırlanıyor…" : "📋 Özet promptunu kopyala"}
+          </button>
+          <button className="btn btn-secondary" onClick={handleToggleTranscript} disabled={busyTranscript}>
+            {showTranscript ? "🙈 Transcript'i gizle" : "👁 Transcript'i göster"}
+          </button>
+        </div>
+
+        {showTranscript && (
+          <div className="form-group">
+            <label>Transcript (snapshot ∪ arşiv)</label>
+            <textarea
+              readOnly
+              value={busyTranscript ? "Yükleniyor…" : transcript ?? ""}
+              rows={8}
+            />
+          </div>
+        )}
+
+        <div className="form-group">
+          <label>
+            Özet{" "}
+            {generatedAt && (
+              <span className="form-hint">(son kayıt: {generatedAt})</span>
+            )}
+          </label>
+          <textarea
+            autoFocus
+            value={loading ? "" : text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                handleSave();
+              }
+              if (e.key === "Escape") requestClose();
+            }}
+            rows={12}
+            placeholder={
+              loading
+                ? "Yükleniyor…"
+                : "Önceki session'ın özetini buraya yapıştır veya yaz…"
+            }
+          />
+          <span className={"form-counter" + (len > SUMMARY_MAX ? " over" : "")}>
+            {len}/{SUMMARY_MAX}
+          </span>
+        </div>
+
+        {notice && <div className="form-hint">{notice}</div>}
+        {error && <div className="form-error">⚠️ {error}</div>}
+
+        <div className="modal-actions">
+          <button className="btn" onClick={handleSave} disabled={!canSave}>
+            {saving ? "Kaydediliyor…" : "Kaydet"}
+          </button>
+          <button className="btn btn-secondary" onClick={requestClose}>
+            Kapat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -3,6 +3,7 @@ import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import { Team } from "../lib/types";
 import RoomCharterModal from "./RoomCharterModal";
+import RoomSummaryModal from "./RoomSummaryModal";
 
 export default function TabBar() {
   const {
@@ -18,6 +19,7 @@ export default function TabBar() {
   const { removeAllForTeam } = useTerminals();
   const [showCreate, setShowCreate] = useState(false);
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
+  const [summaryRoom, setSummaryRoom] = useState<string | null>(null);
   const [savingTeamID, setSavingTeamID] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   // Track the toast auto-dismiss timer so a rapid second save cancels the first
@@ -124,6 +126,19 @@ export default function TabBar() {
               ✎
             </button>
           )}
+          {t.id === activeTeamID && (
+            <button
+              className="tab-edit"
+              title="Session özeti (üret / düzenle)"
+              aria-label="Session özeti"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSummaryRoom(t.name);
+              }}
+            >
+              📝
+            </button>
+          )}
           {teams.length > 1 && (
             <button
               className="tab-close"
@@ -159,6 +174,10 @@ export default function TabBar() {
             setCustomPrompt(editingTeam.id, charter)
           }
         />
+      )}
+
+      {summaryRoom && (
+        <RoomSummaryModal room={summaryRoom} onClose={() => setSummaryRoom(null)} />
       )}
     </div>
   );
