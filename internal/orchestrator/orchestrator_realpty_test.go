@@ -7,12 +7,12 @@ import (
 	ptymgr "desktop/internal/pty"
 )
 
-// The default (Claude/Gemini) injection must NOT hold the per-session write
-// mutex across its 200ms settle sleep — otherwise a user keystroke arriving
-// during an injection is blocked for the whole sleep (perceptible input lag).
-// Verified against a real "cat"-backed PTY: a concurrent Write issued while
-// sendToTerminal is mid-settle must return promptly.
-func TestSendToTerminal_DoesNotBlockUserDuringSettle(t *testing.T) {
+// The Claude/Gemini injection must hold the per-session write mutex across the
+// whole paste→settle→CR sequence, so a user keystroke cannot be appended to the
+// notification and submitted by its CR (review CR1). Verified against a real
+// "cat"-backed PTY: a concurrent Write issued while tryInject is mid-settle must
+// BLOCK until the injection (including the trailing CR) completes.
+func TestTryInject_HoldsWriteMutexAcrossSettle(t *testing.T) {
 	m := ptymgr.NewManager(func(string, []byte) {})
 	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
 	if err != nil {
@@ -39,7 +39,7 @@ func TestSendToTerminal_DoesNotBlockUserDuringSettle(t *testing.T) {
 	elapsed := time.Since(start)
 
 	<-done
-	if elapsed > 80*time.Millisecond {
-		t.Errorf("user keystroke blocked %v during settle — writeMu held across the sleep", elapsed)
+	if elapsed < 80*time.Millisecond {
+		t.Errorf("concurrent write completed in %v — injection did NOT hold the mutex across the settle; a keystroke could be appended to the notification and submitted (CR1)", elapsed)
 	}
 }

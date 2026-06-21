@@ -376,8 +376,15 @@ func (o *Orchestrator) tryInject(sessionID, text string) bool {
 		return injected
 	}
 
-	// Claude/Gemini: short atomic {pending-check + bracketed paste}; settle
-	// outside the lock; then the trailing CR.
+	// Claude/Gemini: the ENTIRE injection — pending pre-check, bracketed paste,
+	// settle, and submitting CR — runs under the write mutex so a user keystroke
+	// cannot land between the paste and the CR (which would append it to the
+	// notification and submit it — review CR1). The settle lets the Ink TUI
+	// register the paste before Enter. This mirrors the copilot path above.
+	// Injection only fires when the user has no pending line, so the brief
+	// lock-hold during the settle rarely blocks anyone — and a rare ~200ms input
+	// lag is strictly preferable to the input corruption that releasing the lock
+	// here would reintroduce.
 	const (
 		bracketOpen  = "\x1b[200~"
 		bracketClose = "\x1b[201~"
@@ -388,19 +395,16 @@ func (o *Orchestrator) tryInject(sessionID, text string) bool {
 			return nil
 		}
 		injected = true
-		return write([]byte(bracketOpen + text + bracketClose))
+		if err := write([]byte(bracketOpen + text + bracketClose)); err != nil {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
+		return write([]byte("\r"))
 	})
 	if err != nil {
 		log.Printf("[ORCH] tryInject write error agent=%s: %v", agentName, err)
 	}
-	if !injected {
-		return false
-	}
-	time.Sleep(200 * time.Millisecond)
-	if err := o.ptyManager.Write(sessionID, []byte("\r")); err != nil {
-		log.Printf("[ORCH] tryInject CR write error agent=%s: %v", agentName, err)
-	}
-	return true
+	return injected
 }
 
 // queueLocked appends a pending notification and arms the flush timer if one is

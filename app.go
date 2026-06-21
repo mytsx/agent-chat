@@ -801,6 +801,11 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	if err := a.ptyManager.Write(sessionID, []byte("\r")); err != nil {
 		log.Printf("[STARTUP] prompt CR write error cli=%s agent=%s: %v", cliType, agentName, err)
 	}
+	// The startup CR submits the line; if the user happened to type during the
+	// startup wait, that input was submitted along with the prompt. Mark the
+	// buffer empty so later notifications aren't deferred to the UI forever
+	// waiting for an Enter that effectively already happened (review CR2).
+	a.ptyManager.ClearUserInput(sessionID)
 }
 
 // WriteToTerminal writes data to a terminal
