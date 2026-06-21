@@ -5,15 +5,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"desktop/internal/validation"
 )
 
 // sessionsDir returns the directory holding a room's immutable per-session
-// snapshots: hub-state/sessions/{room}/.
-func (h *Hub) sessionsDir(room string) string {
-	return filepath.Join(h.dataDir, "hub-state", "sessions", room)
+// snapshots: hub-state/sessions/{room}/. The room is a user-influenced path
+// segment, so the joined directory is confined to the sessions base with a
+// cleaned-prefix containment check. This is defense-in-depth beyond
+// ValidateName (which already rejects traversal) and makes the path provably
+// safe to static path-injection analysis. Returns an error if the room would
+// escape the base.
+func (h *Hub) sessionsDir(room string) (string, error) {
+	base := filepath.Join(h.dataDir, "hub-state", "sessions")
+	dir := filepath.Join(base, room) // filepath.Join cleans the result
+	if !strings.HasPrefix(dir, base+string(os.PathSeparator)) {
+		return "", fmt.Errorf("session room %q escapes sessions dir", room)
+	}
+	return dir, nil
 }
 
 // resetSessionTracking forgets a room's last-snapshot ID so the next saveSession
@@ -49,6 +60,18 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 	if roomState == nil {
 		return "", 0, true, nil
 	}
+
+	// Serialize the snapshot, the unchanged-check, the epoch-collision check, and
+	// the write under one lock so concurrent saves of the same room cannot observe
+	// different max IDs and then write out of order (which would regress
+	// sessionLastID and order files contrary to the conversation). Taking the
+	// snapshot here means sessionMu is acquired before roomState's read lock;
+	// nothing ever acquires sessionMu while holding a room lock, so there is no
+	// lock-ordering cycle. Held across disk I/O like archiveMu — the session path
+	// is low-frequency (termination hooks / manual save), not the hot message path.
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+
 	snapshot := roomState.Snapshot()
 
 	// Skip an empty room: a session with no messages is noise, not history.
@@ -56,17 +79,12 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 		return "", 0, true, nil
 	}
 	// Messages are append-ordered by ID, so the last one carries the max ID. Any
-	// change to the room — a new message OR a roster change (join/leave appends a
-	// system message) — bumps this, so it is a reliable "changed since last
-	// snapshot" signal for the messages+roster scope.
+	// new message — and any join/leave, which appends a system message — bumps it,
+	// so for the conversation-history purpose it is a reliable "changed since last
+	// snapshot" signal. (A stale-agent cleanup drops an agent without a message, so
+	// that lone roster delta can be missed; the captured conversation is unaffected
+	// and re-snapshotting an otherwise-identical room adds no historical value.)
 	maxID := snapshot.Messages[len(snapshot.Messages)-1].ID
-
-	// Serialize the unchanged-check, the epoch-collision check, and the write so
-	// two concurrent saves of the same room can't both write (or collide on an
-	// epoch). Held across disk I/O like archiveMu — this path is low-frequency.
-	h.sessionMu.Lock()
-	defer h.sessionMu.Unlock()
-
 	if last, seen := h.sessionLastID[room]; seen && last == maxID {
 		return "", 0, true, nil // unchanged since the last snapshot
 	}
@@ -76,7 +94,10 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 		return "", 0, false, fmt.Errorf("marshal session %q: %w", room, err)
 	}
 
-	dir := h.sessionsDir(room)
+	dir, derr := h.sessionsDir(room)
+	if derr != nil {
+		return "", 0, false, derr
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", 0, false, fmt.Errorf("create sessions dir: %w", err)
 	}
@@ -84,14 +105,20 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 	// Immutability: never overwrite an existing snapshot. Two saves in the same
 	// wall-clock second collide on epoch, so advance to the next free epoch.
 	// Safe under sessionMu: no concurrent save can create the file between the
-	// stat and the write. The loop terminates (epochs are unbounded; files finite).
+	// stat and the write. A stat error other than "not exist" (e.g. an
+	// unsearchable directory) is surfaced rather than treated as a collision, so
+	// the loop can't spin forever. It terminates (epochs are unbounded; files finite).
 	epoch := time.Now().Unix()
 	finalPath := filepath.Join(dir, fmt.Sprintf("%d.json", epoch))
 	for {
-		if _, statErr := os.Stat(finalPath); os.IsNotExist(statErr) {
-			break
+		_, statErr := os.Stat(finalPath)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				break // free slot
+			}
+			return "", 0, false, fmt.Errorf("stat session path %q: %w", room, statErr)
 		}
-		epoch++
+		epoch++ // file exists: this epoch is taken, try the next
 		finalPath = filepath.Join(dir, fmt.Sprintf("%d.json", epoch))
 	}
 	tmpPath := finalPath + ".tmp"

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import { Team } from "../lib/types";
@@ -20,6 +20,10 @@ export default function TabBar() {
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
   const [savingTeamID, setSavingTeamID] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // Track the toast auto-dismiss timer so a rapid second save cancels the first
+  // one's pending clear instead of letting it null the newer message early.
+  const saveMsgTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(saveMsgTimer.current), []);
 
   // Two-step create: the team is created first, then its charter is persisted via
   // the dedicated SetCustomPrompt endpoint (kept separate so the charter has a
@@ -49,6 +53,15 @@ export default function TabBar() {
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    // Snapshot the session BEFORE tearing terminals down: removeAllForTeam closes
+    // every terminal, which makes the agents leave the hub room and empties the
+    // roster the snapshot (#28) is meant to capture. Best-effort — a snapshot
+    // failure must not block the delete.
+    try {
+      await saveSession(id);
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn("pre-delete saveSession failed:", err);
+    }
     await removeAllForTeam(id);
     await deleteTeam(id);
   };
@@ -77,7 +90,8 @@ export default function TabBar() {
       if (import.meta.env.DEV) console.warn("saveSession failed:", err);
     } finally {
       setSavingTeamID(null);
-      window.setTimeout(() => setSaveMsg(null), 2800);
+      window.clearTimeout(saveMsgTimer.current);
+      saveMsgTimer.current = window.setTimeout(() => setSaveMsg(null), 2800);
     }
   };
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"desktop/internal/types"
 )
@@ -442,6 +443,118 @@ func TestSaveSession_ClearRoomResetsUnchangedTracking(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+// TestSessionsDir_ConfinedToBase verifies the path-containment barrier: a normal
+// room resolves under the sessions base, while any segment that would escape it
+// is refused — defense-in-depth beyond ValidateName for the path-injection sink.
+func TestSessionsDir_ConfinedToBase(t *testing.T) {
+	h := newArchiveHub("/data")
+
+	dir, err := h.sessionsDir("proj")
+	if err != nil {
+		t.Fatalf("valid room: %v", err)
+	}
+	if want := filepath.Join("/data", "hub-state", "sessions", "proj"); dir != want {
+		t.Fatalf("dir = %q, want %q", dir, want)
+	}
+
+	for _, bad := range []string{"../evil", "a/../../etc", "..", ""} {
+		if _, err := h.sessionsDir(bad); err == nil {
+			t.Fatalf("sessionsDir(%q) should error (escapes sessions base)", bad)
+		}
+	}
+}
+
+// TestSaveSession_SeededFromDiskSkipsUnchangedAfterRestart verifies the
+// unchanged-skip survives a hub restart: loadPersistedState seeds the per-room
+// tracker from disk, so opening and quitting the app with no activity does not
+// write a duplicate snapshot of an unchanged room.
+func TestSaveSession_SeededFromDiskSkipsUnchangedAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "hub-state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	persisted := PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "a", To: "all", Content: "one", Type: "broadcast"},
+			{ID: 2, From: "b", To: "all", Content: "two", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"a": {Role: "dev"}},
+	}
+	data, _ := json.MarshalIndent(persisted, "", "  ")
+	if err := os.WriteFile(filepath.Join(stateDir, "proj.json"), data, 0644); err != nil {
+		t.Fatalf("write persisted: %v", err)
+	}
+
+	// Fresh hub (as after a restart) loads the persisted state.
+	h := newArchiveHub(dir)
+	h.loadPersistedState()
+
+	// Idle quit: no new messages → must skip (tracker seeded from the loaded max ID).
+	path, count, skipped, err := h.saveSession("proj")
+	if err != nil {
+		t.Fatalf("saveSession: %v", err)
+	}
+	if !skipped {
+		t.Fatal("a restart with no activity must skip (seeded from disk), not write a duplicate")
+	}
+	if path != "" || count != 0 {
+		t.Fatalf("seeded skip should return no path/count, got path=%q count=%d", path, count)
+	}
+	if files := readSessionFiles(t, dir, "proj"); len(files) != 0 {
+		t.Fatalf("restart idle quit wrote %d session files, want 0", len(files))
+	}
+
+	// A NEW message after the restart advances the tracker and writes.
+	room := h.getRoom("proj")
+	if _, err := room.SendMessage("a", "all", "three", false, "", SendOptions{}); err != nil {
+		t.Fatalf("post-restart send: %v", err)
+	}
+	if _, _, skipped, err := h.saveSession("proj"); err != nil || skipped {
+		t.Fatalf("a changed room after restart must write (skipped=%v err=%v)", skipped, err)
+	}
+}
+
+// TestSaveSession_StatErrorSurfacesNotSpin verifies the epoch-collision loop
+// surfaces an unexpected stat error instead of treating it as a collision and
+// spinning forever. An unsearchable (mode 000) sessions dir makes os.Stat on a
+// child return EACCES (not IsNotExist).
+func TestSaveSession_StatErrorSurfacesNotSpin(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permission bits are not enforced")
+	}
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+	room := h.getOrCreateRoom("proj")
+	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	sdir := filepath.Join(dir, "hub-state", "sessions", "proj")
+	if err := os.MkdirAll(sdir, 0700); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.Chmod(sdir, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(sdir, 0700) }) // restore so TempDir cleanup can remove it
+
+	done := make(chan struct{})
+	var serr error
+	go func() {
+		_, _, _, serr = h.saveSession("proj")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("saveSession spun instead of returning on a non-IsNotExist stat error")
+	}
+	if serr == nil {
+		t.Fatal("saveSession should surface the stat error, not loop or succeed")
 	}
 }
 

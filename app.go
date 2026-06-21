@@ -306,16 +306,30 @@ func (a *App) monitorHub() {
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
 	// Snapshot each team's room as a session BEFORE closing the hub client, so a
-	// quit captures the in-flight conversation (#28). Best-effort and skip-aware:
-	// the hub skips empty/unchanged rooms, so idle quits write nothing.
+	// quit captures the in-flight conversation (#28). Best-effort and skip-aware
+	// (the hub skips empty/unchanged rooms). Bounded by a short overall budget so a
+	// wedged-but-alive hub can't stall quit for up to N×(RPC timeout): a healthy hub
+	// finishes in milliseconds (local disk writes); if the budget elapses we proceed
+	// to shut down rather than hang the UI, matching the 3s hub-Wait grace below.
 	if a.hubClient != nil && a.teamStore != nil {
-		for _, t := range a.teamStore.List() {
-			if t.Name == "" {
-				continue
+		saveDone := make(chan struct{})
+		go func() {
+			defer close(saveDone)
+			for _, t := range a.teamStore.List() {
+				if t.Name == "" {
+					continue
+				}
+				if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
+					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", t.Name, err)
+				}
 			}
-			if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
-				log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", t.Name, err)
-			}
+		}()
+		select {
+		case <-saveDone:
+		case <-ctx.Done():
+			log.Printf("[SHUTDOWN] Session kaydetme iptal edildi (ctx)")
+		case <-time.After(3 * time.Second):
+			log.Printf("[SHUTDOWN] Session kaydetme 3s bütçesini aştı, devam ediliyor")
 		}
 	}
 
@@ -1209,17 +1223,17 @@ func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 
-	// Preserve the room's history BEFORE closing terminals. A terminal close
-	// failure returns early below, so both writes must happen first and stay
-	// error-tolerant — losing the team is no reason to also lose its history.
-	// Two complementary artifacts: the rolling append-only archive (Phase-A) and
-	// an immutable per-session snapshot (#28) that #29 can later summarize.
+	// Flush the room's conversation to the append-only archive BEFORE closing
+	// terminals. A terminal close failure returns early below, so archiving must
+	// happen first and stay error-tolerant — losing the team is no reason to also
+	// lose its history. The immutable per-session snapshot (#28) is taken by the
+	// frontend BEFORE it calls this (and before it tears the terminals down):
+	// closing terminals makes the agents leave the room, which would empty the
+	// roster the snapshot is meant to capture, so snapshotting here would record an
+	// already-emptied roster.
 	if getErr == nil && t.Name != "" && a.hubClient != nil {
 		if err := a.hubClient.ArchiveRoom(t.Name); err != nil {
 			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
-		}
-		if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
-			log.Printf("[DELETE-TEAM] Session kaydedilemedi (%s): %v", t.Name, err)
 		}
 	}
 

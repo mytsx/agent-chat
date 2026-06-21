@@ -51,6 +51,17 @@ func (h *Hub) loadPersistedState() {
 		h.rooms[roomName] = room
 		h.mu.Unlock()
 
+		// Seed the session-save tracker from the loaded state so a restart followed
+		// by an idle quit doesn't write a duplicate snapshot of an unchanged room:
+		// the shutdown hook sees the same max ID and skips. sessionLastID is
+		// otherwise in-memory only and starts empty after New, which would make the
+		// first post-restart save of any persisted room look "changed".
+		if n := len(pr.Messages); n > 0 {
+			h.sessionMu.Lock()
+			h.sessionLastID[roomName] = pr.Messages[n-1].ID
+			h.sessionMu.Unlock()
+		}
+
 		h.logger.Printf("Loaded persisted state for room %s: %d messages, %d agents",
 			roomName, len(pr.Messages), len(pr.Agents))
 	}
