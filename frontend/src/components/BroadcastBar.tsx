@@ -68,6 +68,7 @@ export default function BroadcastBar() {
           type="checkbox"
           checked={submit}
           onChange={(e) => setSubmit(e.target.checked)}
+          disabled={busy || !activeTeamID}
         />
         Enter ile gönder
       </label>
