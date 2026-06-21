@@ -399,6 +399,11 @@ func (a *App) seedPrompts() {
 // prompt; it doubles as the lookup key for the user-editable version.
 const summaryPromptName = "Session Özeti Üretimi"
 
+// summaryMaxRunes caps a saved summary server-side, mirroring the frontend's
+// SUMMARY_MAX. The summary is injected into every continued agent's startup
+// prompt, so an unbounded save must not bloat continuation or exceed CLI limits.
+const summaryMaxRunes = 8000
+
 // summaryPromptContent returns the summary-prompt template the user can edit: the
 // stored prompt if one exists (preserving edits), otherwise the embedded default.
 func (a *App) summaryPromptContent() string {
@@ -1013,9 +1018,14 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	if sess.CLIType == string(cli.CLIShell) {
 		return
 	}
-	if err := a.hubClient.LogMessage(a.roomForTeam(sess.TeamID), sess.AgentName, content); err != nil {
-		log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", sess.AgentName, err)
-	}
+	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
+	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
+	room, agent := a.roomForTeam(sess.TeamID), sess.AgentName
+	go func() {
+		if err := a.hubClient.LogMessage(room, agent, content); err != nil {
+			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
+		}
+	}()
 }
 
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
@@ -1024,9 +1034,14 @@ func (a *App) logTeamBroadcast(teamID, content string) {
 	if a.hubClient == nil {
 		return
 	}
-	if err := a.hubClient.LogMessage(a.roomForTeam(teamID), "all", content); err != nil {
-		log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
-	}
+	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
+	// broadcast that already reached every agent.
+	room := a.roomForTeam(teamID)
+	go func() {
+		if err := a.hubClient.LogMessage(room, "all", content); err != nil {
+			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
+		}
+	}()
 }
 
 // roomForTeam resolves a team ID to its room name, falling back to the default
@@ -1387,7 +1402,11 @@ func (a *App) RenderSummaryPrompt(room string) (string, error) {
 // verbatim.
 func renderSummaryPromptText(template, room, transcript string) string {
 	withVars := prompt.RenderPrompt(template, map[string]string{"ROOM": room})
-	return strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
+	rendered := strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
+	// Sanitize the FINAL prompt: the user-editable template can carry control /
+	// bracketed-paste-escape runes that would otherwise reach the clipboard the
+	// user pastes into a neutral CLI. Idempotent for the already-clean transcript.
+	return sanitize.StripForTerminalPaste(rendered)
 }
 
 // GetRoomSummary returns the room's newest saved session summary (#29).
@@ -1410,6 +1429,12 @@ func (a *App) SaveRoomSummary(room, text string) (RoomSummaryInfo, error) {
 	text = sanitize.StripForTerminalPaste(text)
 	if strings.TrimSpace(text) == "" {
 		return RoomSummaryInfo{}, fmt.Errorf("boş özet kaydedilmez")
+	}
+	// Enforce the rune cap server-side (the UI advertises it, but a direct/older
+	// runtime caller could bypass it). An oversized summary is injected into every
+	// continued agent's startup prompt, so cap it like the charter does.
+	if runes := []rune(text); len(runes) > summaryMaxRunes {
+		text = string(runes[:summaryMaxRunes])
 	}
 	doc, err := summary.Write(a.dataDir, room, text)
 	if err != nil {

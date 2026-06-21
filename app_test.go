@@ -48,6 +48,20 @@ func TestRenderSummaryPromptText_DoesNotReprocessTranscript(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryPromptText_SanitizesOutput(t *testing.T) {
+	// The editable prompt template (and inserted content) reach the clipboard the
+	// user pastes into a neutral CLI, so the rendered output must be free of
+	// bracketed-paste terminators / control runes.
+	template := "Özetle:\x1b[201~kötü\nTranscript:\n{{TRANSCRIPT}}"
+	got := renderSummaryPromptText(template, "r", "merhaba")
+	if strings.Contains(got, "\x1b[201~") || strings.Contains(got, "\x1b") {
+		t.Fatalf("template paste-escape not stripped from rendered prompt: %q", got)
+	}
+	if !strings.Contains(got, "merhaba") || !strings.Contains(got, "Transcript:") {
+		t.Fatalf("expected content missing from rendered prompt: %q", got)
+	}
+}
+
 func TestBroadcastToSessions_InjectsAllNonObserver(t *testing.T) {
 	sessions := []*ptymgr.PTYSession{
 		{ID: "a", AgentName: "Alice"},
