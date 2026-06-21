@@ -326,6 +326,30 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 	return err
 }
 
+// isC0C1Control reports C0 control bytes, DEL, and C1 control bytes (the 8-bit
+// forms of ESC-prefixed sequences, e.g. U+009B ≈ CSI). None may reach a PTY as
+// live input.
+func isC0C1Control(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// isBidiOrFormatControl reports invisible Unicode bidi/format controls and the
+// line/paragraph separators (Trojan-Source class): they can make injected text a
+// human reviews differ from what the agent receives. Mirrors the set stripped by
+// team.sanitizeCharter (the room-charter startup path); kept local here to avoid a
+// cross-package dependency for the broadcast injection path.
+func isBidiOrFormatControl(r rune) bool {
+	switch r {
+	case 0x2028, 0x2029, // line / paragraph separators
+		0x200e, 0x200f, // LRM / RLM
+		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // bidi embeddings / overrides
+		0x2066, 0x2067, 0x2068, 0x2069, // bidi isolates (LRI/RLI/FSI/PDI)
+		0xfeff: // BOM / zero-width no-break space
+		return true
+	}
+	return false
+}
+
 // InjectText writes text into a session's input line as if the user typed it,
 // using the same bracketed-paste mechanics as a notification injection. It is the
 // fan-out primitive behind App.BroadcastToTeam.
@@ -355,12 +379,16 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// injection path. Sent raw, control characters would act as live keys —
 		// a newline submits the line (splitting a multiline broadcast even with
 		// submit=false), Tab triggers autocomplete, ESC starts an escape sequence.
-		// So every C0 control / DEL is flattened to a space, keeping the injected
-		// text literal (review: Codex P2 + completeness sweep). \r\n collapses to a
+		// So every C0/C1 control / DEL is flattened to a space, keeping the injected
+		// text literal (review: Codex P2 + completeness sweep). Invisible bidi/format
+		// controls are dropped outright (Trojan-Source hygiene). \r\n collapses to a
 		// single space first so a CRLF doesn't become two.
 		flat := strings.ReplaceAll(text, "\r\n", " ")
 		flat = strings.Map(func(r rune) rune {
-			if r < 0x20 || r == 0x7f {
+			if isBidiOrFormatControl(r) {
+				return -1
+			}
+			if isC0C1Control(r) {
 				return ' '
 			}
 			return r
@@ -393,6 +421,20 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		)
 		safe := strings.ReplaceAll(text, bracketOpen, "")
 		safe = strings.ReplaceAll(safe, bracketClose, "")
+		// Strip control/format runes that survive the marker removal: C0/C1/DEL (a
+		// stray ESC could still start an escape sequence inside the paste) and the
+		// invisible bidi/format set (Trojan-Source). \n and \t are preserved — paste
+		// mode delivers multiline content literally.
+		safe = strings.Map(func(r rune) rune {
+			switch r {
+			case '\n', '\t':
+				return r
+			}
+			if isC0C1Control(r) || isBidiOrFormatControl(r) {
+				return -1
+			}
+			return r
+		}, safe)
 		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
 			return err
 		}

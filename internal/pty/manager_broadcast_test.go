@@ -232,6 +232,46 @@ func TestInjectText_CopilotNeutralizesControlChars(t *testing.T) {
 	}
 }
 
+// The bracketed-paste path must also strip C1 control bytes (e.g. U+009B CSI, the
+// 8-bit ESC[ form) and the invisible bidi/format set (Trojan-Source class), which
+// survive the marker removal. \n and \t stay (paste delivers multiline literally).
+// Runes are built from code points so the test source stays pure ASCII.
+func TestInjectText_BracketedPasteStripsControlAndFormat(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	in := "a" + string(rune(0x009b)) + "b" + string(rune(0x202e)) + "\n" + string(rune(0xfeff)) + "c"
+	if err := m.InjectText("s1", in, false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := bpOpen + "ab\nc" + bpClose
+	if got != want {
+		t.Errorf("output = %q, want %q (C1/bidi/BOM stripped, newline kept)", got, want)
+	}
+}
+
+// The copilot char-by-char path flattens C1 controls to a space (like C0/DEL) and
+// drops the invisible bidi/format controls outright.
+func TestInjectText_CopilotStripsC1AndBidi(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "copilot")
+	defer pr.Close()
+
+	in := "a" + string(rune(0x009b)) + "b" + string(rune(0x202e)) + "c"
+	if err := m.InjectText("s1", in, false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := "\x1b[I" + "a bc" // C1 → space, bidi override removed
+	if got != want {
+		t.Errorf("copilot output = %q, want %q (C1→space, bidi removed)", got, want)
+	}
+}
+
 func TestInjectText_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.InjectText("ghost", "x", false); err == nil {
