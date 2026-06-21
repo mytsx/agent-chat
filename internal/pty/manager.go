@@ -352,13 +352,19 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 	if session.CLIType == "copilot" {
 		// Copilot's Ink/React TUI needs character-by-character input with no
 		// bracketed paste; the inter-char sleeps mirror the orchestrator's copilot
-		// injection path. A literal newline byte would submit the line, so embedded
-		// newlines are flattened to spaces — otherwise a multiline broadcast would
-		// submit its first line early even with submit=false, violating the
-		// no-premature-submit contract and splitting the message (review: Codex P2).
+		// injection path. Sent raw, control characters would act as live keys —
+		// a newline submits the line (splitting a multiline broadcast even with
+		// submit=false), Tab triggers autocomplete, ESC starts an escape sequence.
+		// So every C0 control / DEL is flattened to a space, keeping the injected
+		// text literal (review: Codex P2 + completeness sweep). \r\n collapses to a
+		// single space first so a CRLF doesn't become two.
 		flat := strings.ReplaceAll(text, "\r\n", " ")
-		flat = strings.ReplaceAll(flat, "\n", " ")
-		flat = strings.ReplaceAll(flat, "\r", " ")
+		flat = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
+			}
+			return r
+		}, flat)
 		if err := m.writeLocked(session, []byte("\x1b[I")); err != nil {
 			return err
 		}
@@ -377,12 +383,17 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		}
 	} else {
 		// claude/gemini/shell: text is delivered as one bracketed-paste block (modern
-		// shell readline treats it as a literal paste too).
+		// shell readline treats it as a literal paste too). Strip any bracketed-paste
+		// markers the user's text itself contains so an embedded close sequence can't
+		// end paste mode early and let the tail run as live input (review:
+		// completeness sweep — paste integrity).
 		const (
 			bracketOpen  = "\x1b[200~"
 			bracketClose = "\x1b[201~"
 		)
-		if err := m.writeLocked(session, []byte(bracketOpen+text+bracketClose)); err != nil {
+		safe := strings.ReplaceAll(text, bracketOpen, "")
+		safe = strings.ReplaceAll(safe, bracketClose, "")
+		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
 			return err
 		}
 		if submit {

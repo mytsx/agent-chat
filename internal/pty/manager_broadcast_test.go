@@ -194,6 +194,44 @@ func TestInjectText_BracketedPastePreservesNewline(t *testing.T) {
 	}
 }
 
+// A bracketed-paste close sequence embedded in the user's text must be
+// neutralized — otherwise it would end paste mode early and let the tail execute
+// as live terminal input (premature submit / command execution).
+func TestInjectText_NeutralizesPasteCloseSequence(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", "before"+bpClose+"after", false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := bpOpen + "beforeafter" + bpClose
+	if got != want {
+		t.Errorf("output = %q, want %q (embedded close sequence stripped)", got, want)
+	}
+}
+
+// The copilot char-by-char path has no bracketed paste, so control characters
+// would act as live keys (Tab = autocomplete, ESC = escape). They must be
+// neutralized to spaces just like newlines, keeping the injected text literal.
+func TestInjectText_CopilotNeutralizesControlChars(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "copilot")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", "a\tb\x1bc", false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+
+	got := readAll(t, pr, pw)
+	want := "\x1b[I" + "a b c"
+	if got != want {
+		t.Errorf("copilot output = %q, want %q (Tab/ESC neutralized to space)", got, want)
+	}
+}
+
 func TestInjectText_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.InjectText("ghost", "x", false); err == nil {

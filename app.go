@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"desktop/internal/cli"
 	"desktop/internal/git"
@@ -848,9 +849,19 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 // pending for the user to confirm in each terminal; submit=true also presses
 // Enter. Observer agents (#17) are excluded. Per-session failures are logged but
 // never abort the broadcast — one dead PTY must not cancel the rest.
+// maxBroadcastChars caps a broadcast's length, mirroring BroadcastBar's
+// textarea maxLength. Enforced server-side too (defense-in-depth) so the bound
+// doesn't depend on a single frontend attribute — and so the copilot
+// char-by-char path (which holds the session write mutex ~5ms/char) can't be
+// driven to lock a terminal for an unbounded time.
+const maxBroadcastChars = 1000
+
 func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("broadcast metni boş olamaz")
+	}
+	if utf8.RuneCountInString(text) > maxBroadcastChars {
+		return fmt.Errorf("broadcast metni çok uzun (en fazla %d karakter) ✂️", maxBroadcastChars)
 	}
 	sessions := a.ptyManager.GetSessionsByTeam(teamID)
 	if len(sessions) == 0 {
@@ -864,6 +875,20 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 		teamID, injected, len(sessions), submit, len(errs))
 	for _, e := range errs {
 		log.Printf("[BROADCAST] session error: %s", e)
+	}
+
+	// Partial failure (some PTYs got it, some didn't) is NOT a whole-broadcast
+	// error — the text still cleared on most terminals and re-sending would
+	// double-inject into the ones that succeeded. Surface it as a non-blocking
+	// advisory instead (mirrors the worktree:dirty / notification:deferred notice
+	// pattern) so the user learns which agents were missed.
+	if injected > 0 && len(errs) > 0 {
+		runtime.EventsEmit(a.ctx, "broadcast:partial", map[string]interface{}{
+			"teamID":   teamID,
+			"injected": injected,
+			"total":    len(sessions),
+			"errors":   errs,
+		})
 	}
 	return broadcastOutcomeError(injected, errs)
 }

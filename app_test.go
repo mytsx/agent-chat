@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -143,6 +144,21 @@ func TestBroadcastToTeam_NoSessions(t *testing.T) {
 	a := &App{ptyManager: ptymgr.NewManager(nil)}
 	if err := a.BroadcastToTeam("team1", "hello", false); err == nil {
 		t.Error("expected error when the team has no open terminals")
+	}
+}
+
+// The frontend caps the textarea at 1000 chars; the backend must enforce the
+// same limit (defense-in-depth) so a programmatic caller can't fan an unbounded
+// paste into every PTY. Rejected before the session lookup.
+func TestBroadcastToTeam_TooLong(t *testing.T) {
+	a := &App{ptyManager: ptymgr.NewManager(nil)}
+	long := strings.Repeat("x", maxBroadcastChars+1)
+	err := a.BroadcastToTeam("team1", long, false)
+	if err == nil {
+		t.Fatal("expected error for over-limit broadcast text")
+	}
+	if !strings.Contains(err.Error(), "uzun") {
+		t.Errorf("error = %q, want a length-limit message", err.Error())
 	}
 }
 
