@@ -125,6 +125,57 @@ func TestJoinDoesNotTruncate(t *testing.T) {
 	}
 }
 
+// TestNonManagerJoinTruncates verifies a non-manager join goes through the cap,
+// so connect/disconnect churn can't grow the room unbounded.
+func TestNonManagerJoinTruncates(t *testing.T) {
+	r := NewRoomState()
+	var archived []types.Message
+	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
+
+	for i := 0; i < maxMessagesInRoom; i++ {
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if _, _, err := r.Join("bob", "developer"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if n := len(r.GetMessages()); n != truncateToMessages {
+		t.Fatalf("non-manager join must truncate: room has %d, want %d", n, truncateToMessages)
+	}
+	if want := maxMessagesInRoom + 1 - truncateToMessages; len(archived) != want {
+		t.Fatalf("non-manager join archived %d, want %d", len(archived), want)
+	}
+}
+
+// TestLeaveTruncates verifies a leave goes through the cap (churn bound).
+func TestLeaveTruncates(t *testing.T) {
+	r := NewRoomState()
+	var archived []types.Message
+	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
+
+	if _, _, err := r.Join("bob", "developer"); err != nil { // 1 message
+		t.Fatalf("join: %v", err)
+	}
+	for i := 0; i < maxMessagesInRoom-1; i++ { // up to the cap
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if len(archived) != 0 {
+		t.Fatalf("no truncation expected at the cap, archived=%d", len(archived))
+	}
+	if _, ok := r.Leave("bob"); !ok { // pushes past the cap -> truncate
+		t.Fatal("leave should succeed")
+	}
+	if n := len(r.GetMessages()); n != truncateToMessages {
+		t.Fatalf("leave must truncate: room has %d, want %d", n, truncateToMessages)
+	}
+	if len(archived) == 0 {
+		t.Fatal("leave truncation must archive the dropped messages")
+	}
+}
+
 // TestClearArchivedZeroKeepsRacingMessage verifies the empty-snapshot clear case:
 // when the archived snapshot was empty (maxID=0) but a message raced in
 // afterwards, ClearArchived must keep it rather than full-wiping it.

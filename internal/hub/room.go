@@ -75,16 +75,18 @@ func (r *RoomState) nextID() int {
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	r.cleanupStaleLocked()
 
 	if _, exists := r.agents[agentName]; exists {
+		r.mu.Unlock()
 		return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", agentName)
 	}
 
-	if strings.EqualFold(strings.TrimSpace(role), "manager") {
+	isManager := strings.EqualFold(strings.TrimSpace(role), "manager")
+	if isManager {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
+			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
 		r.managerAgent = agentName
@@ -110,13 +112,25 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	// Append without truncating: a join (especially a manager's own join) must
-	// not drop history out from under the joiner's first read_all_messages. Only
-	// SendMessage truncates, which bounds any room with conversation activity.
-	r.messages = append(r.messages, sysMsg)
+	// A MANAGER's own join must not truncate: it would drop history out from under
+	// the manager's first read_all_messages. Every other system message (a
+	// non-manager join, any leave) DOES go through the cap, so a flapping agent's
+	// connect/disconnect churn can't grow the room unbounded.
+	var dropped []types.Message
+	if isManager {
+		r.messages = append(r.messages, sysMsg)
+	} else {
+		dropped = r.appendMessageLocked(sysMsg)
+	}
 	r.dirty = true
 
 	agentsCopy := r.copyAgentsLocked()
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 	return sysMsg, agentsCopy, nil
 }
 
@@ -165,11 +179,11 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 // moved into a fresh array so the old backing array (holding the dropped
 // messages) becomes garbage immediately.
 //
-// Only SendMessage uses this. Join/Leave append their system messages WITHOUT
-// truncating, so a joining manager's own message can't drop history before its
-// first read. A room with conversation activity stays bounded here; a room
-// driven purely by join/leave churn (no sends) can grow past the cap — a
-// pathological case whose real fix is an archive read path (deferred phase).
+// Used by SendMessage, Leave, and non-manager Join — i.e. every append path
+// EXCEPT a manager's own join, which must not truncate before the manager's
+// first read_all_messages. Capping leave and non-manager-join system messages
+// keeps connect/disconnect churn from growing the room (and its snapshot)
+// without bound, while still preserving the manager-join read.
 //
 // Durability note: truncation archiving is asynchronous (the design's hot-path
 // requirement), so a crash after the periodic snapshot persists the truncated
@@ -264,9 +278,9 @@ func (r *RoomState) ListAgents(agentName string) map[string]types.Agent {
 // Leave removes an agent from the room, returning a system message.
 func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if _, ok := r.agents[agentName]; !ok {
+		r.mu.Unlock()
 		return types.Message{}, false
 	}
 
@@ -284,11 +298,16 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	// Append without truncating (see Join): leave system messages must not drop
-	// conversation history. SendMessage is the only truncation path.
-	r.messages = append(r.messages, sysMsg)
+	// Leave goes through the cap: nobody reads right after a leave, so truncating
+	// here is safe and keeps connect/disconnect churn from growing the room.
+	dropped := r.appendMessageLocked(sysMsg)
 	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
 
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 	return sysMsg, true
 }
 
