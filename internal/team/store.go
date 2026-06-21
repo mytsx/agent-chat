@@ -40,6 +40,17 @@ type Team struct {
 	CreatedAt    string        `json:"created_at"`
 }
 
+// IsManagerAgent reports whether name is this team's manager, matching
+// case-insensitively (and trimming whitespace). Manager identity must not depend
+// on casing: an agent saved as "Pilot" and one named "pilot" are the same.
+func (t Team) IsManagerAgent(name string) bool {
+	mgr := strings.TrimSpace(t.ManagerAgent)
+	if mgr == "" {
+		return false
+	}
+	return strings.EqualFold(mgr, strings.TrimSpace(name))
+}
+
 // Store manages team/tab persistence
 type Store struct {
 	mu       sync.RWMutex

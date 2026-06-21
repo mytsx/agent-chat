@@ -96,6 +96,34 @@ func TestUpsertAgentPreservesRoleWhenEmpty(t *testing.T) {
 	}
 }
 
+// Manager identity matching must be case-insensitive: a manager saved as "Pilot"
+// is the same agent as "pilot"/" pilot ". resolveManagerIntent and RestartTerminal
+// rely on this so a case-only difference can't make a manager look like a normal
+// agent (see Codex review on PR #22).
+func TestIsManagerAgent(t *testing.T) {
+	tm := Team{ManagerAgent: "Pilot"}
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Pilot", true},
+		{"pilot", true},
+		{"  pilot  ", true},
+		{"PILOT", true},
+		{"Backend", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := tm.IsManagerAgent(c.name); got != c.want {
+			t.Errorf("IsManagerAgent(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// No manager set → always false.
+	if (Team{}).IsManagerAgent("Pilot") {
+		t.Error("empty ManagerAgent should never match")
+	}
+}
+
 // UpsertAgent matches names case-insensitively, but must NOT rewrite the stored
 // Name to the new casing: Team.ManagerAgent keeps the original spelling and
 // resolveManagerIntent compares it case-sensitively, so a case-only re-create

@@ -392,10 +392,13 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 
 	managerFromTeam := strings.TrimSpace(t.ManagerAgent)
 	if managerFromTeam != "" {
-		if managerFromPrompt && managerFromTeam != agentName {
+		// Case-insensitive: a manager saved as "Pilot" must still be recognized when
+		// reopened as "pilot" (e.g. after a case-only re-create), otherwise the agent
+		// would reopen as a normal agent instead of the manager.
+		if managerFromPrompt && !t.IsManagerAgent(agentName) {
 			return false, fmt.Errorf("team manager already set to '%s'; '%s' cannot use manager prompt", managerFromTeam, agentName)
 		}
-		return managerFromTeam == agentName, nil
+		return t.IsManagerAgent(agentName), nil
 	}
 
 	if managerFromPrompt {
@@ -600,15 +603,29 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	wtDir := session.WorktreeDir
 	wtRepo := session.WorktreeRepo
 
-	// Reopen the existing worktree DIRECTLY (run the PTY in wtDir, useWorktree=false).
-	// Recreating it via useWorktree=true would call git.CreateWorktree, which rejects
-	// a worktree whose branch has drifted from agent/<team>/<agent> — and since the
-	// old PTY is already closed below, that would leave the user with no terminal.
-	// Reusing wtDir preserves the worktree's current state. The team config was
-	// already captured correctly on the initial create, and CreateTerminal skips
-	// re-persisting a worktree path (see its persist block), so it isn't corrupted.
+	// A worktree-backed agent promoted to manager must restart in the MAIN repo, not
+	// the worktree (managers always run in main repo — see the isManager guard in
+	// CreateTerminal). For non-managers, reopen the existing worktree DIRECTLY (run
+	// the PTY in wtDir, useWorktree=false): recreating it via useWorktree=true would
+	// call git.CreateWorktree, which rejects a worktree whose branch has drifted from
+	// agent/<team>/<agent> — and since the old PTY is already closed below, that would
+	// leave the user with no terminal. The team config was already captured correctly
+	// on the initial create, and CreateTerminal skips re-persisting a worktree path
+	// (see its persist block), so it isn't corrupted.
+	isManager := false
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			isManager = t.IsManagerAgent(agentName)
+		}
+	}
 	if wtDir != "" {
-		workDir = wtDir
+		if isManager {
+			if wtRepo != "" {
+				workDir = wtRepo
+			}
+		} else {
+			workDir = wtDir
+		}
 	}
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
