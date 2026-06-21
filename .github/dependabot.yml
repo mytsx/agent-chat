@@ -13,6 +13,13 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Istanbul"
+    # Bir sürüm yayınlandıktan sonra PR açmadan önce bekle (supply-chain güvenliği:
+    # bozuk/geri çekilen sürümleri yakalama süresi). Security update'leri ETKİLEMEZ.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
@@ -37,6 +44,12 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Istanbul"
+    # Supply-chain güvenliği: yeni yayınlanan paketler için bekleme süresi.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
@@ -70,6 +83,12 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Istanbul"
+    # Supply-chain güvenliği: action sürümleri için bekleme süresi.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
