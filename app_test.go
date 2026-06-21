@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	ptymgr "desktop/internal/pty"
@@ -9,14 +10,18 @@ import (
 )
 
 // recordingInject returns an inject func that records every call and optionally
-// fails for specific session IDs.
+// fails for specific session IDs. broadcastToSessions injects concurrently, so
+// the calls slice is mutex-guarded against the racing appends.
 func recordingInject(failFor map[string]bool) (func(string, string, bool) error, *[]string) {
+	var mu sync.Mutex
 	var calls []string
 	fn := func(sessionID, text string, submit bool) error {
 		if failFor[sessionID] {
 			return fmt.Errorf("session not found: %s", sessionID)
 		}
+		mu.Lock()
 		calls = append(calls, fmt.Sprintf("%s|%s|%v", sessionID, text, submit))
+		mu.Unlock()
 		return nil
 	}
 	return fn, &calls

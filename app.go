@@ -892,12 +892,39 @@ func broadcastToSessions(
 	roleOf func(agentName string) string,
 	inject func(sessionID, text string, submit bool) error,
 ) (injected int, errs []string) {
-	for _, s := range sessions {
+	// Inject into every target concurrently: each session has its own PTY fd and
+	// write mutex, so parallel writes don't contend, and the slow paths (copilot's
+	// per-char sleeps, submit=true's 200ms settle) no longer serialize on the
+	// Wails IPC goroutine — wall-clock becomes the slowest single session instead
+	// of the sum (review: Gemini HIGH). Each goroutine writes its own outcomes
+	// slot (distinct indices → race-free; wg.Wait establishes the happens-before),
+	// so no shared counter/slice needs locking and error order stays deterministic.
+	type outcome struct {
+		agentName string
+		err       error
+		skipped   bool
+	}
+	outcomes := make([]outcome, len(sessions))
+	var wg sync.WaitGroup
+	for i, s := range sessions {
 		if isObserverRole(roleOf(s.AgentName)) {
+			outcomes[i].skipped = true
 			continue
 		}
-		if err := inject(s.ID, text, submit); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", s.AgentName, err))
+		wg.Add(1)
+		go func(i int, sess *ptymgr.PTYSession) {
+			defer wg.Done()
+			outcomes[i] = outcome{agentName: sess.AgentName, err: inject(sess.ID, text, submit)}
+		}(i, s)
+	}
+	wg.Wait()
+
+	for _, o := range outcomes {
+		if o.skipped {
+			continue
+		}
+		if o.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", o.agentName, o.err))
 			continue
 		}
 		injected++
