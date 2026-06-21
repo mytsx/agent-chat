@@ -49,14 +49,16 @@ type Hub struct {
 	archiveDone    chan struct{}
 	archiveStarted bool
 	archiveMu      sync.Mutex
-	// archiveProducers counts in-flight enqueueArchive callers. archiveDraining,
-	// set once under archiveLifecycleMu during Shutdown, flips every later enqueue
-	// to a synchronous write. Together they let Shutdown wait for all async
-	// producers to finish their hand-off before the final drain, so no job is
-	// orphaned in archiveCh after the writer and drain have both stopped.
-	archiveLifecycleMu sync.Mutex
-	archiveDraining    bool
-	archiveProducers   sync.WaitGroup
+
+	// Graceful request shutdown (mirrors http.Server.Shutdown for our hijacked
+	// WebSocket message loop). requestsClosed, set once under requestMu, makes
+	// readPump stop handling new requests; inflightRequests counts handlers in
+	// progress. Every truncate/clear archive write originates inside a request
+	// handler, so waiting on inflightRequests guarantees all such writes finish
+	// before Shutdown drains and persists — nothing is left mid-write at exit.
+	requestMu        sync.Mutex
+	requestsClosed   bool
+	inflightRequests sync.WaitGroup
 
 	listener net.Listener
 }
@@ -133,23 +135,22 @@ func (h *Hub) Port() int {
 func (h *Hub) Shutdown() {
 	close(h.done)
 
-	// Stop accepting new connections first, so the inflow of archive jobs winds
-	// down before we drain.
+	// Stop accepting new connections, then stop handling new requests and wait
+	// for in-flight handlers to finish. Because every truncate/clear archive
+	// write happens inside a request handler, this guarantees no archive write
+	// is still in progress (and no new one can start) once Wait returns —
+	// closing both the "untracked synchronous write" and the
+	// "enqueue-after-drain" shutdown races.
 	if h.listener != nil {
 		h.listener.Close()
 	}
+	h.requestMu.Lock()
+	h.requestsClosed = true
+	h.requestMu.Unlock()
+	h.inflightRequests.Wait()
 
-	// Quiesce async archive producers: after archiveDraining is set every new
-	// enqueue writes synchronously, and Wait blocks until producers already
-	// registered have finished handing their job to the channel (or written it
-	// directly). The channel then holds a fixed, fully drainable set.
-	h.archiveLifecycleMu.Lock()
-	h.archiveDraining = true
-	h.archiveLifecycleMu.Unlock()
-	h.archiveProducers.Wait()
-
-	// Wait for the writer to flush, then sweep up anything it left behind.
-	// Producers are already quiesced, so the channel holds a bounded set
+	// Wait for the writer to flush, then sweep up anything it left behind. With
+	// request handling quiesced the channel holds a bounded, fixed set
 	// (<= archiveBufferSize) of small batches that flush well under the timeout
 	// in any realistic case. The timeout is only a safety valve against a hung
 	// disk; if it ever fires, drainArchiveBacklog below still flushes whatever
@@ -181,6 +182,26 @@ func (h *Hub) Shutdown() {
 	os.Remove(filepath.Join(h.dataDir, "hub.port"))
 
 	h.logger.Println("Hub shut down")
+}
+
+// beginRequest registers a request handler as in-flight, unless the hub has
+// begun shutting down request handling. Returns false when shutting down, in
+// which case the caller must NOT handle the request and must NOT call
+// endRequest. The requestsClosed check and the Add happen under the same lock
+// that Shutdown takes before waiting, so no Add can race the WaitGroup's Wait.
+func (h *Hub) beginRequest() bool {
+	h.requestMu.Lock()
+	defer h.requestMu.Unlock()
+	if h.requestsClosed {
+		return false
+	}
+	h.inflightRequests.Add(1)
+	return true
+}
+
+// endRequest marks an in-flight request handler as finished.
+func (h *Hub) endRequest() {
+	h.inflightRequests.Done()
 }
 
 func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) {

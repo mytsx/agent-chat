@@ -361,24 +361,23 @@ func TestClearRoomViaDesktopArchivesToDisk(t *testing.T) {
 	}
 }
 
-// TestEnqueueArchiveWhileDrainingWritesSynchronously verifies the shutdown
-// barrier's gate: once archiveDraining is set, enqueueArchive bypasses the
-// channel and writes synchronously, so a job can't be orphaned in a channel the
-// writer has stopped draining.
-func TestEnqueueArchiveWhileDrainingWritesSynchronously(t *testing.T) {
-	dir := t.TempDir()
-	h := newArchiveHub(dir)
+// TestBeginRequestGatedAfterShutdown verifies the request gate: once shutdown
+// has closed request handling, beginRequest refuses new handlers (so no new
+// truncate/clear archive write can start), while it admits them beforehand.
+func TestBeginRequestGatedAfterShutdown(t *testing.T) {
+	h := newArchiveHub(t.TempDir())
 
-	// Simulate that Shutdown has begun draining. No writer goroutine is running.
-	h.archiveLifecycleMu.Lock()
-	h.archiveDraining = true
-	h.archiveLifecycleMu.Unlock()
+	if !h.beginRequest() {
+		t.Fatal("beginRequest should admit handlers before shutdown")
+	}
+	h.endRequest()
 
-	h.enqueueArchive("room1", []types.Message{{ID: 1, From: "a", To: "all", Content: "x"}})
+	h.requestMu.Lock()
+	h.requestsClosed = true
+	h.requestMu.Unlock()
 
-	got := readArchiveLines(t, dir, "room1")
-	if len(got) != 1 {
-		t.Fatalf("enqueue while draining wrote %d messages, want 1 (synchronous)", len(got))
+	if h.beginRequest() {
+		t.Fatal("beginRequest should refuse handlers after request shutdown")
 	}
 }
 
@@ -505,6 +504,36 @@ func TestHandleArchiveRoom_ReportsWriteFailure(t *testing.T) {
 	resp := readResponse(t, desktop, "archive_room")
 	if resp.Success {
 		t.Fatalf("expected archive_room to fail when the archive cannot be written")
+	}
+}
+
+// TestHandleJoinRoom_RejectsInvalidRoomName verifies the hub refuses a room name
+// that cannot be safely used as a filename, keeping room acceptance consistent
+// with snapshot persistence and archiving (both key files by room name).
+func TestHandleJoinRoom_RejectsInvalidRoomName(t *testing.T) {
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "1",
+		Type: "join_room",
+		Room: "foo/bar",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "alice", "role": "developer"}),
+	})
+	if resp := readResponse(t, c, "join_room"); resp.Success {
+		t.Fatalf("expected join_room with an invalid room name to fail")
+	}
+}
+
+// TestHandleSubscribe_RejectsInvalidRoomName verifies subscribe also refuses an
+// invalid room name rather than creating an unpersistable subscription entry.
+func TestHandleSubscribe_RejectsInvalidRoomName(t *testing.T) {
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "1",
+		Type: "subscribe",
+		Data: mustRawJSON(t, map[string][]string{"rooms": {"ok-room", "bad/room"}}),
+	})
+	if resp := readResponse(t, c, "subscribe"); resp.Success {
+		t.Fatalf("expected subscribe with an invalid room name to fail")
 	}
 }
 

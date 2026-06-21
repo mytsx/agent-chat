@@ -34,25 +34,13 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	if len(msgs) == 0 || h.dataDir == "" {
 		return
 	}
-
-	// Register as an in-flight async producer, unless the shutdown drain has
-	// begun — then write synchronously. This is the barrier that prevents loss:
-	// once archiveDraining is set no new job enters archiveCh, and Shutdown waits
-	// for already-registered producers to finish their hand-off, so a job can
-	// never be orphaned in the channel after the writer and drain have stopped.
-	h.archiveLifecycleMu.Lock()
-	if h.archiveDraining {
-		h.archiveLifecycleMu.Unlock()
-		h.archiveBestEffort(room, msgs)
-		return
-	}
-	h.archiveProducers.Add(1)
-	h.archiveLifecycleMu.Unlock()
-	defer h.archiveProducers.Done()
-
 	// Hand off to the writer without blocking the caller. If the backlog is
 	// saturated, write synchronously rather than stall the message path — never
 	// drop. appendArchive serializes with the writer via archiveMu.
+	//
+	// No shutdown bookkeeping is needed here: every enqueueArchive originates in
+	// a request handler (truncate/clear via archiveFn), and Shutdown waits on
+	// inflightRequests before draining, so no job can be orphaned after drain.
 	select {
 	case h.archiveCh <- archiveJob{room: room, msgs: msgs}:
 	default:

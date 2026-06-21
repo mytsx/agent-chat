@@ -160,6 +160,15 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	}
 	json.Unmarshal(req.Data, &data)
 
+	// Reject invalid room names before creating any subscription (same filename
+	// safety as join_room — see handleJoinRoom).
+	for _, room := range data.Rooms {
+		if err := validation.ValidateName(room); err != nil {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı %q: %v", room, err))
+			return
+		}
+	}
+
 	h.mu.Lock()
 	for _, room := range data.Rooms {
 		c.rooms[room] = true
@@ -186,6 +195,15 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
+	// Reject room names that can't be safely used as a filename: the hub keys
+	// both snapshot persistence (hub-state/{room}.json) and archives
+	// (archive/{room}.jsonl) by room name, so an unvalidated name would silently
+	// fail to persist/archive while the room still accepted (and then dropped)
+	// messages.
+	if err := validation.ValidateName(room); err != nil {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
+		return
+	}
 	if err := validation.ValidateName(data.AgentName); err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
