@@ -75,8 +75,13 @@ func (c *Client) readPump() {
 		if !c.hub.beginRequest() {
 			return
 		}
-		c.hub.handleRequest(c, req)
-		c.hub.endRequest()
+		// endRequest via defer so the inflight count is always balanced, even if
+		// a handler panics or a future edit adds an early return — otherwise
+		// Shutdown's inflightRequests.Wait could hang.
+		func() {
+			defer c.hub.endRequest()
+			c.hub.handleRequest(c, req)
+		}()
 	}
 }
 
