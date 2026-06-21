@@ -34,23 +34,35 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	if len(msgs) == 0 || h.dataDir == "" {
 		return
 	}
-	// If the hub is shutting down, write synchronously. Request-handler enqueues
-	// are bounded by Shutdown's inflightRequests wait, but NON-request callers
-	// (runClientManager's Leave on client disconnect) can also archive during
-	// shutdown; without this check their job could land in archiveCh after the
-	// writer has stopped and never be flushed.
-	select {
-	case <-h.done:
+
+	// Decide channel-send vs synchronous write atomically under archiveMu, so the
+	// decision cannot race Shutdown setting archiveClosed and then draining.
+	// Request-handler enqueues are also bounded by Shutdown's inflightRequests
+	// wait, but NON-request callers (runClientManager's Leave on client
+	// disconnect) can archive during shutdown too; without this a late job could
+	// land in archiveCh after the writer stopped and never be flushed.
+	h.archiveMu.Lock()
+	if !h.archiveClosed {
+		select {
+		case <-h.done:
+			h.archiveClosed = true
+		default:
+		}
+	}
+	if h.archiveClosed {
+		h.archiveMu.Unlock()
 		h.archiveBestEffort(room, msgs)
 		return
-	default:
 	}
-	// Hand off to the writer without blocking the caller. If the backlog is
+	// Still open: hand off to the writer without blocking. If the backlog is
 	// saturated, write synchronously rather than stall the message path — never
-	// drop. appendArchive serializes with the writer via archiveMu.
+	// drop. The disk write happens AFTER the unlock (archiveBestEffort re-takes
+	// archiveMu), so the lock is never held across I/O.
 	select {
 	case h.archiveCh <- archiveJob{room: room, msgs: msgs}:
+		h.archiveMu.Unlock()
 	default:
+		h.archiveMu.Unlock()
 		h.archiveBestEffort(room, msgs)
 	}
 }

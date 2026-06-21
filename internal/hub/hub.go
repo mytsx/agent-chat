@@ -47,7 +47,13 @@ type Hub struct {
 	archiveCh      chan archiveJob
 	archiveDone    chan struct{}
 	archiveStarted bool
-	archiveMu      sync.Mutex
+	// archiveClosed (guarded by archiveMu) stops new jobs entering archiveCh once
+	// the writer has been told to drain. enqueueArchive performs its channel-send
+	// decision under archiveMu so it cannot race Shutdown setting archiveClosed
+	// and then draining — a late job either reaches the channel before the drain
+	// or is written synchronously, never orphaned.
+	archiveClosed bool
+	archiveMu     sync.Mutex
 
 	// Graceful request shutdown (mirrors http.Server.Shutdown for our hijacked
 	// WebSocket message loop). requestsClosed, set once under requestMu, makes
@@ -147,6 +153,13 @@ func (h *Hub) Shutdown() {
 	h.requestsClosed = true
 	h.requestMu.Unlock()
 	h.inflightRequests.Wait()
+
+	// Stop any remaining (non-request) enqueue from entering the channel: from
+	// here on, enqueueArchive writes synchronously. Set under archiveMu so it
+	// orders correctly with enqueueArchive's send decision.
+	h.archiveMu.Lock()
+	h.archiveClosed = true
+	h.archiveMu.Unlock()
 
 	// Wait for the writer to fully drain, including a batch it has already
 	// dequeued and is mid-write on (which drainArchiveBacklog could not flush —
