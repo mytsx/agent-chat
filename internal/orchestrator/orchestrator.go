@@ -95,7 +95,13 @@ func matchesAckPattern(s, p string) bool {
 				return true
 			}
 		}
-		from = start + 1
+		// Eşleşmenin sonuna atla. Atlanan tek olası konumlar p ile örtüşen
+		// occurrence'lardır; bunlar ancak p'nin bir border'ı (prefix==suffix)
+		// varsa oluşur ve o örtüşme noktası p'nin İÇİNDE kalır. Mevcut
+		// pattern'lerde border ya yok ya da (elbette → "e") harf olduğundan
+		// örtüşen occurrence'ın solu daima harftir → zaten whole-word eşleşmez.
+		// Dolayısıyla start+len(p) güvenli ve start+1'den daha verimlidir.
+		from = start + len(p)
 	}
 }
 

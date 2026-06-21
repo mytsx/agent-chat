@@ -90,6 +90,9 @@ func TestMatchesAckPattern(t *testing.T) {
 		{"okey", "oke", false},               // "oke" ⊂ "okey", sağ harf (y)
 		{"status_ok", "ok", false},           // alt çizgi kelime karakteri (sol _)
 		{"ok_done", "ok", false},             // alt çizgi kelime karakteri (sağ _)
+		{"doktor ok", "ok", true},            // ilk (doktor) başarısız, geç eşleşme bulunur (skip-ahead)
+		{"elbettelbette", "elbette", false},  // örtüşen occurrence — ikisi de harf-komşu, whole-word değil
+		{"elbette", "elbette", true},         // standalone whole-word
 	}
 	for _, c := range cases {
 		if got := matchesAckPattern(c.s, c.p); got != c.want {
