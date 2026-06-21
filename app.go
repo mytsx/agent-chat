@@ -305,9 +305,53 @@ func (a *App) monitorHub() {
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
-	// Close hub client
+	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
+	// quit captures the in-flight conversation (#28). Iterating the hub's room list
+	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
+	// Best-effort and skip-aware (the hub skips empty/unchanged rooms). Bounded by a
+	// short budget so a wedged-but-alive hub can't stall quit for up to N×(RPC
+	// timeout): a healthy hub finishes in milliseconds (local disk writes); if the
+	// budget elapses we proceed rather than hang the UI.
 	if a.hubClient != nil {
-		a.hubClient.Close()
+		saveDone := make(chan struct{})
+		go func() {
+			defer close(saveDone)
+			rooms, err := a.hubClient.ListRoomsDetailed()
+			if err != nil {
+				log.Printf("[SHUTDOWN] Oda listesi alınamadı, session kaydı atlanıyor: %v", err)
+				return
+			}
+			for _, r := range rooms {
+				if _, _, err := a.hubClient.SaveSession(r.Name); err != nil {
+					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", r.Name, err)
+				}
+			}
+		}()
+		select {
+		case <-saveDone:
+		case <-ctx.Done():
+			log.Printf("[SHUTDOWN] Session kaydetme iptal edildi (ctx)")
+		case <-time.After(3 * time.Second):
+			log.Printf("[SHUTDOWN] Session kaydetme 3s bütçesini aştı, devam ediliyor")
+		}
+	}
+
+	// Close the hub client, but bound it: a wedged write leaves Send holding the
+	// client mutex Close also needs, so an unbounded Close could hang quit forever.
+	// If Close doesn't finish in time, proceed to SIGTERM the hub anyway — killing
+	// the hub breaks the socket, which unblocks the stuck write and lets Close
+	// finish in the background.
+	if a.hubClient != nil {
+		closed := make(chan struct{})
+		go func() {
+			a.hubClient.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			log.Printf("[SHUTDOWN] hub client Close 2s'i aştı, hub'a SIGTERM ile devam ediliyor")
+		}
 	}
 
 	// Stop hub process gracefully
@@ -1161,16 +1205,49 @@ func (a *App) SetCustomPrompt(teamID, text string) (team.Team, error) {
 	return a.teamStore.SetCustomPrompt(teamID, text)
 }
 
+// SaveSessionResult reports the outcome of a manual session save to the UI.
+type SaveSessionResult struct {
+	Saved bool `json:"saved"` // false when the room was empty or unchanged
+	Count int  `json:"count"` // snapshotted message count
+}
+
+// SaveSession writes an immutable per-session snapshot of a team's room (messages
+// + agent roster) to hub-state/sessions/{room}/{epoch}.json via the hub. It backs
+// the manual "Session'u Kaydet" button. The hub skips an empty or unchanged room
+// (Saved=false). Each save is a distinct, never-overwritten file; #29 later reads
+// these snapshots to summarize past sessions and inject them at room setup.
+func (a *App) SaveSession(teamID string) (SaveSessionResult, error) {
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return SaveSessionResult{}, err
+	}
+	if a.hubClient == nil {
+		return SaveSessionResult{}, fmt.Errorf("hub bağlantısı yok")
+	}
+	// An empty team name means the default room (the hub's resolveRoom maps "" →
+	// default), so it is valid here — not an error.
+	count, saved, err := a.hubClient.SaveSession(t.Name)
+	if err != nil {
+		return SaveSessionResult{}, err
+	}
+	return SaveSessionResult{Saved: saved, Count: count}, nil
+}
+
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 
 	// Flush the room's conversation to the append-only archive BEFORE closing
-	// terminals. A terminal close failure returns early below, so archiving
-	// must happen first and stay error-tolerant — losing the team is no reason
-	// to also lose its history.
-	if getErr == nil && t.Name != "" && a.hubClient != nil {
+	// terminals. A terminal close failure returns early below, so archiving must
+	// happen first and stay error-tolerant — losing the team is no reason to also
+	// lose its history. The immutable per-session snapshot (#28) is taken by the
+	// frontend BEFORE it calls this (and before it tears the terminals down):
+	// closing terminals makes the agents leave the room, which would empty the
+	// roster the snapshot is meant to capture, so snapshotting here would record an
+	// already-emptied roster. An empty team name means the default room (the hub's
+	// resolveRoom maps "" → default), so it is archived too rather than skipped.
+	if getErr == nil && a.hubClient != nil {
 		if err := a.hubClient.ArchiveRoom(t.Name); err != nil {
 			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
 		}

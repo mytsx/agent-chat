@@ -332,6 +332,34 @@ func (c *HubClient) ArchiveRoom(room string) error {
 	return nil
 }
 
+// SaveSession writes an immutable per-session snapshot of a room's full state
+// (messages + agent roster) to hub-state/sessions/{room}/{epoch}.json,
+// synchronously on the hub. Returns the snapshotted message count and whether a
+// file was actually written (saved=false when the room was empty or unchanged
+// since its last snapshot). Mirrors ArchiveRoom but, unlike the rolling
+// append-only archive, each call produces a distinct, never-overwritten file.
+func (c *HubClient) SaveSession(room string) (count int, saved bool, err error) {
+	resp, err := c.Send(types.Request{Type: "save_session", Room: room})
+	if err != nil {
+		return 0, false, err
+	}
+	if !resp.Success {
+		return 0, false, fmt.Errorf("save_session failed: %s", resp.Error)
+	}
+	var body struct {
+		Saved bool `json:"saved"`
+		Count int  `json:"count"`
+	}
+	if len(resp.Data) > 0 {
+		// Surface a decode failure rather than silently reporting {saved:false,
+		// count:0}, which would mask a protocol drift as a benign "no new content".
+		if err := json.Unmarshal(resp.Data, &body); err != nil {
+			return 0, false, fmt.Errorf("decode save_session response: %w", err)
+		}
+	}
+	return body.Count, body.Saved, nil
+}
+
 // GetLastMessageID gets the last message ID.
 func (c *HubClient) GetLastMessageID(room, agentName string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{"agent_name": agentName})

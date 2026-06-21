@@ -8,6 +8,7 @@ import {
   DeleteTeam,
   SetTeamManager,
   SetCustomPrompt,
+  SaveSession,
 } from "../../wailsjs/go/main/App";
 
 interface TeamsState {
@@ -33,6 +34,11 @@ interface TeamsState {
   // each new agent's startup prompt). Uses the dedicated backend endpoint rather
   // than updateTeam, which omits custom_prompt and would reset it on layout change.
   setCustomPrompt: (id: string, text: string) => Promise<void>;
+  // saveSession writes an immutable per-session snapshot of a room (messages +
+  // agent roster) to disk via the hub, for later summarization (#29). Returns
+  // whether a file was written (false when the room is empty or unchanged since
+  // its last snapshot) and the snapshotted message count, so the UI can confirm.
+  saveSession: (id: string) => Promise<{ saved: boolean; count: number }>;
   refreshTeam: (id: string) => Promise<void>;
   deleteTeam: (id: string) => Promise<void>;
   // removeTeamLocal drops a team from client state only (no backend call). Used
@@ -90,6 +96,13 @@ export const useTeams = create<TeamsState>((set, get) => ({
     set((s) => ({
       teams: s.teams.map((team) => (team.id === id ? t : team)),
     }));
+  },
+
+  // saveSession does not mutate team state (the snapshot lives on disk under
+  // hub-state/sessions/), so it just relays the hub's result to the caller.
+  saveSession: async (id) => {
+    const r = await SaveSession(id);
+    return { saved: r.saved, count: r.count };
   },
 
   // Re-pull a team from the backend. Needed after the backend persists agents

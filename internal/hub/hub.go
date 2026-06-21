@@ -55,6 +55,17 @@ type Hub struct {
 	archiveClosed bool
 	archiveMu     sync.Mutex
 
+	// sessionMu serializes session-snapshot writes (saveSession) and guards
+	// sessionLastSig. Like archiveMu it may be held across disk I/O — the session
+	// path is low-frequency (termination hooks / manual save), not the hot message
+	// path. sessionLastSig maps room → the signature (max message ID + sorted agent
+	// roster) captured by its last snapshot, so a room that is unchanged in BOTH
+	// messages and roster is skipped rather than re-snapshotted — while a
+	// roster-only change (e.g. stale-agent cleanup, which mutates agents without a
+	// message) still differs and triggers a fresh snapshot.
+	sessionMu      sync.Mutex
+	sessionLastSig map[string]string
+
 	// Graceful request shutdown (mirrors http.Server.Shutdown for our hijacked
 	// WebSocket message loop). requestsClosed, set once under requestMu, makes
 	// readPump stop handling new requests; inflightRequests counts handlers in
@@ -85,6 +96,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		done:             make(chan struct{}),
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
+		sessionLastSig:   make(map[string]string),
 	}
 }
 
@@ -92,6 +104,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 // The actual port is written to ~/.agent-chat/hub.port.
 func (h *Hub) Run(port int) error {
 	h.loadPersistedState()
+	h.seedSessionTracking()
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {

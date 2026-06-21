@@ -50,6 +50,8 @@ export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void
 
 export function RestartTerminal(arg1:string):Promise<string>;
 
+export function SaveSession(arg1:string):Promise<main.SaveSessionResult>;
+
 export function SendPromptToAgent(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
 
 export function SetCustomPrompt(arg1:string,arg2:string):Promise<team.Team>;

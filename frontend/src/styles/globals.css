@@ -121,6 +121,35 @@ html, body, #root {
   color: var(--accent);
 }
 
+.tab-save {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  border-radius: 2px;
+  line-height: 1;
+}
+
+.tab-save:hover {
+  color: var(--accent);
+}
+
+.tab-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tab-save-msg {
+  align-self: center;
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+
 .tab-add {
   background: none;
   border: 1px dashed var(--border);
