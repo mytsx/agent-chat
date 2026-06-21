@@ -98,17 +98,66 @@ func TestHandleClearRoom_AbortsOnArchiveFailure(t *testing.T) {
 	}
 }
 
-// TestJoinTruncatesAndArchives verifies join goes through the shared cap/archive
-// path: a join that pushes the room over the cap truncates and archives the
-// dropped messages, keeping the room bounded (so the manager's bounded "read
-// all" always covers the full retained history).
-func TestJoinTruncatesAndArchives(t *testing.T) {
+// TestJoinDoesNotTruncate verifies a join into a full room does NOT truncate:
+// the manager's own join must not drop history out from under its first read
+// (read_all_messages). Only SendMessage truncates; join/leave append in place.
+func TestJoinDoesNotTruncate(t *testing.T) {
 	r := NewRoomState()
 	var archived []types.Message
 	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
 
-	// Fill to exactly the cap (no truncation yet).
+	// Fill to exactly the cap.
 	for i := 0; i < maxMessagesInRoom; i++ {
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+
+	// A manager joins the full room: its system message appends without trimming.
+	if _, _, err := r.Join("manager", "manager"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if n := len(r.GetMessages()); n != maxMessagesInRoom+1 {
+		t.Fatalf("join must not truncate: room has %d, want %d", n, maxMessagesInRoom+1)
+	}
+	if len(archived) != 0 {
+		t.Fatalf("join must not archive (no truncation), archived=%d", len(archived))
+	}
+}
+
+// TestNonManagerJoinTruncates verifies a non-manager join goes through the cap,
+// so connect/disconnect churn can't grow the room unbounded.
+func TestNonManagerJoinTruncates(t *testing.T) {
+	r := NewRoomState()
+	var archived []types.Message
+	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
+
+	for i := 0; i < maxMessagesInRoom; i++ {
+		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if _, _, err := r.Join("bob", "developer"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if n := len(r.GetMessages()); n != truncateToMessages {
+		t.Fatalf("non-manager join must truncate: room has %d, want %d", n, truncateToMessages)
+	}
+	if want := maxMessagesInRoom + 1 - truncateToMessages; len(archived) != want {
+		t.Fatalf("non-manager join archived %d, want %d", len(archived), want)
+	}
+}
+
+// TestLeaveTruncates verifies a leave goes through the cap (churn bound).
+func TestLeaveTruncates(t *testing.T) {
+	r := NewRoomState()
+	var archived []types.Message
+	r.SetArchiveFn(func(msgs []types.Message) { archived = append(archived, msgs...) })
+
+	if _, _, err := r.Join("bob", "developer"); err != nil { // 1 message
+		t.Fatalf("join: %v", err)
+	}
+	for i := 0; i < maxMessagesInRoom-1; i++ { // up to the cap
 		if _, err := r.SendMessage("a", "all", "m", false, "", SendOptions{}); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
@@ -116,17 +165,32 @@ func TestJoinTruncatesAndArchives(t *testing.T) {
 	if len(archived) != 0 {
 		t.Fatalf("no truncation expected at the cap, archived=%d", len(archived))
 	}
-
-	// A join system message pushes past the cap -> truncate.
-	if _, _, err := r.Join("bob", ""); err != nil {
-		t.Fatalf("join: %v", err)
-	}
-	wantDropped := maxMessagesInRoom + 1 - truncateToMessages
-	if len(archived) != wantDropped {
-		t.Fatalf("join truncation archived %d, want %d", len(archived), wantDropped)
+	if _, ok := r.Leave("bob"); !ok { // pushes past the cap -> truncate
+		t.Fatal("leave should succeed")
 	}
 	if n := len(r.GetMessages()); n != truncateToMessages {
-		t.Fatalf("room not bounded after join truncation: %d, want %d", n, truncateToMessages)
+		t.Fatalf("leave must truncate: room has %d, want %d", n, truncateToMessages)
+	}
+	if len(archived) == 0 {
+		t.Fatal("leave truncation must archive the dropped messages")
+	}
+}
+
+// TestClearArchivedZeroKeepsRacingMessage verifies the empty-snapshot clear case:
+// when the archived snapshot was empty (maxID=0) but a message raced in
+// afterwards, ClearArchived must keep it rather than full-wiping it.
+func TestClearArchivedZeroKeepsRacingMessage(t *testing.T) {
+	r := NewRoomState()
+	// A message that arrived after an empty snapshot (its ID is 1 > 0).
+	if _, err := r.SendMessage("a", "all", "raced-in", false, "", SendOptions{}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	r.ClearArchived(0) // empty snapshot: nothing was archived, so wipe nothing
+
+	got := r.GetMessages()
+	if len(got) != 1 || got[0].Content != "raced-in" {
+		t.Fatalf("ClearArchived(0) must keep the racing message, got %+v", got)
 	}
 }
 
