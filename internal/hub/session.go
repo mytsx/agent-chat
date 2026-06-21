@@ -159,12 +159,6 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 		return "", 0, true, nil
 	}
 
-	// Flush the async archive backlog to disk before snapshotting so a transcript
-	// read right after (GetRoomTranscript calls SaveSession first) sees the full
-	// snapshot ∪ archive — a just-truncated batch is otherwise still in-flight in
-	// the writer (#29). Done before sessionMu so no lock is held during the wait.
-	h.flushArchive()
-
 	// Validate the room name before touching the filesystem: it becomes a path
 	// segment (sessions/{room}/), so a traversal name must never reach disk.
 	if err := validation.ValidateName(room); err != nil {
@@ -195,6 +189,16 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 	// (hub-state/archive/{room}.jsonl). The full per-session transcript is therefore
 	// the snapshot ∪ archive — #29 reconstructs it from both when summarizing.
 	snapshot := roomState.Snapshot()
+
+	// Flush the async archive backlog to disk AFTER taking the snapshot, so a
+	// transcript read right after (GetRoomTranscript calls SaveSession first) sees
+	// the full snapshot ∪ archive. Doing it after the snapshot drains every batch
+	// a truncation dropped before this point, narrowing the window to the tiny
+	// (pre-existing, documented) gap between appendMessageLocked dropping a batch
+	// and SendMessage enqueueing it after the room unlock — a microsecond race that
+	// self-heals on the next read. flushArchive takes neither sessionMu nor a room
+	// lock, so holding sessionMu across it cannot deadlock.
+	h.flushArchive()
 
 	// Skip an empty room: a session with no messages is noise, not history.
 	if len(snapshot.Messages) == 0 {

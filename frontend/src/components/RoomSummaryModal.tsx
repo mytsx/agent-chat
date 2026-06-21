@@ -40,14 +40,24 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
 
   useEffect(() => {
     let alive = true;
+    // Reset every field up front so switching to a different room never shows the
+    // previous room's summary/transcript/notice (and can't save stale text into
+    // the new room) — including when the new room has no summary or the load fails.
+    setLoading(true);
+    setText("");
+    setInitialText("");
+    setGeneratedAt(null);
+    setNotice(null);
+    setError(null);
+    setTranscript(null);
+    setShowTranscript(false);
     (async () => {
       const info = await loadSummary(room);
       if (!alive) return;
-      if (info?.exists) {
-        setText(info.text);
-        setInitialText(info.text);
-        setGeneratedAt(info.created_at);
-      }
+      const next = info?.exists ? info.text : "";
+      setText(next);
+      setInitialText(next);
+      setGeneratedAt(info?.exists ? info.created_at : null);
       setLoading(false);
     })();
     return () => {

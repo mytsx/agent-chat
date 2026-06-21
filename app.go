@@ -24,6 +24,7 @@ import (
 	"desktop/internal/hub"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
+	"desktop/internal/sanitize"
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
@@ -975,11 +976,11 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	// #29: record the broadcast in the room transcript (as a user_prompt to "all")
-	// so it feeds the session summary — but ONLY when actually submitted. With
-	// submit=false (the UI default) InjectText just leaves draft text in each
-	// terminal that the user may still edit or never send; logging it would feed
-	// the summary instructions the agents never actually received.
-	if injected > 0 && submit {
+	// so it feeds the session summary — but ONLY on a full, submitted delivery.
+	// submit=false (the UI default) just leaves draft text the user may edit or
+	// never send; and on a partial failure (len(errs)>0) some agents never got it,
+	// so logging a single "to all" record would misrepresent who received it.
+	if injected > 0 && submit && len(errs) == 0 {
 		a.logTeamBroadcast(teamID, text)
 	}
 	return broadcastOutcomeError(injected, errs)
@@ -995,6 +996,12 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	}
 	sess := a.ptyManager.GetSession(sessionID)
 	if sess == nil || sess.AgentName == "" {
+		return
+	}
+	// A plain shell terminal gets an AgentName but never join_room's as an AI
+	// participant (no MCP startup), so a prompt sent to it isn't room agent
+	// traffic — don't record it as a user_prompt for the summary.
+	if sess.CLIType == string(cli.CLIShell) {
 		return
 	}
 	if err := a.hubClient.LogMessage(a.roomForTeam(sess.TeamID), sess.AgentName, content); err != nil {
@@ -1377,6 +1384,12 @@ func (a *App) GetRoomSummary(room string) (RoomSummaryInfo, error) {
 // SaveRoomSummary persists a user-produced/edited summary as a new immutable
 // per-session summary; "continue" later injects the newest one (#29).
 func (a *App) SaveRoomSummary(room, text string) (RoomSummaryInfo, error) {
+	// Clean control / bracketed-paste-escape runes before persisting: the saved
+	// summary is later injected into continued agents' startup prompts inside a
+	// bracketed paste (composeAgentPrompt → sendStartupPrompt), the same sink the
+	// charter sanitizes for. Done before the empty-check so an all-control payload
+	// is rejected rather than stored blank.
+	text = sanitize.StripForTerminalPaste(text)
 	if strings.TrimSpace(text) == "" {
 		return RoomSummaryInfo{}, fmt.Errorf("boş özet kaydedilmez")
 	}
@@ -1388,19 +1401,25 @@ func (a *App) SaveRoomSummary(room, text string) (RoomSummaryInfo, error) {
 }
 
 // formatTranscript renders a message slice as readable, summarizer-friendly text.
+// Message content is cleaned of control / bracketed-paste-escape runes: the
+// rendered transcript feeds RenderSummaryPrompt, whose output the user copies and
+// pastes into a fresh CLI — an embedded \x1b[201~ in a stored message must not
+// break out of that paste. (From/To are validated agent names, so only the free
+// Content field needs cleaning.)
 func formatTranscript(msgs []types.Message) string {
 	var b strings.Builder
 	for _, m := range msgs {
+		content := sanitize.StripForTerminalPaste(m.Content)
 		switch m.Type {
 		case types.MsgTypeSystem:
-			fmt.Fprintf(&b, "[%s] SYSTEM: %s\n", m.Timestamp, m.Content)
+			fmt.Fprintf(&b, "[%s] SYSTEM: %s\n", m.Timestamp, content)
 		case types.MsgTypeUserPrompt:
-			fmt.Fprintf(&b, "[%s] 👤 KULLANICI → %s: %s\n", m.Timestamp, m.To, m.Content)
+			fmt.Fprintf(&b, "[%s] 👤 KULLANICI → %s: %s\n", m.Timestamp, m.To, content)
 		default:
 			if m.OriginalTo != "" && m.OriginalTo != m.To {
-				fmt.Fprintf(&b, "[%s] %s → %s (orijinal: %s): %s\n", m.Timestamp, m.From, m.To, m.OriginalTo, m.Content)
+				fmt.Fprintf(&b, "[%s] %s → %s (orijinal: %s): %s\n", m.Timestamp, m.From, m.To, m.OriginalTo, content)
 			} else {
-				fmt.Fprintf(&b, "[%s] %s → %s: %s\n", m.Timestamp, m.From, m.To, m.Content)
+				fmt.Fprintf(&b, "[%s] %s → %s: %s\n", m.Timestamp, m.From, m.To, content)
 			}
 		}
 	}

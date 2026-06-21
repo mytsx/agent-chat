@@ -296,25 +296,9 @@ const maxCharterLen = 2000
 // deliberately NOT applied: a charter is free prose, not an identifier. Finally
 // the text is capped at maxCharterLen runes (rune-based, UTF-8-safe).
 func sanitizeCharter(text string) string {
-	const (
-		bracketOpen  = "\x1b[200~"
-		bracketClose = "\x1b[201~"
-	)
-	// Remove the full bracketed-paste sequences first; otherwise the generic
-	// control strip below would drop only the ESC and leave the printable "[200~"
-	// tail behind.
-	text = strings.ReplaceAll(text, bracketOpen, "")
-	text = strings.ReplaceAll(text, bracketClose, "")
-	text = strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\t':
-			return r // preserve line breaks and tabs in multi-line charters
-		}
-		if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
-			return -1
-		}
-		return r
-	}, text)
+	// Strip bracketed-paste markers + control/invisible runes (shared with the room
+	// summary and transcript paths so the cleaning can't drift), then cap.
+	text = sanitize.StripForTerminalPaste(text)
 	if runes := []rune(text); len(runes) > maxCharterLen {
 		text = string(runes[:maxCharterLen])
 	}

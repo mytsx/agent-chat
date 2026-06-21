@@ -1,6 +1,26 @@
 package sanitize
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestStripForTerminalPaste(t *testing.T) {
+	in := "satır1\n\tnormal \x1b[201~kötü\x00​ son\x1b"
+	got := StripForTerminalPaste(in)
+
+	for _, bad := range []string{"\x1b[201~", "\x1b[200~", "\x1b", "\x00", "​"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("control/paste-escape %q not stripped: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "\n") || !strings.Contains(got, "\t") {
+		t.Fatalf("newline/tab must be preserved: %q", got)
+	}
+	if !strings.Contains(got, "satır1") || !strings.Contains(got, "normal") || !strings.Contains(got, "son") {
+		t.Fatalf("normal text must survive: %q", got)
+	}
+}
 
 func TestIsControl(t *testing.T) {
 	// C0 (incl. \t, \n), DEL, and C1 are control. Runes are hex code points so the

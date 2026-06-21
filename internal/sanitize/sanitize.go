@@ -7,7 +7,39 @@
 // omitted characters (e.g. U+061C and the zero-width set).
 package sanitize
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
+
+// StripForTerminalPaste cleans free text that will be written verbatim into a
+// bracketed-paste startup injection (Claude/Gemini agent startup prompts). It
+// removes the bracketed-paste markers (\x1b[200~ / \x1b[201~) first — a raw one
+// could end paste mode early and run the rest as live keystrokes — then drops
+// every C0/C1 control byte, DEL, and invisible Unicode format rune (Trojan-Source
+// class), preserving only \n and \t so multi-line prose survives.
+//
+// Shared by the room charter (team.sanitizeCharter), the room summary, and the
+// summarized transcript (#29) — all of which reach the same paste sink — so the
+// cleaning cannot drift between them.
+func StripForTerminalPaste(text string) string {
+	const (
+		bracketOpen  = "\x1b[200~"
+		bracketClose = "\x1b[201~"
+	)
+	text = strings.ReplaceAll(text, bracketOpen, "")
+	text = strings.ReplaceAll(text, bracketClose, "")
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			return r
+		}
+		if IsControl(r) || IsInvisibleFormat(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
 
 // IsControl reports C0 control bytes, DEL, and C1 control bytes (the 8-bit forms
 // of ESC-prefixed sequences, e.g. U+009B ≈ CSI). These are unsafe as live

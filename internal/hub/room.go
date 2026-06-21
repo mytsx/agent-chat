@@ -448,10 +448,15 @@ func (r *RoomState) GetLastMessageID(agentName string) int {
 		}
 	}
 
-	if len(r.messages) == 0 {
-		return 0
+	// Return the last AGENT-VISIBLE message ID. user_prompt records are filtered
+	// from read_messages/read_all_messages, so including them here would let an
+	// agent seed its polling cursor past unread visible messages and skip them.
+	for i := len(r.messages) - 1; i >= 0; i-- {
+		if r.messages[i].Type != types.MsgTypeUserPrompt {
+			return r.messages[i].ID
+		}
 	}
-	return r.messages[len(r.messages)-1].ID
+	return 0
 }
 
 // GetAgents returns a snapshot of current agents (no cleanup).
