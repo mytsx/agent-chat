@@ -11,6 +11,7 @@ export default function TabBar() {
     setActiveTeam,
     createTeam,
     deleteTeam,
+    removeTeamLocal,
     setCustomPrompt,
   } = useTeams();
   const { removeAllForTeam } = useTerminals();
@@ -33,7 +34,10 @@ export default function TabBar() {
         try {
           await deleteTeam(t.id);
         } catch {
-          // ignore — the original error below is the meaningful one
+          // Backend delete also failed (e.g. the same disk error) — deleteTeam
+          // only filters client state after its binding resolves, so drop the
+          // optimistic tab locally to avoid a stale/duplicate room.
+          removeTeamLocal(t.id);
         }
         throw e;
       }

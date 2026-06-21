@@ -27,7 +27,6 @@ export default function RoomCharterModal({
   const [error, setError] = useState<string | null>(null);
 
   const isCreate = mode === "create";
-  const canSubmit = isCreate ? name.trim().length > 0 : true;
   const isDirty = name !== initialName || charter !== initialCharter;
 
   // Mirror of the backend maxCharterLen (internal/team/store.go). Counted in code
@@ -36,6 +35,12 @@ export default function RoomCharterModal({
   // truth; this is a UX affordance so the user sees impending truncation.
   const CHARTER_MAX = 2000;
   const charterLen = [...charter].length;
+
+  // Block submit past the cap: the backend silently truncates beyond CHARTER_MAX
+  // runes, so allowing submit would lose the tail without warning. (charterLen is
+  // declared above so this const has no temporal-dead-zone reference.)
+  const canSubmit =
+    (isCreate ? name.trim().length > 0 : true) && charterLen <= CHARTER_MAX;
 
   // Guard accidental dismissal (overlay click / Escape / Cancel) when the form
   // has unsaved edits, so a long charter isn't lost by a stray click. confirm()

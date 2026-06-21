@@ -35,6 +35,10 @@ interface TeamsState {
   setCustomPrompt: (id: string, text: string) => Promise<void>;
   refreshTeam: (id: string) => Promise<void>;
   deleteTeam: (id: string) => Promise<void>;
+  // removeTeamLocal drops a team from client state only (no backend call). Used
+  // for create-rollback cleanup: deleteTeam filters state only after its backend
+  // binding resolves, so if that delete also fails the optimistic tab would linger.
+  removeTeamLocal: (id: string) => void;
 }
 
 export const useTeams = create<TeamsState>((set, get) => ({
@@ -110,4 +114,14 @@ export const useTeams = create<TeamsState>((set, get) => ({
       };
     });
   },
+
+  removeTeamLocal: (id) =>
+    set((s) => {
+      const teams = s.teams.filter((t) => t.id !== id);
+      return {
+        teams,
+        activeTeamID:
+          s.activeTeamID === id ? (teams[0]?.id ?? null) : s.activeTeamID,
+      };
+    }),
 }));
