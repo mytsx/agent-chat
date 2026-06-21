@@ -1143,6 +1143,14 @@ html, body, #root {
   font-size: 10px;
 }
 
+.form-error {
+  color: var(--danger);
+  font-size: 11px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .form-group input,
 .form-group select,
 .form-group textarea {

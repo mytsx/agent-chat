@@ -24,27 +24,45 @@ export default function RoomCharterModal({
   const [name, setName] = useState(initialName);
   const [charter, setCharter] = useState(initialCharter);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const isCreate = mode === "create";
   const canSubmit = isCreate ? name.trim().length > 0 : true;
+  const isDirty = name !== initialName || charter !== initialCharter;
+
+  // Guard accidental dismissal (overlay click / Escape / Cancel) when the form
+  // has unsaved edits, so a long charter isn't lost by a stray click. confirm()
+  // mirrors the app's existing use of blocking dialogs (alert in TerminalGrid).
+  const requestClose = () => {
+    if (
+      isDirty &&
+      !window.confirm("Kaydedilmemiş değişiklikler kaybolacak. Kapatılsın mı?")
+    ) {
+      return;
+    }
+    onClose();
+  };
 
   const handleSubmit = async () => {
     if (!canSubmit || saving) return;
     setSaving(true);
+    setError(null);
     try {
       await onSubmit(name.trim(), charter);
       onClose();
+    } catch (e) {
+      // Surface binding/persist failures in-modal (matches BroadcastBar). On
+      // create, handleCreate has already rolled back the orphan team.
+      setError(String(e));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={requestClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>
-          {isCreate ? "Yeni Oda" : `Oda Açıklaması — ${initialName}`}
-        </h3>
+        <h3>{isCreate ? "Yeni Oda" : `Oda Açıklaması — ${initialName}`}</h3>
 
         {isCreate && (
           <div className="form-group">
@@ -55,9 +73,9 @@ export default function RoomCharterModal({
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleSubmit();
-                if (e.key === "Escape") onClose();
+                if (e.key === "Escape") requestClose();
               }}
-              placeholder="Örn. Ödeme Servisi"
+              placeholder="Backend Ekibi"
             />
           </div>
         )}
@@ -71,6 +89,9 @@ export default function RoomCharterModal({
             autoFocus={!isCreate}
             value={charter}
             onChange={(e) => setCharter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") requestClose();
+            }}
             rows={10}
             placeholder="Bu oda neden kuruldu, hangi proje/görev konuşuluyor, agent'lardan ne bekleniyor?"
           />
@@ -80,6 +101,8 @@ export default function RoomCharterModal({
           </span>
         </div>
 
+        {error && <div className="form-error">⚠️ {error}</div>}
+
         <div className="modal-actions">
           <button
             className="btn"
@@ -88,7 +111,7 @@ export default function RoomCharterModal({
           >
             {isCreate ? "Oluştur" : "Kaydet"}
           </button>
-          <button className="btn btn-secondary" onClick={onClose}>
+          <button className="btn btn-secondary" onClick={requestClose}>
             İptal
           </button>
         </div>

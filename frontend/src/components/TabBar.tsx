@@ -23,7 +23,15 @@ export default function TabBar() {
   const handleCreate = async (name: string, charter: string) => {
     const t = await createTeam(name, "2x2", []);
     if (charter.trim()) {
-      await setCustomPrompt(t.id, charter);
+      try {
+        await setCustomPrompt(t.id, charter);
+      } catch (e) {
+        // Roll back the just-created team so a charter-persist failure doesn't
+        // leave an orphan room (and a retry won't create a duplicate). Re-throw
+        // so the modal surfaces the error.
+        await deleteTeam(t.id);
+        throw e;
+      }
     }
   };
 

@@ -591,3 +591,30 @@ func TestSetCustomPromptUnknownTeam(t *testing.T) {
 		t.Fatal("expected error for unknown team, got nil")
 	}
 }
+
+// When save() fails, SetCustomPrompt must roll back its in-memory mutation so the
+// store doesn't diverge from teams.json — composeAgentPrompt reads the in-memory
+// store, so a charter the UI thinks failed to save would otherwise still be
+// injected into new agents until restart. Mirrors UpsertAgent's rollback
+// (forced cross-platform by removing the data dir so the temp-file write fails).
+func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+	if _, err := s.SetCustomPrompt(tm.ID, "ilk misyon"); err != nil {
+		t.Fatalf("seed SetCustomPrompt failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.SetCustomPrompt(tm.ID, "yeni misyon"); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	got, _ := s.Get(tm.ID)
+	if got.CustomPrompt != "ilk misyon" {
+		t.Fatalf("CustomPrompt not rolled back in memory: got %q, want %q", got.CustomPrompt, "ilk misyon")
+	}
+}
