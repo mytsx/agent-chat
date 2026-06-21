@@ -218,6 +218,122 @@ func TestHandleSendMessage_ManagerInterception(t *testing.T) {
 	}
 }
 
+func TestHandleManagerCasing_JoinAndInterception(t *testing.T) {
+	h, manager := newTestHubClient()
+	// The team config stores the manager name lowercase ("pilot"); the agent
+	// joins with a different casing ("Pilot"). Manager identity must be
+	// casing-independent, so the join must be accepted and routing must work.
+	h.setConfiguredManager("r1", "pilot")
+
+	h.handleRequest(manager, types.Request{
+		ID:   "join-mgr",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "Pilot",
+			"role":       "manager",
+		}),
+	})
+	resp := readResponse(t, manager, "join_room")
+	if !resp.Success {
+		t.Fatalf("expected manager to join despite casing difference, got error=%s", resp.Error)
+	}
+
+	alice := &Client{
+		hub:   h,
+		send:  make(chan []byte, 64),
+		rooms: make(map[string]bool),
+	}
+	h.handleRequest(alice, types.Request{
+		ID:   "join-alice",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "alice",
+			"role":       "developer",
+		}),
+	})
+	_ = readResponse(t, alice, "join_room")
+
+	h.handleRequest(alice, types.Request{
+		ID:   "msg-1",
+		Type: "send_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"from":    "alice",
+			"to":      "bob",
+			"content": "hello bob",
+		}),
+	})
+	resp = readResponse(t, alice, "send_message")
+	if !resp.Success {
+		t.Fatalf("expected intercepted send success, got error=%s", resp.Error)
+	}
+
+	roomState := h.getOrCreateRoom("r1")
+	messages := roomState.GetMessages()
+	last := messages[len(messages)-1]
+	if last.To != "Pilot" {
+		t.Fatalf("expected message intercepted to manager Pilot, got to=%q", last.To)
+	}
+	if last.OriginalTo != "bob" || !last.RoutedByManager {
+		t.Fatalf("expected routed-by-manager metadata, got original_to=%q routed=%v", last.OriginalTo, last.RoutedByManager)
+	}
+}
+
+func TestHandleSetManager_CaseVariantKeepsActiveLock(t *testing.T) {
+	h, desktop := newTestHubClient()
+	h.desktopAuthToken = "desktop-secret"
+	h.setConfiguredManager("r1", "pilot")
+
+	// Manager joins as "Pilot" (different casing than the configured "pilot").
+	manager := &Client{
+		hub:   h,
+		send:  make(chan []byte, 64),
+		rooms: make(map[string]bool),
+	}
+	h.handleRequest(manager, types.Request{
+		ID:   "join-mgr",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "Pilot",
+			"role":       "manager",
+		}),
+	})
+	if resp := readResponse(t, manager, "join_room"); !resp.Success {
+		t.Fatalf("expected manager join to succeed: %s", resp.Error)
+	}
+
+	// Desktop re-affirms the same manager using the configured (lowercase) name.
+	h.handleRequest(desktop, types.Request{
+		ID:   "id-desktop",
+		Type: "identify",
+		Data: mustRawJSON(t, map[string]any{
+			"client_type": "desktop",
+			"auth_token":  "desktop-secret",
+		}),
+	})
+	_ = readResponse(t, desktop, "identify")
+
+	h.handleRequest(desktop, types.Request{
+		ID:   "set-mgr",
+		Type: "set_manager",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"manager_agent": "pilot",
+		}),
+	})
+	if resp := readResponse(t, desktop, "set_manager"); !resp.Success {
+		t.Fatalf("expected set_manager to succeed: %s", resp.Error)
+	}
+
+	// The active manager lock must survive — same identity, different casing.
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "Pilot" {
+		t.Fatalf("expected active manager Pilot to survive case-variant re-affirm, got %q", got)
+	}
+}
+
 func TestHandleIdentify_DesktopRequiresToken(t *testing.T) {
 	h, c := newTestHubClient()
 	h.desktopAuthToken = "desktop-secret"

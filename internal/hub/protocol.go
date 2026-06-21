@@ -207,7 +207,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 			c.sendError(req.ID, req.Type, "manager rolü atanmadı; önce desktop üzerinden manager belirlenmeli")
 			return
 		}
-		if data.AgentName != configuredManager {
+		if !sameAgentName(data.AgentName, configuredManager) {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("manager rolü yalnızca '%s' agent'ına atanabilir", configuredManager))
 			return
 		}
@@ -310,7 +310,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	to := data.To
 	opts := SendOptions{}
 	intercepted := false
-	if activeManager != "" && data.From != activeManager {
+	if activeManager != "" && !sameAgentName(data.From, activeManager) {
 		intercepted = true
 		opts.OriginalTo = data.To
 		opts.RoutedByManager = true
@@ -430,7 +430,7 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 			return
 		}
 		activeManager := roomState.GetActiveManager()
-		if activeManager == "" || c.agentName != activeManager {
+		if activeManager == "" || !sameAgentName(c.agentName, activeManager) {
 			c.sendError(req.ID, req.Type, "yalnızca aktif manager tüm mesajları okuyabilir")
 			return
 		}
@@ -572,7 +572,7 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 
 		roomState := h.getOrCreateRoom(room)
 		activeManager := roomState.GetActiveManager()
-		if activeManager == "" || c.agentName != activeManager {
+		if activeManager == "" || !sameAgentName(c.agentName, activeManager) {
 			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya yetkili desktop odayı temizleyebilir")
 			return
 		}
