@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"desktop/internal/sanitize"
+
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
@@ -326,31 +328,6 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 	return err
 }
 
-// isC0C1Control reports C0 control bytes, DEL, and C1 control bytes (the 8-bit
-// forms of ESC-prefixed sequences, e.g. U+009B ≈ CSI). These are unsafe as live
-// keystrokes and must be neutralized before injection; callers using bracketed
-// paste special-case \n and \t (themselves C0) beforehand to preserve them.
-func isC0C1Control(r rune) bool {
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
-}
-
-// isBidiOrFormatControl reports invisible Unicode bidi/format controls and the
-// line/paragraph separators (Trojan-Source class): they can make the text a human
-// reviews differ from the bytes the agent actually receives. Mirrors the set
-// stripped by team.sanitizeCharter (the room-charter startup path); kept local
-// here to avoid a cross-package dependency for the broadcast injection path.
-func isBidiOrFormatControl(r rune) bool {
-	switch r {
-	case 0x2028, 0x2029, // line / paragraph separators
-		0x200e, 0x200f, // LRM / RLM
-		0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // bidi embeddings / overrides
-		0x2066, 0x2067, 0x2068, 0x2069, // bidi isolates (LRI/RLI/FSI/PDI)
-		0xfeff: // BOM / zero-width no-break space
-		return true
-	}
-	return false
-}
-
 // InjectText writes text into a session's input line as if the user typed it,
 // using the same bracketed-paste mechanics as a notification injection. It is the
 // fan-out primitive behind App.BroadcastToTeam.
@@ -386,14 +363,20 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// single space first so a CRLF doesn't become two.
 		flat := strings.ReplaceAll(text, "\r\n", " ")
 		flat = strings.Map(func(r rune) rune {
-			if isBidiOrFormatControl(r) {
+			if sanitize.IsInvisibleFormat(r) {
 				return -1
 			}
-			if isC0C1Control(r) {
+			if sanitize.IsControl(r) {
 				return ' '
 			}
 			return r
 		}, flat)
+		// Nothing left after sanitization (e.g. an all-invisible payload): no-op so
+		// we never write a focus-in or leave a sticky pending flag for content that
+		// was never visible.
+		if flat == "" {
+			return nil
+		}
 		if err := m.writeLocked(session, []byte("\x1b[I")); err != nil {
 			return err
 		}
@@ -424,18 +407,23 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		safe = strings.ReplaceAll(safe, bracketClose, "")
 		// Strip control/format runes that survive the marker removal: C0/C1/DEL (a
 		// stray ESC could still start an escape sequence inside the paste) and the
-		// invisible bidi/format set (Trojan-Source). \n and \t are preserved — paste
-		// mode delivers multiline content literally.
+		// invisible Unicode format set (Trojan-Source). \n and \t are preserved —
+		// paste mode delivers multiline content literally.
 		safe = strings.Map(func(r rune) rune {
 			switch r {
 			case '\n', '\t':
 				return r
 			}
-			if isC0C1Control(r) || isBidiOrFormatControl(r) {
+			if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
 				return -1
 			}
 			return r
 		}, safe)
+		// Nothing left after sanitization: no-op rather than writing an empty paste
+		// (and, for submit=true, a blank Enter) or leaving a sticky pending flag.
+		if safe == "" {
+			return nil
+		}
 		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
 			return err
 		}

@@ -272,6 +272,76 @@ func TestInjectText_CopilotStripsC1AndBidi(t *testing.T) {
 	}
 }
 
+// A broadcast whose text is entirely removed by sanitization (e.g. only an RLO)
+// must be a no-op: no bytes written and, crucially, no sticky pending-input flag
+// (submit=false) — otherwise the session would silently block later notification
+// injection with no visible input to explain it.
+func TestInjectText_BracketedPasteEmptyAfterSanitizeNoSubmit(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", string(rune(0x202e)), false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+	if m.HasPendingInput("s1") {
+		t.Error("all-stripped broadcast must not mark the session pending")
+	}
+	if got := readAll(t, pr, pw); got != "" {
+		t.Errorf("output = %q, want empty (no-op)", got)
+	}
+}
+
+// Same case with submit=true must not press Enter (no blank line submitted).
+func TestInjectText_BracketedPasteEmptyAfterSanitizeSubmit(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", string(rune(0x202e)), true); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+	if got := readAll(t, pr, pw); got != "" {
+		t.Errorf("output = %q, want empty (no blank submit / trailing CR)", got)
+	}
+}
+
+// The copilot path also empties on purely invisible input (format chars removed),
+// and must likewise no-op without focus-in or pending flag.
+func TestInjectText_CopilotEmptyAfterSanitize(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "copilot")
+	defer pr.Close()
+
+	if err := m.InjectText("s1", string(rune(0x200e))+string(rune(0xfeff)), false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+	if m.HasPendingInput("s1") {
+		t.Error("all-stripped copilot broadcast must not mark the session pending")
+	}
+	if got := readAll(t, pr, pw); got != "" {
+		t.Errorf("copilot output = %q, want empty (no focus-in)", got)
+	}
+}
+
+// Zero-width / format chars beyond the old explicit bidi list (e.g. ZWSP U+200B,
+// ARABIC LETTER MARK U+061C) are stripped now that classification uses unicode.Cf.
+func TestInjectText_BracketedPasteStripsZeroWidthAndALM(t *testing.T) {
+	m := NewManager(nil)
+	pr, pw := newPipeSession(t, m, "s1", "claude")
+	defer pr.Close()
+
+	in := "a" + string(rune(0x200b)) + "b" + string(rune(0x061c)) + "c"
+	if err := m.InjectText("s1", in, false); err != nil {
+		t.Fatalf("InjectText: %v", err)
+	}
+	got := readAll(t, pr, pw)
+	want := bpOpen + "abc" + bpClose
+	if got != want {
+		t.Errorf("output = %q, want %q (ZWSP + ALM stripped)", got, want)
+	}
+}
+
 func TestInjectText_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.InjectText("ghost", "x", false); err == nil {
