@@ -33,6 +33,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleLeaveRoom(c, req)
 	case "clear_room":
 		h.handleClearRoom(c, req)
+	case "archive_room":
+		h.handleArchiveRoom(c, req)
 	case "get_last_message_id":
 		h.handleGetLastMessageID(c, req)
 	case "list_rooms":
@@ -587,6 +589,29 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 
 	h.broadcastEvent(room, "room_cleared", map[string]any{})
+}
+
+// handleArchiveRoom flushes a room's current messages to its append-only
+// archive. It is restricted to the authorized desktop app (the desktop is the
+// only caller — e.g. DeleteTeam — that needs a synchronous flush guarantee).
+// The write is synchronous so the response confirms the messages are on disk.
+// The archive is append-only, so repeated calls may duplicate current messages;
+// that is acceptable and never loses history.
+func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
+	room := h.resolveRoom(req.Room)
+
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop odayı arşivleyebilir")
+		return
+	}
+
+	roomState := h.getOrCreateRoom(room)
+	msgs := roomState.GetMessages()
+	h.appendArchive(room, msgs)
+
+	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))
+	respData, _ := json.Marshal(map[string]any{"text": text, "archived": len(msgs)})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 
 func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"desktop/internal/types"
 
@@ -39,6 +40,13 @@ type Hub struct {
 	logger  *log.Logger
 	done    chan struct{}
 
+	// archiveCh feeds dropped/cleared messages to the async archive writer.
+	// archiveDone is closed by the writer once it has drained on shutdown.
+	// archiveStarted guards the shutdown drain wait (writer only runs after Run).
+	archiveCh      chan archiveJob
+	archiveDone    chan struct{}
+	archiveStarted bool
+
 	listener net.Listener
 }
 
@@ -57,6 +65,8 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		dataDir:          dataDir,
 		logger:           logger,
 		done:             make(chan struct{}),
+		archiveCh:        make(chan archiveJob, archiveBufferSize),
+		archiveDone:      make(chan struct{}),
 	}
 }
 
@@ -86,6 +96,12 @@ func (h *Hub) Run(port int) error {
 	// Start persistence loop
 	go h.persistLoop()
 
+	// Start the async archive writer.
+	h.mu.Lock()
+	h.archiveStarted = true
+	h.mu.Unlock()
+	go h.runArchiveWriter()
+
 	// HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.handleWS)
@@ -105,6 +121,18 @@ func (h *Hub) Port() int {
 // Shutdown stops the hub gracefully.
 func (h *Hub) Shutdown() {
 	close(h.done)
+
+	// Wait for the archive writer to flush its backlog (only if it was started).
+	h.mu.RLock()
+	archiveStarted := h.archiveStarted
+	h.mu.RUnlock()
+	if archiveStarted {
+		select {
+		case <-h.archiveDone:
+		case <-time.After(2 * time.Second):
+			h.logger.Println("Archive writer drain timed out")
+		}
+	}
 
 	// Persist all state
 	h.persistAll()
@@ -195,8 +223,17 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 		return r
 	}
 	r := NewRoomState()
+	r.SetArchiveFn(h.archiveFnFor(room))
 	h.rooms[room] = r
 	return r
+}
+
+// archiveFnFor builds the per-room callback that captures messages leaving the
+// room and forwards them to the async archive writer.
+func (h *Hub) archiveFnFor(room string) func([]types.Message) {
+	return func(msgs []types.Message) {
+		h.enqueueArchive(room, msgs)
+	}
 }
 
 // resolveRoom returns the room name, using defaultRoom if empty.

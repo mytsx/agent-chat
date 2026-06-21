@@ -26,6 +26,19 @@ type RoomState struct {
 	dirty           bool
 	managerAgent    string
 	managerLastSeen float64
+	// archiveFn, if set, receives messages that are about to leave the room
+	// (dropped by truncation or wiped by Clear) so they can be archived before
+	// they are lost. It is always invoked OUTSIDE the room lock and must not
+	// block on disk I/O. nil means archiving is disabled (backward compatible).
+	archiveFn func([]types.Message)
+}
+
+// SetArchiveFn installs the callback that receives messages leaving the room.
+// Passing nil disables archiving. Safe to call concurrently.
+func (r *RoomState) SetArchiveFn(fn func([]types.Message)) {
+	r.mu.Lock()
+	r.archiveFn = fn
+	r.mu.Unlock()
 }
 
 // NewRoomState creates an empty room.
@@ -104,7 +117,6 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 // SendMessage adds a message to the room.
 func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, priority string, opts SendOptions) (types.Message, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// Update sender's last_seen
 	if agent, ok := r.agents[from]; ok {
@@ -131,12 +143,23 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	}
 	r.messages = append(r.messages, msg)
 
-	// Truncate if needed
+	// Truncate if needed, capturing the dropped (oldest) messages as a cheap
+	// in-memory copy so they can be archived after the lock is released.
+	var dropped []types.Message
 	if len(r.messages) > maxMessagesInRoom {
-		r.messages = r.messages[len(r.messages)-truncateToMessages:]
+		cut := len(r.messages) - truncateToMessages
+		dropped = make([]types.Message, cut)
+		copy(dropped, r.messages[:cut])
+		r.messages = r.messages[cut:]
 	}
 
 	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 	return msg, nil
 }
 
@@ -287,15 +310,23 @@ func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 	}
 }
 
-// Clear removes all messages and agents.
+// Clear removes all messages and agents. The wiped messages are handed to
+// archiveFn (outside the lock) first, so a destructive clear does not lose
+// history.
 func (r *RoomState) Clear() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	dropped := r.messages
 	r.messages = []types.Message{}
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
 	r.managerLastSeen = 0
 	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
 }
 
 // GetLastMessageID returns the highest message ID.
