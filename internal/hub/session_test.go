@@ -568,6 +568,87 @@ func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
 	}
 }
 
+// TestSeedSessionTracking_ClearedRoomNotSeeded verifies the clear+restart case:
+// an old snapshot remains under sessions/{room} but the room was cleared (IDs
+// restarted) before restart. Seeding must NOT mark the room captured from the
+// stale snapshot, or a new session that reaches the old max ID would have its
+// only snapshot skipped.
+func TestSeedSessionTracking_ClearedRoomNotSeeded(t *testing.T) {
+	dir := t.TempDir()
+	// Old snapshot from before the clear: max ID 3, roster {a}.
+	writeSessionSnapshot(t, dir, "proj", "1000000000", PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "a", To: "all", Content: "old1", Type: "broadcast"},
+			{ID: 2, From: "a", To: "all", Content: "old2", Type: "broadcast"},
+			{ID: 3, From: "a", To: "all", Content: "old3", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"a": {Role: "dev"}},
+	})
+	// Post-clear persisted state: IDs restarted, currently at max ID 2.
+	writePersistedRoom(t, dir, "proj", PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "b", To: "all", Content: "new1", Type: "broadcast"},
+			{ID: 2, From: "b", To: "all", Content: "new2", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"b": {Role: "dev"}},
+	})
+
+	h := newArchiveHub(dir)
+	h.loadPersistedState()
+	h.seedSessionTracking()
+
+	// Grow the new conversation to ID 3 — the SAME max ID the old snapshot had.
+	room := h.getRoom("proj")
+	if _, err := room.SendMessage("b", "all", "new3", false, "", SendOptions{}); err != nil {
+		t.Fatalf("post-clear send: %v", err)
+	}
+	// Must write: this is a genuinely new session that merely coincides with the
+	// old snapshot's max ID; it must not be skipped.
+	if _, _, skipped, err := h.saveSession("proj"); err != nil || skipped {
+		t.Fatalf("cleared+restarted room must write a fresh snapshot (skipped=%v err=%v)", skipped, err)
+	}
+}
+
+// TestSaveSession_RosterChangeWithoutMessageWrites verifies a roster-only change
+// (stale-agent cleanup removes an agent WITHOUT appending a message) is not
+// treated as "unchanged": the signature covers the roster, so the next save
+// writes a fresh snapshot honouring the messages + roster contract.
+func TestSaveSession_RosterChangeWithoutMessageWrites(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+	room := h.getOrCreateRoom("proj")
+	if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Inject a stale agent (last_seen far in the past) directly into the roster.
+	room.mu.Lock()
+	room.agents["ghost"] = types.Agent{Role: "dev", LastSeen: types.Now() - 1000}
+	room.mu.Unlock()
+
+	// First save captures the roster including ghost.
+	if _, _, skipped, err := h.saveSession("proj"); err != nil || skipped {
+		t.Fatalf("first save should write (skipped=%v err=%v)", skipped, err)
+	}
+
+	// Stale cleanup removes ghost WITHOUT appending a message (max ID unchanged).
+	room.ListAgents("")
+	if _, ok := room.GetAgents()["ghost"]; ok {
+		t.Fatal("ghost should have been removed by stale cleanup")
+	}
+
+	// A save now must NOT skip: the roster changed even though no message was added.
+	_, _, skipped, err := h.saveSession("proj")
+	if err != nil {
+		t.Fatalf("save after roster change: %v", err)
+	}
+	if skipped {
+		t.Fatal("a roster-only change must trigger a fresh snapshot, not skip")
+	}
+	if files := readSessionFiles(t, dir, "proj"); len(files) != 2 {
+		t.Fatalf("expected 2 snapshots (before + after roster change), got %d", len(files))
+	}
+}
+
 // TestSeedSessionTracking_NoSnapshotWritesAfterCrash verifies the crash case: if
 // the room was persisted (hub-state/{room}.json) but never snapshotted (crash
 // before any session save), seeding must NOT mark it captured — the first

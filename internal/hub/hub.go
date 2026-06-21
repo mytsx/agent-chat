@@ -56,13 +56,15 @@ type Hub struct {
 	archiveMu     sync.Mutex
 
 	// sessionMu serializes session-snapshot writes (saveSession) and guards
-	// sessionLastID. Like archiveMu it may be held across disk I/O — the session
+	// sessionLastSig. Like archiveMu it may be held across disk I/O — the session
 	// path is low-frequency (termination hooks / manual save), not the hot message
-	// path. sessionLastID maps room → highest message ID captured by its last
-	// snapshot, so an unchanged room (no new messages, hence no roster change since
-	// join/leave append system messages) is skipped rather than re-snapshotted.
-	sessionMu     sync.Mutex
-	sessionLastID map[string]int
+	// path. sessionLastSig maps room → the signature (max message ID + sorted agent
+	// roster) captured by its last snapshot, so a room that is unchanged in BOTH
+	// messages and roster is skipped rather than re-snapshotted — while a
+	// roster-only change (e.g. stale-agent cleanup, which mutates agents without a
+	// message) still differs and triggers a fresh snapshot.
+	sessionMu      sync.Mutex
+	sessionLastSig map[string]string
 
 	// Graceful request shutdown (mirrors http.Server.Shutdown for our hijacked
 	// WebSocket message loop). requestsClosed, set once under requestMu, makes
@@ -94,7 +96,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		done:             make(chan struct{}),
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
-		sessionLastID:    make(map[string]int),
+		sessionLastSig:   make(map[string]string),
 	}
 }
 

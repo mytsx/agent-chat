@@ -5,11 +5,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"desktop/internal/validation"
 )
+
+// sessionSignature derives a change key for a room snapshot that covers BOTH the
+// conversation (max message ID) and the agent roster (sorted name:role). The
+// unchanged-skip compares this signature, so a roster-only change — e.g. a
+// stale-agent cleanup that mutates the roster WITHOUT appending a message, which a
+// max-ID-only check would miss — still differs and triggers a fresh snapshot,
+// honouring the "messages + agent roster" contract.
+func sessionSignature(pr PersistedRoom) string {
+	maxID := 0
+	if n := len(pr.Messages); n > 0 {
+		maxID = pr.Messages[n-1].ID
+	}
+	names := make([]string, 0, len(pr.Agents))
+	for name := range pr.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d", maxID)
+	for _, name := range names {
+		b.WriteByte('|')
+		b.WriteString(name)
+		b.WriteByte(':')
+		b.WriteString(pr.Agents[name].Role)
+	}
+	return b.String()
+}
 
 // sessionsDir returns the directory holding a room's immutable per-session
 // snapshots: hub-state/sessions/{room}/. The room is a user-influenced path
@@ -27,23 +55,29 @@ func (h *Hub) sessionsDir(room string) (string, error) {
 	return dir, nil
 }
 
-// resetSessionTracking forgets a room's last-snapshot ID so the next saveSession
-// always writes. Called when the room's message IDs are reset (clear_room): the
-// new conversation restarts at ID 1 and could otherwise coincide with the
-// pre-clear max ID, wrongly tripping the unchanged-skip optimization.
+// resetSessionTracking forgets a room's last-snapshot signature so the next
+// saveSession always writes. Called when the room's message IDs are reset
+// (clear_room): the new conversation restarts at ID 1 and could otherwise
+// coincide with the pre-clear max ID, wrongly tripping the unchanged-skip.
 func (h *Hub) resetSessionTracking(room string) {
 	h.sessionMu.Lock()
-	delete(h.sessionLastID, room)
+	delete(h.sessionLastSig, room)
 	h.sessionMu.Unlock()
 }
 
-// seedSessionTracking primes sessionLastID from the latest EXISTING session
-// snapshot per room, so a restart does not re-snapshot a room whose current state
-// was already captured — while leaving never-snapshotted rooms unseeded so their
-// first post-restart save still writes. Seeding from ordinary room persistence
-// (hub-state/{room}.json) instead would be wrong: after a crash that persisted
-// the room but never wrote a session snapshot, the conversation would be skipped
-// forever. Called once at startup, after loadPersistedState.
+// seedSessionTracking primes sessionLastSig from the latest EXISTING session
+// snapshot per room, but ONLY when the loaded room is byte-for-byte that
+// snapshot (identical signature: same messages AND roster). This makes a restart
+// skip re-snapshotting a genuinely unchanged room, while:
+//   - a never-snapshotted room (crash before any save) stays unseeded → its first
+//     post-restart save still writes; and
+//   - a cleared room (IDs restarted) or one with post-snapshot activity has a
+//     different loaded signature → also unseeded, so the new session's snapshot is
+//     never skipped just because its max ID coincides with a stale one.
+//
+// Seeding from ordinary room persistence (hub-state/{room}.json) alone would be
+// wrong on the crash case; seeding unconditionally from the snapshot would be
+// wrong on the clear case. Called once at startup, after loadPersistedState.
 func (h *Hub) seedSessionTracking() {
 	if h.dataDir == "" {
 		return
@@ -58,28 +92,35 @@ func (h *Hub) seedSessionTracking() {
 			continue
 		}
 		room := rd.Name()
-		maxID, ok := h.latestSnapshotMaxID(room)
+		snap, ok := h.latestSnapshot(room)
 		if !ok {
 			continue
 		}
+		rs := h.getRoom(room)
+		if rs == nil {
+			continue // no loaded state to compare against
+		}
+		snapSig := sessionSignature(snap)
+		if sessionSignature(rs.Snapshot()) != snapSig {
+			continue // loaded state differs from the snapshot → let the next save write
+		}
 		h.sessionMu.Lock()
-		h.sessionLastID[room] = maxID
+		h.sessionLastSig[room] = snapSig
 		h.sessionMu.Unlock()
 	}
 }
 
-// latestSnapshotMaxID reads a room's most recent session snapshot and returns the
-// max message ID it captured. Epoch filenames are fixed-width, so the
-// lexicographically greatest name is the newest. Returns ok=false if the room has
-// no readable snapshot.
-func (h *Hub) latestSnapshotMaxID(room string) (int, bool) {
+// latestSnapshot reads and parses a room's most recent session snapshot. Epoch
+// filenames are fixed-width, so the lexicographically greatest name is the
+// newest. Returns ok=false if the room has no readable, non-empty snapshot.
+func (h *Hub) latestSnapshot(room string) (PersistedRoom, bool) {
 	dir, err := h.sessionsDir(room)
 	if err != nil {
-		return 0, false
+		return PersistedRoom{}, false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, false
+		return PersistedRoom{}, false
 	}
 	var latest string
 	for _, e := range entries {
@@ -91,20 +132,20 @@ func (h *Hub) latestSnapshotMaxID(room string) (int, bool) {
 		}
 	}
 	if latest == "" {
-		return 0, false
+		return PersistedRoom{}, false
 	}
 	data, err := os.ReadFile(filepath.Join(dir, latest))
 	if err != nil {
-		return 0, false
+		return PersistedRoom{}, false
 	}
 	var pr PersistedRoom
 	if err := json.Unmarshal(data, &pr); err != nil {
-		return 0, false
+		return PersistedRoom{}, false
 	}
 	if len(pr.Messages) == 0 {
-		return 0, false
+		return PersistedRoom{}, false
 	}
-	return pr.Messages[len(pr.Messages)-1].ID, true
+	return pr, true
 }
 
 // saveSession writes an immutable snapshot of the room's full current state
@@ -133,8 +174,8 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 
 	// Serialize the snapshot, the unchanged-check, the epoch-collision check, and
 	// the write under one lock so concurrent saves of the same room cannot observe
-	// different max IDs and then write out of order (which would regress
-	// sessionLastID and order files contrary to the conversation). Taking the
+	// different signatures and then write out of order (which would regress
+	// sessionLastSig and order files contrary to the conversation). Taking the
 	// snapshot here means sessionMu is acquired before roomState's read lock;
 	// nothing ever acquires sessionMu while holding a room lock, so there is no
 	// lock-ordering cycle. Held across disk I/O like archiveMu — the session path
@@ -142,21 +183,24 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 	h.sessionMu.Lock()
 	defer h.sessionMu.Unlock()
 
+	// Snapshot captures the room's in-memory state. For a room past the cap
+	// (maxMessagesInRoom) this is only the retained tail (~truncateToMessages); the
+	// older messages were already streamed to the Phase-A rolling archive
+	// (hub-state/archive/{room}.jsonl). The full per-session transcript is therefore
+	// the snapshot ∪ archive — #29 reconstructs it from both when summarizing.
 	snapshot := roomState.Snapshot()
 
 	// Skip an empty room: a session with no messages is noise, not history.
 	if len(snapshot.Messages) == 0 {
 		return "", 0, true, nil
 	}
-	// Messages are append-ordered by ID, so the last one carries the max ID. Any
-	// new message — and any join/leave, which appends a system message — bumps it,
-	// so for the conversation-history purpose it is a reliable "changed since last
-	// snapshot" signal. (A stale-agent cleanup drops an agent without a message, so
-	// that lone roster delta can be missed; the captured conversation is unaffected
-	// and re-snapshotting an otherwise-identical room adds no historical value.)
-	maxID := snapshot.Messages[len(snapshot.Messages)-1].ID
-	if last, seen := h.sessionLastID[room]; seen && last == maxID {
-		return "", 0, true, nil // unchanged since the last snapshot
+	// Skip a room unchanged in BOTH messages and roster since its last snapshot.
+	// The signature covers the max message ID and the sorted roster, so a
+	// roster-only change (stale-agent cleanup, which mutates agents without a
+	// message) is NOT mistaken for "unchanged".
+	sig := sessionSignature(snapshot)
+	if last, seen := h.sessionLastSig[room]; seen && last == sig {
+		return "", 0, true, nil
 	}
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
@@ -199,6 +243,6 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 		os.Remove(tmpPath)
 		return "", 0, false, fmt.Errorf("rename session %s -> %s: %w", tmpPath, finalPath, err)
 	}
-	h.sessionLastID[room] = maxID
+	h.sessionLastSig[room] = sig
 	return finalPath, len(snapshot.Messages), false, nil
 }
