@@ -37,6 +37,76 @@ func (h *Hub) resetSessionTracking(room string) {
 	h.sessionMu.Unlock()
 }
 
+// seedSessionTracking primes sessionLastID from the latest EXISTING session
+// snapshot per room, so a restart does not re-snapshot a room whose current state
+// was already captured — while leaving never-snapshotted rooms unseeded so their
+// first post-restart save still writes. Seeding from ordinary room persistence
+// (hub-state/{room}.json) instead would be wrong: after a crash that persisted
+// the room but never wrote a session snapshot, the conversation would be skipped
+// forever. Called once at startup, after loadPersistedState.
+func (h *Hub) seedSessionTracking() {
+	if h.dataDir == "" {
+		return
+	}
+	base := filepath.Join(h.dataDir, "hub-state", "sessions")
+	roomDirs, err := os.ReadDir(base)
+	if err != nil {
+		return // no sessions dir yet — nothing to seed
+	}
+	for _, rd := range roomDirs {
+		if !rd.IsDir() {
+			continue
+		}
+		room := rd.Name()
+		maxID, ok := h.latestSnapshotMaxID(room)
+		if !ok {
+			continue
+		}
+		h.sessionMu.Lock()
+		h.sessionLastID[room] = maxID
+		h.sessionMu.Unlock()
+	}
+}
+
+// latestSnapshotMaxID reads a room's most recent session snapshot and returns the
+// max message ID it captured. Epoch filenames are fixed-width, so the
+// lexicographically greatest name is the newest. Returns ok=false if the room has
+// no readable snapshot.
+func (h *Hub) latestSnapshotMaxID(room string) (int, bool) {
+	dir, err := h.sessionsDir(room)
+	if err != nil {
+		return 0, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, false
+	}
+	var latest string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if e.Name() > latest {
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return 0, false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, latest))
+	if err != nil {
+		return 0, false
+	}
+	var pr PersistedRoom
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return 0, false
+	}
+	if len(pr.Messages) == 0 {
+		return 0, false
+	}
+	return pr.Messages[len(pr.Messages)-1].ID, true
+}
+
 // saveSession writes an immutable snapshot of the room's full current state
 // (messages + agent roster, via RoomState.Snapshot → PersistedRoom) to
 // hub-state/sessions/{room}/{epoch}.json. Unlike the rolling Phase-A archive,

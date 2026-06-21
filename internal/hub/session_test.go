@@ -509,54 +509,95 @@ func TestSessionsDir_ConfinedToBase(t *testing.T) {
 	}
 }
 
-// TestSaveSession_SeededFromDiskSkipsUnchangedAfterRestart verifies the
-// unchanged-skip survives a hub restart: loadPersistedState seeds the per-room
-// tracker from disk, so opening and quitting the app with no activity does not
-// write a duplicate snapshot of an unchanged room.
-func TestSaveSession_SeededFromDiskSkipsUnchangedAfterRestart(t *testing.T) {
-	dir := t.TempDir()
-	stateDir := filepath.Join(dir, "hub-state")
+// writePersistedRoom writes a hub-state/{room}.json (periodic-persistence state).
+func writePersistedRoom(t *testing.T, dataDir, room string, pr PersistedRoom) {
+	t.Helper()
+	stateDir := filepath.Join(dataDir, "hub-state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	persisted := PersistedRoom{
+	data, _ := json.MarshalIndent(pr, "", "  ")
+	if err := os.WriteFile(filepath.Join(stateDir, room+".json"), data, 0644); err != nil {
+		t.Fatalf("write persisted %s: %v", room, err)
+	}
+}
+
+// writeSessionSnapshot writes a sessions/{room}/{epoch}.json snapshot file.
+func writeSessionSnapshot(t *testing.T, dataDir, room, epoch string, pr PersistedRoom) {
+	t.Helper()
+	dir := filepath.Join(dataDir, "hub-state", "sessions", room)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	data, _ := json.MarshalIndent(pr, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, epoch+".json"), data, 0644); err != nil {
+		t.Fatalf("write snapshot %s: %v", room, err)
+	}
+}
+
+// TestSeedSessionTracking_FromSnapshotSkipsUnchanged verifies the unchanged-skip
+// survives a restart when a session snapshot already captured the state: seeding
+// reads the latest snapshot's max ID, so an idle quit does NOT write a duplicate.
+func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	pr := PersistedRoom{
 		Messages: []types.Message{
 			{ID: 1, From: "a", To: "all", Content: "one", Type: "broadcast"},
 			{ID: 2, From: "b", To: "all", Content: "two", Type: "broadcast"},
 		},
 		Agents: map[string]types.Agent{"a": {Role: "dev"}},
 	}
-	data, _ := json.MarshalIndent(persisted, "", "  ")
-	if err := os.WriteFile(filepath.Join(stateDir, "proj.json"), data, 0644); err != nil {
-		t.Fatalf("write persisted: %v", err)
-	}
+	writePersistedRoom(t, dir, "proj", pr)
+	writeSessionSnapshot(t, dir, "proj", "1000000000", pr) // a clean prior shutdown's snapshot
 
-	// Fresh hub (as after a restart) loads the persisted state.
 	h := newArchiveHub(dir)
 	h.loadPersistedState()
+	h.seedSessionTracking()
 
-	// Idle quit: no new messages → must skip (tracker seeded from the loaded max ID).
-	path, count, skipped, err := h.saveSession("proj")
+	// Idle quit: unchanged since the existing snapshot → skip.
+	_, _, skipped, err := h.saveSession("proj")
 	if err != nil {
 		t.Fatalf("saveSession: %v", err)
 	}
 	if !skipped {
-		t.Fatal("a restart with no activity must skip (seeded from disk), not write a duplicate")
+		t.Fatal("a restart with no activity must skip (seeded from the existing snapshot)")
 	}
-	if path != "" || count != 0 {
-		t.Fatalf("seeded skip should return no path/count, got path=%q count=%d", path, count)
+	if files := readSessionFiles(t, dir, "proj"); len(files) != 1 {
+		t.Fatalf("idle quit wrote a duplicate: %d files, want 1 (the original snapshot)", len(files))
 	}
-	if files := readSessionFiles(t, dir, "proj"); len(files) != 0 {
-		t.Fatalf("restart idle quit wrote %d session files, want 0", len(files))
-	}
+}
 
-	// A NEW message after the restart advances the tracker and writes.
-	room := h.getRoom("proj")
-	if _, err := room.SendMessage("a", "all", "three", false, "", SendOptions{}); err != nil {
-		t.Fatalf("post-restart send: %v", err)
+// TestSeedSessionTracking_NoSnapshotWritesAfterCrash verifies the crash case: if
+// the room was persisted (hub-state/{room}.json) but never snapshotted (crash
+// before any session save), seeding must NOT mark it captured — the first
+// post-restart save has to write so the conversation is preserved at least once.
+func TestSeedSessionTracking_NoSnapshotWritesAfterCrash(t *testing.T) {
+	dir := t.TempDir()
+	pr := PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "a", To: "all", Content: "one", Type: "broadcast"},
+			{ID: 2, From: "b", To: "all", Content: "two", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"a": {Role: "dev"}},
 	}
-	if _, _, skipped, err := h.saveSession("proj"); err != nil || skipped {
-		t.Fatalf("a changed room after restart must write (skipped=%v err=%v)", skipped, err)
+	writePersistedRoom(t, dir, "proj", pr) // persisted, but NO session snapshot exists
+
+	h := newArchiveHub(dir)
+	h.loadPersistedState()
+	h.seedSessionTracking() // finds no sessions/proj → must not seed
+
+	_, count, skipped, err := h.saveSession("proj")
+	if err != nil {
+		t.Fatalf("saveSession: %v", err)
+	}
+	if skipped {
+		t.Fatal("a never-snapshotted room must write after a crash restart, not skip")
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	if files := readSessionFiles(t, dir, "proj"); len(files) != 1 {
+		t.Fatalf("crash-restart save wrote %d files, want 1", len(files))
 	}
 }
 

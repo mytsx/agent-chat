@@ -102,6 +102,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 // The actual port is written to ~/.agent-chat/hub.port.
 func (h *Hub) Run(port int) error {
 	h.loadPersistedState()
+	h.seedSessionTracking()
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {

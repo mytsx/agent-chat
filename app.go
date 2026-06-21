@@ -305,25 +305,25 @@ func (a *App) monitorHub() {
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
-	// Snapshot each team's room as a session BEFORE closing the hub client, so a
-	// quit captures the in-flight conversation (#28). Best-effort and skip-aware
-	// (the hub skips empty/unchanged rooms). Bounded by a short overall budget so a
-	// wedged-but-alive hub can't stall quit for up to N×(RPC timeout): a healthy hub
-	// finishes in milliseconds (local disk writes); if the budget elapses we proceed
-	// to shut down rather than hang the UI, matching the 3s hub-Wait grace below.
-	if a.hubClient != nil && a.teamStore != nil {
+	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
+	// quit captures the in-flight conversation (#28). Iterating the hub's room list
+	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
+	// Best-effort and skip-aware (the hub skips empty/unchanged rooms). Bounded by a
+	// short budget so a wedged-but-alive hub can't stall quit for up to N×(RPC
+	// timeout): a healthy hub finishes in milliseconds (local disk writes); if the
+	// budget elapses we proceed rather than hang the UI.
+	if a.hubClient != nil {
 		saveDone := make(chan struct{})
 		go func() {
 			defer close(saveDone)
-			for _, t := range a.teamStore.List() {
-				// An empty team name means the default room (the hub's resolveRoom
-				// maps "" → default), so it must NOT be skipped here.
-				if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
-					room := t.Name
-					if room == "" {
-						room = "default"
-					}
-					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", room, err)
+			rooms, err := a.hubClient.ListRoomsDetailed()
+			if err != nil {
+				log.Printf("[SHUTDOWN] Oda listesi alınamadı, session kaydı atlanıyor: %v", err)
+				return
+			}
+			for _, r := range rooms {
+				if _, _, err := a.hubClient.SaveSession(r.Name); err != nil {
+					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", r.Name, err)
 				}
 			}
 		}()
@@ -336,9 +336,22 @@ func (a *App) shutdown(ctx context.Context) {
 		}
 	}
 
-	// Close hub client
+	// Close the hub client, but bound it: a wedged write leaves Send holding the
+	// client mutex Close also needs, so an unbounded Close could hang quit forever.
+	// If Close doesn't finish in time, proceed to SIGTERM the hub anyway — killing
+	// the hub breaks the socket, which unblocks the stuck write and lets Close
+	// finish in the background.
 	if a.hubClient != nil {
-		a.hubClient.Close()
+		closed := make(chan struct{})
+		go func() {
+			a.hubClient.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			log.Printf("[SHUTDOWN] hub client Close 2s'i aştı, hub'a SIGTERM ile devam ediliyor")
+		}
 	}
 
 	// Stop hub process gracefully
