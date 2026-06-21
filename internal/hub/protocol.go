@@ -33,6 +33,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleLeaveRoom(c, req)
 	case "clear_room":
 		h.handleClearRoom(c, req)
+	case "archive_room":
+		h.handleArchiveRoom(c, req)
 	case "get_last_message_id":
 		h.handleGetLastMessageID(c, req)
 	case "list_rooms":
@@ -158,6 +160,15 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	}
 	json.Unmarshal(req.Data, &data)
 
+	// Reject invalid room names before creating any subscription (same filename
+	// safety as join_room — see handleJoinRoom).
+	for _, room := range data.Rooms {
+		if err := validation.ValidateName(room); err != nil {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı %q: %v", room, err))
+			return
+		}
+	}
+
 	h.mu.Lock()
 	for _, room := range data.Rooms {
 		c.rooms[room] = true
@@ -184,6 +195,15 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
+	// Reject room names that can't be safely used as a filename: the hub keys
+	// both snapshot persistence (hub-state/{room}.json) and archives
+	// (archive/{room}.jsonl) by room name, so an unvalidated name would silently
+	// fail to persist/archive while the room still accepted (and then dropped)
+	// messages.
+	if err := validation.ValidateName(room); err != nil {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
+		return
+	}
 	if err := validation.ValidateName(data.AgentName); err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
@@ -580,13 +600,66 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	}
 
 	roomState := h.getOrCreateRoom(room)
-	roomState.Clear()
+
+	// Durable destructive clear: archive the current history synchronously and
+	// refuse to wipe if it cannot be preserved. Unlike the async truncate path,
+	// clear_room is a deliberate, irreversible command, so it must not report
+	// success while the only copy of the history fails to reach disk.
+	msgs := roomState.GetMessages()
+	if err := h.appendArchive(room, msgs); err != nil {
+		h.logger.Printf("clear_room aborted; archive failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("oda temizlenmedi: geçmiş arşivlenemedi: %v", err))
+		return
+	}
+	// Only wipe up to the archived snapshot's last ID, so a message sent while
+	// the archive I/O ran (lock released) is kept rather than lost.
+	maxID := 0
+	if n := len(msgs); n > 0 {
+		maxID = msgs[n-1].ID
+	}
+	roomState.ClearArchived(maxID)
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
 	respData, _ := json.Marshal(map[string]string{"text": text})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 
 	h.broadcastEvent(room, "room_cleared", map[string]any{})
+}
+
+// handleArchiveRoom flushes a room's current messages to its append-only
+// archive. It is restricted to the authorized desktop app (the desktop is the
+// only caller — e.g. DeleteTeam — that needs a synchronous flush). The write is
+// synchronous, so the response confirms the hub has written the messages (the
+// archive, like the rest of the hub's persistence, is buffered to the OS — not
+// fsync'd). The archive is append-only, so repeated calls may duplicate current
+// messages; that is acceptable and never loses history. A room that was never
+// created archives nothing rather than materializing a phantom empty room.
+func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
+	room := h.resolveRoom(req.Room)
+
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop odayı arşivleyebilir")
+		return
+	}
+
+	// Ordering caveat: if a truncation batch for this room is still queued on the
+	// async writer when this synchronous flush runs, the retained tail can land
+	// in the file before that older batch. No message is lost and every line
+	// carries an ID and timestamp, so a reader can order them; a stricter
+	// file-order guarantee is deferred along with archive read tooling.
+	var msgs []types.Message
+	if roomState := h.getRoom(room); roomState != nil {
+		msgs = roomState.GetMessages()
+	}
+	if err := h.appendArchive(room, msgs); err != nil {
+		h.logger.Printf("archive_room failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("oda arşivlenemedi: %v", err))
+		return
+	}
+
+	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))
+	respData, _ := json.Marshal(map[string]any{"text": text, "archived": len(msgs)})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 
 func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {

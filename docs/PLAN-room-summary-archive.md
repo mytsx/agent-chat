@@ -21,7 +21,7 @@ Kullanıcının isteği: Oda kapanmadan/temizlenmeden önce konuşmanın **özet
 - **Gerekçe metni düzeltmesi:** "her mesajda" ve "fsync bekletir" ifadeleri çıkarıldı. Truncate ~200 mesajda bir tetiklenir (her mesajda değil); kod tabanı **hiç fsync yapmıyor** (`persistence.go` `WriteFile`+`Rename`, `Sync()` çağrısı yok).
 - **Öz-çelişkili arşiv tasarımı düzeltmesi:** A1 hem "mutex altında senkron yaz" hem "persistLoop'a bağla" diyordu. Doğru tasarım netleştirildi (aşağıya bakın — Clear() belleği anında boşalttığı için persistLoop 5s sonra boş odayı okur, hiçbir şey arşivlenmez).
 
-**Bonus bug (yeni — ayrı mesele olarak çerçevelendi):** `startup.go:40` manager'a "tüm mesajları oku" diyor ama `read_all_messages(since_id=0)` çağrısına `limit` geçmediği için **sessizce yalnızca son 15 mesaj** geliyor. Bu "token şişmesi" değil, **sessiz bağlam eksikliği** — manager eksik bağlamla çalışıyor. Bu plandan bağımsız ele alınmalı (limit'i açıkça geçmek veya özet enjeksiyonu).
+**Bonus bug (✅ ÇÖZÜLDÜ):** `startup.go:40` manager'a "tüm mesajları oku" diyor ama `read_all_messages(since_id=0)` çağrısına `limit` geçmediği için **sessizce yalnızca son 15 mesaj** geliyordu. Bu "token şişmesi" değil, **sessiz bağlam eksikliği**ydi — manager eksik bağlamla çalışıyordu. Çözüm: startup talimatı artık `read_all_messages(since_id=0, limit=1000)` çağırıyor (oda en çok 500 mesaj tuttuğu için tüm geçmişi kapsar). TDD ile düzeltildi (`startup_test.go` → `TestComposeStartupPrompt_ManagerReadInstructionPassesExplicitLimit`).
 
 **Kapsam / böl-birleştir kararları:** Tek plan 14 dosya + yeni `summarizer` paketine dokunuyordu; aşırı geniş. Plan 3 bağımsız alt-plana bölündü:
 
@@ -51,7 +51,7 @@ Kullanıcının isteği: Oda kapanmadan/temizlenmeden önce konuşmanın **özet
 ### Fresh session'a başlangıçta ne enjekte ediliyor?
 - `internal/cli/startup.go:9-56` — `ComposeStartupPrompt`. Sıra: base → global → team → selected/manager prompt → **join talimatı**. Join talimatı (`startup.go:37-41`) agent'a şunu söylüyor:
   - normal agent: `read_messages("<agent>")` ile mesajları oku
-  - manager: `read_all_messages(since_id=0)` ile "tüm mesajları" oku — **BONUS BUG:** `limit` geçilmediği için handler default `limit=15` uygular (`tools.go:222`), yani manager sessizce yalnızca son 15 mesajı görür. Bu token riski değil, **sessiz bağlam eksikliği**; bu plandan bağımsız ayrı bir mesele olarak ele alınmalı.
+  - manager: `read_all_messages(since_id=0, limit=1000)` ile "tüm mesajları" oku — **BONUS BUG (✅ ÇÖZÜLDÜ):** önceden `limit` geçilmediği için handler default `limit=15` uyguluyordu (`tools.go:222`), yani manager sessizce yalnızca son 15 mesajı görüyordu. Startup talimatına açık `limit=1000` eklenerek düzeltildi.
 - `app.go:591-638` — `composeAgentPrompt`: embedded `base_prompt.md` + `~/.agent-chat/global_prompt.md` + team prompt + library/manager prompt'u birleştirip `ComposeStartupPrompt`'a veriyor.
 - `app.go:640-673` — `sendStartupPrompt`: CLI idle olunca bracketed-paste ile prompt'u terminale yolluyor.
 - `prompts/base_prompt.md:1-45`, `prompts/manager_prompt.md:1-44` — agent'a verilen başlangıç bağlamı (yeni "özet okuma" talimatı buralara da işlenebilir).

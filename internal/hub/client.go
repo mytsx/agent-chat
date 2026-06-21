@@ -69,7 +69,19 @@ func (c *Client) readPump() {
 			continue
 		}
 
-		c.hub.handleRequest(c, req)
+		// Gate handling so a graceful shutdown can wait for in-flight requests
+		// (and the archive writes they trigger) to finish. Once shutdown closes
+		// request handling, stop reading — the connection is being torn down.
+		if !c.hub.beginRequest() {
+			return
+		}
+		// endRequest via defer so the inflight count is always balanced, even if
+		// a handler panics or a future edit adds an early return — otherwise
+		// Shutdown's inflightRequests.Wait could hang.
+		func() {
+			defer c.hub.endRequest()
+			c.hub.handleRequest(c, req)
+		}()
 	}
 }
 

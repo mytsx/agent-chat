@@ -1007,6 +1007,17 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
+
+	// Flush the room's conversation to the append-only archive BEFORE closing
+	// terminals. A terminal close failure returns early below, so archiving
+	// must happen first and stay error-tolerant — losing the team is no reason
+	// to also lose its history.
+	if getErr == nil && t.Name != "" && a.hubClient != nil {
+		if err := a.hubClient.ArchiveRoom(t.Name); err != nil {
+			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
+		}
+	}
+
 	var closeErrors []string
 	for _, s := range sessions {
 		if err := a.closeTerminalInternal(s.ID, true); err != nil {

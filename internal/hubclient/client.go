@@ -318,6 +318,20 @@ func (c *HubClient) ClearRoom(room string) (*types.Response, error) {
 	return c.Send(types.Request{Type: "clear_room", Room: room})
 }
 
+// ArchiveRoom flushes a room's current messages to its append-only archive,
+// synchronously on the hub. Returns once the hub has written them (buffered to
+// the OS, consistent with the hub's other persistence — not fsync'd) or on error.
+func (c *HubClient) ArchiveRoom(room string) error {
+	resp, err := c.Send(types.Request{Type: "archive_room", Room: room})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("archive_room failed: %s", resp.Error)
+	}
+	return nil
+}
+
 // GetLastMessageID gets the last message ID.
 func (c *HubClient) GetLastMessageID(room, agentName string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{"agent_name": agentName})

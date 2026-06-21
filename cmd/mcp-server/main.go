@@ -50,17 +50,31 @@ func runHub() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	shuttingDown := make(chan struct{})
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-sigCh
 		logger.Println("Received shutdown signal")
+		close(shuttingDown)
 		h.Shutdown()
-		os.Exit(0)
+		close(shutdownDone)
 	}()
 
 	logger.Println("Starting hub server...")
 	if err := h.Run(0); err != nil {
-		logger.Printf("Hub server error: %v", err)
-		os.Exit(1)
+		// Shutdown closes the listener, which makes Run return here. That is the
+		// expected path on SIGTERM — do NOT exit, or we would race the signal
+		// goroutine's durable shutdown work (archive drain + persistAll). Wait
+		// for Shutdown to finish, then exit cleanly. Only a genuine startup/serve
+		// error (no shutdown in progress) is fatal.
+		select {
+		case <-shuttingDown:
+			<-shutdownDone
+			os.Exit(0)
+		default:
+			logger.Printf("Hub server error: %v", err)
+			os.Exit(1)
+		}
 	}
 }
 

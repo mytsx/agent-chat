@@ -15,6 +15,17 @@ func TestComposeStartupPrompt_ManagerRole(t *testing.T) {
 	}
 }
 
+func TestComposeStartupPrompt_ManagerReadInstructionPassesExplicitLimit(t *testing.T) {
+	// read_all_messages default limit is 15 (mcpserver + hub); without an explicit
+	// limit a fresh manager silently sees only the last 15 messages while believing
+	// it read the full history. The startup instruction must pass a high limit so
+	// "tüm mesajları oku" matches actual behavior.
+	got := ComposeStartupPrompt("base", "", "", "", "manager-agent", "backend", "team-a", true)
+	if !strings.Contains(got, "read_all_messages(since_id=0, limit=") {
+		t.Fatalf("expected manager read_all_messages instruction to pass an explicit limit, got:\n%s", got)
+	}
+}
+
 func TestComposeStartupPrompt_UsesConfiguredRole(t *testing.T) {
 	got := ComposeStartupPrompt("base", "", "", "", "backend", "Backend API Developer", "team-a", false)
 	if !strings.Contains(got, `join_room("backend", "Backend API Developer")`) {
