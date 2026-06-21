@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
+import { main } from "../../wailsjs/go/models";
+import { useTeams } from "./useTeams";
 import {
   CreateTerminal,
   CloseTerminal,
@@ -7,6 +9,7 @@ import {
   ResizeTerminal,
   WriteToTerminal,
   DetectCLIs,
+  OpenTeamFromConfig,
 } from "../../wailsjs/go/main/App";
 
 interface TerminalsState {
@@ -25,6 +28,7 @@ interface TerminalsState {
     slotIndex?: number,
     useWorktree?: boolean
   ) => Promise<string>;
+  openTeamFromConfig: (teamID: string) => Promise<main.OpenTeamResult[]>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
@@ -59,9 +63,17 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   addTerminal: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree = false) => {
-    const sessionID = await CreateTerminal(teamID, agentName, workDir, cliType, promptId ?? "", useWorktree);
     const currentSessions = get().sessions[teamID] ?? [];
     const resolvedSlotIndex = slotIndex ?? currentSessions.length;
+    const sessionID = await CreateTerminal(
+      teamID,
+      agentName,
+      workDir,
+      cliType,
+      promptId ?? "",
+      useWorktree,
+      resolvedSlotIndex
+    );
     const session: TerminalSession = {
       sessionID,
       teamID,
@@ -78,7 +90,54 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       },
     }));
 
+    // Backend persisted this agent into the team via UpsertAgent; re-pull the
+    // team so later grid updates don't echo a stale agents array. The PTY is
+    // already running, so a refresh failure must not fail the whole creation.
+    try {
+      await useTeams.getState().refreshTeam(teamID);
+    } catch (e) {
+      console.error("[addTerminal] refreshTeam failed:", e);
+    }
+
     return sessionID;
+  },
+
+  openTeamFromConfig: async (teamID) => {
+    const results = await OpenTeamFromConfig(teamID);
+    const existing = get().sessions[teamID] ?? [];
+    const newSessions: TerminalSession[] = [];
+
+    for (const row of results) {
+      if (row.error || !row.sessionID) continue;
+      newSessions.push({
+        sessionID: row.sessionID,
+        teamID,
+        agentName: row.agentName,
+        cliType: (row.cliType || "shell") as CLIType,
+        index: existing.length + newSessions.length,
+        slotIndex: row.slotIndex,
+      });
+    }
+
+    if (newSessions.length > 0) {
+      set((s) => ({
+        sessions: {
+          ...s.sessions,
+          [teamID]: [...(s.sessions[teamID] ?? []), ...newSessions],
+        },
+      }));
+    }
+
+    // OpenTeamFromConfig re-persists each agent (CreateTerminal → UpsertAgent),
+    // possibly migrating legacy slot indices; refresh so the team store matches.
+    // PTYs are already running, so a refresh failure must not fail the batch.
+    try {
+      await useTeams.getState().refreshTeam(teamID);
+    } catch (e) {
+      console.error("[openTeamFromConfig] refreshTeam failed:", e);
+    }
+
+    return results;
   },
 
   removeTerminal: async (teamID, sessionID) => {

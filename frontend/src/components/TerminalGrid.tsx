@@ -111,8 +111,9 @@ function readSavedCustomLayouts(): Record<string, Layout[]> {
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal } = useTerminals();
+  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, openTeamFromConfig } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
+  const [openingFromConfig, setOpeningFromConfig] = useState(false);
   const [customLayouts, setCustomLayouts] = useState<Record<string, Layout[]>>(() =>
     readSavedCustomLayouts()
   );
@@ -188,6 +189,29 @@ export default function TerminalGrid() {
         [team.id]: layout.map((item) => normalizeLayout(item)),
       };
     });
+  };
+
+  const handleOpenFromConfig = async () => {
+    if (!team || openingFromConfig) return;
+    setOpeningFromConfig(true);
+    try {
+      const results = await openTeamFromConfig(team.id);
+      const failed = results.filter((r) => r.error);
+      if (failed.length > 0) {
+        const detail = failed.map((r) => `${r.agentName}: ${r.error}`).join("\n");
+        console.error(`[openTeamFromConfig] ${failed.length} agent açılamadı:`, detail);
+        // No notification component exists in the app, so surface batch-open
+        // failures (e.g. over-capacity slots, worktree errors) to the user here.
+        alert(`Bazı agent'lar başlatılamadı:\n\n${detail}`);
+      }
+    } catch (err) {
+      console.error("[openTeamFromConfig] failed:", err);
+      alert(
+        `Takım yapılandırması açılırken hata oluştu:\n\n${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setOpeningFromConfig(false);
+    }
   };
 
   if (!team) return <div className="terminal-grid-empty">No team selected</div>;
@@ -361,6 +385,17 @@ export default function TerminalGrid() {
       <div className="terminal-grid-toolbar">
         <GridSelector current={team.grid_layout} onChange={handleLayoutChange} />
         <div className="terminal-grid-actions">
+          {(team.agents?.length ?? 0) > 0 && teamSessions.length === 0 && (
+            <button
+              type="button"
+              className="btn-sm"
+              onClick={handleOpenFromConfig}
+              disabled={openingFromConfig}
+              title="Kayıtlı agent yapılandırmasıyla tüm terminalleri aç"
+            >
+              {openingFromConfig ? "Açılıyor..." : "Config ile Aç"}
+            </button>
+          )}
           {isCustomMode && (
             <button
               type="button"

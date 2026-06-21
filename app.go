@@ -37,16 +37,16 @@ var mcpServerBin []byte
 
 // App struct
 type App struct {
-	ctx            context.Context
-	ptyManager     *ptymgr.Manager
-	hubClient      *hubclient.HubClient
-	hubProcess     *os.Process
-	hubAuthToken   string
-	orchestrator   *orchestrator.Orchestrator
-	promptStore    *prompt.Store
-	teamStore      *team.Store
-	dataDir        string
-	worktreeLocks  sync.Map // path → *sync.Mutex — per-path worktree lock
+	ctx           context.Context
+	ptyManager    *ptymgr.Manager
+	hubClient     *hubclient.HubClient
+	hubProcess    *os.Process
+	hubAuthToken  string
+	orchestrator  *orchestrator.Orchestrator
+	promptStore   *prompt.Store
+	teamStore     *team.Store
+	dataDir       string
+	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
 }
 
 // NewApp creates a new App application struct
@@ -412,7 +412,9 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 
 // CreateTerminal creates a new terminal and returns its session ID.
 // If useWorktree is true and workDir is a git repo, a worktree is created for the agent.
-func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool) (string, error) {
+// slotIndex is the grid position the terminal occupies; it is persisted to the team
+// template so the agent reopens into the same slot.
+func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -526,9 +528,32 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// Store promptID and worktree info for restart
 	if s := a.ptyManager.GetSession(sessionID); s != nil {
 		s.PromptID = promptID
+		s.SlotIndex = slotIndex
 		if wtDir != "" {
 			s.WorktreeDir = wtDir
 			s.WorktreeRepo = origWorkDir
+		}
+	}
+
+	// Persist the agent config to the team template (auto-upsert). When a worktree
+	// was created, workDir was reassigned to the worktree path above; persist the
+	// user-selected ORIGINAL repo dir (origWorkDir) instead so reopening doesn't
+	// nest a worktree inside a worktree. Role is intentionally omitted — UpsertAgent
+	// preserves any Role the user set earlier.
+	if teamID != "" {
+		cfgWorkDir := workDir
+		if origWorkDir != "" {
+			cfgWorkDir = origWorkDir
+		}
+		if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
+			Name:        agentName,
+			PromptID:    promptID,
+			WorkDir:     cfgWorkDir,
+			CLIType:     cliType,
+			SlotIndex:   slotIndex,
+			UseWorktree: useWorktree,
+		}); err != nil {
+			log.Printf("[TEAM] UpsertAgent failed for agent=%s team=%s: %v", agentName, teamID, err)
 		}
 	}
 
@@ -557,12 +582,20 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	workDir := session.WorkDir
 	cliType := session.CLIType
 	promptID := session.PromptID
+	slotIndex := session.SlotIndex
 	wtDir := session.WorktreeDir
 	wtRepo := session.WorktreeRepo
 
-	// If worktree exists, use it as workDir (it's already created)
-	if wtDir != "" {
-		workDir = wtDir
+	// Reconstruct the ORIGINAL create params. For a worktree agent, session.WorkDir
+	// points at the worktree; reopen against the original repo with useWorktree=true
+	// instead. CreateWorktree reuses the existing worktree idempotently, and the
+	// persisted config keeps work_dir pointing at the repo (not the worktree).
+	// Guard wtRepo != "" so a missing repo path can never blank out workDir; in that
+	// case fall back to the existing workDir (the worktree) with useWorktree=false.
+	useWorktree := false
+	if wtDir != "" && wtRepo != "" {
+		workDir = wtRepo
+		useWorktree = true
 	}
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
@@ -572,19 +605,64 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	// useWorktree=false because worktree already exists, workDir already points to it
-	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false)
+	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex)
 	if err != nil {
 		return "", err
 	}
 
-	// Transfer worktree info to new session
-	if s := a.ptyManager.GetSession(newSessionID); s != nil && wtDir != "" {
-		s.WorktreeDir = wtDir
-		s.WorktreeRepo = wtRepo
+	return newSessionID, nil
+}
+
+// OpenTeamResult is one row returned by OpenTeamFromConfig: the agent it tried to
+// open, plus either SessionID (success) or Error (failure/skipped). Empty strings
+// mark the absent one. Wails generates a typed TS interface from this struct, so
+// the frontend reads SlotIndex as a number without string conversion.
+type OpenTeamResult struct {
+	AgentName string `json:"agentName"`
+	CLIType   string `json:"cliType"`
+	SlotIndex int    `json:"slotIndex"`
+	SessionID string `json:"sessionID"`
+	Error     string `json:"error"`
+}
+
+// OpenTeamFromConfig opens every terminal saved in a team's template — one per
+// stored agent config — in slot order, returning one OpenTeamResult per agent.
+// A per-agent failure does NOT abort the batch: that agent is skipped and its
+// error is reported so the user keeps the remaining terminals.
+func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return nil, err
+	}
+	if len(t.Agents) == 0 {
+		return nil, fmt.Errorf("takımda kayıtlı agent yapılandırması yok")
 	}
 
-	return newSessionID, nil
+	ordered := team.AgentsInOpenOrder(t.Agents)
+	// Don't launch agents that fall outside the current fixed grid: a fixed grid
+	// only renders slots 0..capacity-1, so an over-capacity agent would spawn a PTY
+	// that can't be shown or closed from the UI. capacity < 0 means unlimited
+	// (custom layout), so nothing is skipped there.
+	capacity := team.GridCapacity(t.GridLayout)
+	results := make([]OpenTeamResult, 0, len(ordered))
+	for _, cfg := range ordered {
+		res := OpenTeamResult{AgentName: cfg.Name, CLIType: cfg.CLIType, SlotIndex: cfg.SlotIndex}
+		if capacity >= 0 && cfg.SlotIndex >= capacity {
+			res.Error = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
+			results = append(results, res)
+			continue
+		}
+		sessionID, err := a.CreateTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex)
+		if err != nil {
+			res.Error = err.Error()
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
+		} else {
+			res.SessionID = sessionID
+		}
+		results = append(results, res)
+	}
+	return results, nil
 }
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it

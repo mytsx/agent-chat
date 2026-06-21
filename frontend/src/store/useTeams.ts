@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { Team, AgentConfig } from "../lib/types";
 import {
   ListTeams,
+  GetTeam,
   CreateTeam,
   UpdateTeam,
   DeleteTeam,
@@ -27,6 +28,7 @@ interface TeamsState {
     agents: AgentConfig[]
   ) => Promise<void>;
   setTeamManager: (id: string, managerAgent: string) => Promise<void>;
+  refreshTeam: (id: string) => Promise<void>;
   deleteTeam: (id: string) => Promise<void>;
 }
 
@@ -69,6 +71,17 @@ export const useTeams = create<TeamsState>((set, get) => ({
 
   setTeamManager: async (id, managerAgent) => {
     const t = await SetTeamManager(id, managerAgent);
+    set((s) => ({
+      teams: s.teams.map((team) => (team.id === id ? t : team)),
+    }));
+  },
+
+  // Re-pull a team from the backend. Needed after the backend persists agents
+  // (CreateTerminal/OpenTeamFromConfig → UpsertAgent) so the in-memory team's
+  // agents array stays in sync; otherwise a later updateTeam(..., team.agents)
+  // from the grid would echo a stale (empty) array and wipe the saved config.
+  refreshTeam: async (id) => {
+    const t = await GetTeam(id);
     set((s) => ({
       teams: s.teams.map((team) => (team.id === id ? t : team)),
     }));
