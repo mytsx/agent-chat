@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -606,6 +607,12 @@ func TestSeedSessionTracking_NoSnapshotWritesAfterCrash(t *testing.T) {
 // spinning forever. An unsearchable (mode 000) sessions dir makes os.Stat on a
 // child return EACCES (not IsNotExist).
 func TestSaveSession_StatErrorSurfacesNotSpin(t *testing.T) {
+	// The test relies on Unix directory permission semantics (an unsearchable 000
+	// dir making os.Stat on a child return EACCES). Windows chmod only models the
+	// read-only bit, so the EACCES path can't be reproduced there.
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on Unix directory permission semantics")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory permission bits are not enforced")
 	}
