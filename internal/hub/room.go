@@ -355,13 +355,13 @@ func (r *RoomState) ClearArchived(maxID int) {
 	if maxID <= 0 {
 		r.messages = []types.Message{}
 	} else {
-		var remaining []types.Message
-		for _, m := range r.messages {
-			if m.ID > maxID {
-				remaining = append(remaining, m)
-			}
-		}
-		r.messages = remaining
+		// messages are append-ordered by ID, so binary-search the first kept one.
+		idx := sort.Search(len(r.messages), func(i int) bool {
+			return r.messages[i].ID > maxID
+		})
+		retained := make([]types.Message, len(r.messages)-idx)
+		copy(retained, r.messages[idx:])
+		r.messages = retained
 	}
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
