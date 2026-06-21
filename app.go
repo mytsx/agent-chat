@@ -822,10 +822,12 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 	switch {
 	case data == "\x1b[I" || data == "\x1b[O":
 		// terminal focus in/out — not user typing, ignore
-	case strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n"):
-		// Write the Enter FIRST, then clear the pending flag. Clearing before the
-		// byte is serialized would briefly mark the (still-unsubmitted) line as
-		// safe, letting an injection win the write mutex and corrupt it (review C5).
+	case data == "\x03" || strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n"):
+		// Enter submits the line; Ctrl+C (\x03) aborts/clears it in shells and the
+		// supported Ink TUIs. Either way the input buffer ends up empty. Write the
+		// byte FIRST, then clear the pending flag — clearing before the byte is
+		// serialized would briefly mark the (still-unsubmitted) line as safe,
+		// letting an injection win the write mutex and corrupt it (review C5/G1).
 		err := a.ptyManager.Write(sessionID, []byte(data))
 		a.ptyManager.ClearUserInput(sessionID)
 		return err

@@ -224,6 +224,49 @@ func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	}
 }
 
+// When a flush races into pending input (outside check passed, but tryInject's
+// atomic pre-check sees pending), the batch must be re-deferred preserving
+// chronological order (old msgs first) and the ORIGINAL deferStartedAt (so
+// maxDeferral still eventually fires — review G3).
+func TestFlushPending_RaceReDefersPreservingOrderAndCap(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	calls := 0
+	// First call (flushPending's outside check) → not pending → proceed to flush.
+	// Second call (tryInject's atomic pre-check) → pending → tryInject returns false.
+	o.pendingInputFunc = func(string) bool {
+		calls++
+		return calls > 1
+	}
+	key := "/rooms/t:agent-1"
+	orig := time.Now().Add(-100 * time.Millisecond)
+
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "old1"}, {from: "old2"}}
+	o.deferStartedAt[key] = orig
+	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
+	o.mu.Unlock()
+
+	o.flushPending("/rooms/t", "agent-1", "sess-1")
+
+	o.mu.Lock()
+	msgs := o.pendingMsgs[key]
+	ds, hasDefer := o.deferStartedAt[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if len(*sent) != 0 {
+		t.Errorf("raced into pending: nothing should be injected, got %d", len(*sent))
+	}
+	if len(msgs) != 2 || msgs[0].from != "old1" || msgs[1].from != "old2" {
+		t.Errorf("re-defer must preserve order [old1, old2], got %+v", msgs)
+	}
+	if !hasDefer || !ds.Equal(orig) {
+		t.Errorf("re-defer must restore original deferStartedAt %v (so maxDeferral still fires), got %v (has=%v)", orig, ds, hasDefer)
+	}
+}
+
 // A single deferred message should read naturally ("New message from"), not the
 // awkward "1 new messages".
 func TestFlushPending_SingleMessageWording(t *testing.T) {

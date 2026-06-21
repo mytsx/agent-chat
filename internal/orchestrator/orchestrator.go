@@ -507,6 +507,9 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 		// maxDeferral exceeded — fall through to the UI fallback below.
 	}
 
+	// Capture the original deferral start before clearing it, so a re-defer (on a
+	// flush/inject race) can restore it rather than resetting the maxDeferral cap.
+	startedAt, hasStart := o.deferStartedAt[key]
 	msgs := o.pendingMsgs[key]
 	delete(o.pendingMsgs, key)
 	delete(o.pendingTimers, key)
@@ -532,11 +535,21 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 
 	log.Printf("[ORCH] Flushing %d batched notifications for agent=%s", len(msgs), agentName)
 	if !o.tryInject(sessionID, prompt) {
-		// Raced into pending input → re-defer the whole batch on a fresh timer.
+		// Raced into pending input → re-defer the whole batch.
 		o.mu.Lock()
-		o.pendingMsgs[key] = append(o.pendingMsgs[key], msgs...)
-		if _, ok := o.deferStartedAt[key]; !ok {
-			o.deferStartedAt[key] = time.Now()
+		// Prepend the older batch so chronological order is preserved if new
+		// messages were queued while we were injecting (review G3).
+		o.pendingMsgs[key] = append(msgs, o.pendingMsgs[key]...)
+		// Restore the ORIGINAL deferral start so maxDeferral still eventually
+		// fires — never reset the cap on a race (review G3).
+		if cur, ok := o.deferStartedAt[key]; !ok {
+			if hasStart {
+				o.deferStartedAt[key] = startedAt
+			} else {
+				o.deferStartedAt[key] = time.Now()
+			}
+		} else if hasStart && startedAt.Before(cur) {
+			o.deferStartedAt[key] = startedAt
 		}
 		if _, exists := o.pendingTimers[key]; !exists {
 			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {

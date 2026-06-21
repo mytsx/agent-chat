@@ -105,7 +105,10 @@ function AppContent() {
         if (data?.agentName) {
           const agentName = data.agentName;
           const prompt = data.prompt ?? "";
-          setDeferredNotices((prev) => [...prev, { id: deferredIdRef.current++, agentName, prompt }]);
+          // Increment the ref OUTSIDE the state updater: updaters must be pure, and
+          // React StrictMode double-invokes them in dev (would skip IDs) — review G2.
+          const nextId = deferredIdRef.current++;
+          setDeferredNotices((prev) => [...prev, { id: nextId, agentName, prompt }]);
         }
       });
       cleanupFn = () => {
