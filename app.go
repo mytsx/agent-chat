@@ -548,9 +548,16 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// When reopening an existing worktree directly (restart), workDir points
 		// into our worktrees dir and origWorkDir is empty. The config was already
 		// captured correctly on the initial create, so skip persistence to avoid
-		// overwriting it with the worktree path + useWorktree=false.
-		worktreesRoot := filepath.Join(a.dataDir, "worktrees") + string(filepath.Separator)
-		if origWorkDir == "" && strings.HasPrefix(cfgWorkDir, worktreesRoot) {
+		// overwriting it with the worktree path + useWorktree=false. Use filepath.Rel
+		// (not raw string prefix) for a robust, normalized subdirectory check.
+		worktreesRoot := filepath.Join(a.dataDir, "worktrees")
+		isWorktreePath := false
+		if cfgWorkDir != "" {
+			if rel, err := filepath.Rel(worktreesRoot, cfgWorkDir); err == nil && !strings.HasPrefix(rel, "..") {
+				isWorktreePath = true
+			}
+		}
+		if origWorkDir == "" && isWorktreePath {
 			log.Printf("[TEAM] CreateTerminal: agent=%s worktree dizininde yeniden açıldı, config korunuyor", agentName)
 		} else if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
 			Name:        agentName,
