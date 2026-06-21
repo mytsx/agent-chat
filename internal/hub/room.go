@@ -345,7 +345,8 @@ func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 // (handleClearRoom archives synchronously and refuses to clear on failure); by
 // only wiping up to the archived maxID, a message that races the clear (sent
 // while the archive I/O ran with the lock released) is preserved rather than
-// silently lost. maxID <= 0 wipes all messages.
+// silently lost. An empty snapshot (maxID == 0) wipes nothing: any message
+// present has ID > 0 and is kept (it raced in after the snapshot).
 func (r *RoomState) ClearArchived(maxID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
