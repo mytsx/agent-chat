@@ -26,10 +26,15 @@ export default function TabBar() {
       try {
         await setCustomPrompt(t.id, charter);
       } catch (e) {
-        // Roll back the just-created team so a charter-persist failure doesn't
-        // leave an orphan room (and a retry won't create a duplicate). Re-throw
-        // so the modal surfaces the error.
-        await deleteTeam(t.id);
+        // Best-effort rollback so a charter-persist failure doesn't leave an
+        // orphan room (and a retry won't create a duplicate). Swallow any rollback
+        // error so the ORIGINAL charter error is what the modal surfaces, not a
+        // secondary delete failure.
+        try {
+          await deleteTeam(t.id);
+        } catch {
+          // ignore — the original error below is the meaningful one
+        }
         throw e;
       }
     }

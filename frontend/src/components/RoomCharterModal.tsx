@@ -30,6 +30,13 @@ export default function RoomCharterModal({
   const canSubmit = isCreate ? name.trim().length > 0 : true;
   const isDirty = name !== initialName || charter !== initialCharter;
 
+  // Mirror of the backend maxCharterLen (internal/team/store.go). Counted in code
+  // points ([...]) to match the Go rune cap — charter.length / HTML maxLength count
+  // UTF-16 units, which diverge for non-BMP chars. The backend stays the source of
+  // truth; this is a UX affordance so the user sees impending truncation.
+  const CHARTER_MAX = 2000;
+  const charterLen = [...charter].length;
+
   // Guard accidental dismissal (overlay click / Escape / Cancel) when the form
   // has unsaved edits, so a long charter isn't lost by a stray click. confirm()
   // mirrors the app's existing use of blocking dialogs (alert in TerminalGrid).
@@ -90,14 +97,24 @@ export default function RoomCharterModal({
             value={charter}
             onChange={(e) => setCharter(e.target.value)}
             onKeyDown={(e) => {
+              // ⌘/Ctrl+Enter submits (plain Enter inserts newlines); matches
+              // BroadcastBar's multi-line textarea convention.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                handleSubmit();
+              }
               if (e.key === "Escape") requestClose();
             }}
             rows={10}
             placeholder="Bu oda neden kuruldu, hangi proje/görev konuşuluyor, agent'lardan ne bekleniyor?"
           />
+          <span className={"form-counter" + (charterLen > CHARTER_MAX ? " over" : "")}>
+            {charterLen}/{CHARTER_MAX}
+          </span>
           <span className="form-hint">
-            ℹ️ Açıklama yalnızca <strong>yeni başlatılan</strong> agent'lara
-            uygulanır; çalışan terminaller etkilenmez.
+            ℹ️ Yeni başlatılan <strong>Claude/Gemini</strong> agent'larının
+            başlangıç prompt'una eklenir; çalışan terminaller ile Copilot/shell
+            agent'ları etkilenmez. ⌘/Ctrl+Enter ile kaydedebilirsiniz.
           </span>
         </div>
 

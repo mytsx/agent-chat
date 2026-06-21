@@ -281,13 +281,20 @@ const maxCharterLen = 2000
 
 // sanitizeCharter cleans free-text room charter input before it is persisted and
 // later pasted verbatim into an agent's PTY at startup (sendStartupPrompt uses
-// bracketed paste). An embedded bracketed-paste terminator or a raw ESC could end
-// paste mode early and let the rest of the charter run as live keystrokes, so we
-// strip the bracketed-paste markers and every C0 control byte / DEL — but keep
-// newline and tab so multi-line charters survive. ValidateName is deliberately
-// NOT applied: a charter is free prose, not an identifier. Mirrors the InjectText
-// sanitization in internal/pty/manager.go. Finally the text is capped at
-// maxCharterLen runes.
+// bracketed paste). It strips:
+//   - the bracketed-paste markers (\x1b[200~ / \x1b[201~) plus every C0 control
+//     byte and DEL — a raw ESC or an embedded paste terminator could otherwise
+//     end paste mode early and let the rest of the charter run as live keystrokes;
+//   - C1 control bytes (U+0080-U+009F), the 8-bit forms of ESC-prefixed sequences
+//     (e.g. U+009B ≈ CSI) — control-char hygiene for the paste;
+//   - Unicode bidi/format controls and line/paragraph separators (LRM/RLM, the
+//     bidi embeddings/overrides/isolates, U+FEFF, U+2028/U+2029) — Trojan-Source
+//     class: they could make the charter a human reviews differ from the bytes the
+//     agent actually receives.
+//
+// Newline and tab are preserved so multi-line charters survive. ValidateName is
+// deliberately NOT applied: a charter is free prose, not an identifier. Finally
+// the text is capped at maxCharterLen runes (rune-based, UTF-8-safe).
 func sanitizeCharter(text string) string {
 	const (
 		bracketOpen  = "\x1b[200~"
@@ -302,9 +309,16 @@ func sanitizeCharter(text string) string {
 		switch r {
 		case '\n', '\t':
 			return r // preserve line breaks and tabs in multi-line charters
+		case 0x2028, 0x2029, // line / paragraph separators
+			0x200e, 0x200f, // LRM / RLM
+			0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // bidi embeddings / overrides
+			0x2066, 0x2067, 0x2068, 0x2069, // bidi isolates (LRI/RLI/FSI/PDI)
+			0xfeff: // BOM / zero-width no-break space
+			return -1
 		}
-		if r < 0x20 || r == 0x7f {
-			return -1 // drop ESC and other C0 control bytes / DEL
+		// Drop C0 controls, DEL, and C1 controls (0x80-0x9f, the 8-bit ESC forms).
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
 		}
 		return r
 	}, text)

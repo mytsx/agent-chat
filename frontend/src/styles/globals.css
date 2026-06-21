@@ -1109,6 +1109,10 @@ html, body, #root {
   align-items: center;
   justify-content: center;
   z-index: 100;
+  /* Modals can be rendered inside the tab bar, which is a -webkit-app-region:drag
+     window-drag region; descendants must opt out or clicks/typing in the modal are
+     swallowed as window drags in the Wails webview. */
+  -webkit-app-region: no-drag;
 }
 
 .modal {
@@ -1149,6 +1153,18 @@ html, body, #root {
   margin-bottom: 8px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.form-counter {
+  display: block;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+.form-counter.over {
+  color: var(--danger);
 }
 
 .form-group input,

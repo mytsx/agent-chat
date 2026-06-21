@@ -492,6 +492,63 @@ func TestSanitizeCharterCapsLengthRuneSafe(t *testing.T) {
 	}
 }
 
+// C1 control bytes (U+0080-U+009F), Unicode bidi/format controls, and the
+// line/paragraph separators all sit above the C0/DEL range the base table covers
+// and must also be stripped: they are never legitimate in charter prose, and the
+// bidi overrides in particular could make the charter a human reviews in the modal
+// differ from the bytes pasted into the agent (Trojan-Source class). Runes are
+// built from code points so the test source stays pure ASCII (a literal U+FEFF
+// would be an illegal BOM in Go source).
+func TestSanitizeCharterStripsControlAndFormatRunes(t *testing.T) {
+	strip := []struct {
+		name string
+		r    rune
+	}{
+		{"C1 CSI", 0x009b},
+		{"C1 NEL", 0x0085},
+		{"C1 low bound", 0x0080},
+		{"C1 high bound", 0x009f},
+		{"bidi RLO", 0x202e},
+		{"bidi LRO", 0x202d},
+		{"bidi isolate LRI", 0x2066},
+		{"bidi isolate PDI", 0x2069},
+		{"LRM", 0x200e},
+		{"RLM", 0x200f},
+		{"BOM/ZWNBSP", 0xfeff},
+		{"line separator", 0x2028},
+		{"paragraph separator", 0x2029},
+	}
+	for _, c := range strip {
+		in := "a" + string(c.r) + "b"
+		if got := sanitizeCharter(in); got != "ab" {
+			t.Errorf("%s (U+%04X): sanitizeCharter(%q) = %q, want %q", c.name, c.r, in, got, "ab")
+		}
+	}
+
+	// Turkish letters (Latin-1 supplement + Latin Extended-A) must survive — they
+	// are outside every stripped range.
+	const tr = "çğıöşü ÇĞİÖŞÜ"
+	if got := sanitizeCharter(tr); got != tr {
+		t.Errorf("Turkish letters altered: got %q, want %q", got, tr)
+	}
+}
+
+// Pin the strip-before-cap ordering: a bracketed-paste marker straddling the rune
+// cap boundary must be removed entirely (no stray ESC), and the result must be
+// exactly maxCharterLen runes. If the cap ran before the strip, truncation could
+// slice through the marker and leave a live ESC in the output.
+func TestSanitizeCharterStripsMarkerStraddlingCap(t *testing.T) {
+	in := strings.Repeat("a", maxCharterLen-2) + "\x1b[201~" + strings.Repeat("b", 50)
+	got := sanitizeCharter(in)
+
+	if strings.ContainsRune(got, 0x1b) {
+		t.Fatalf("result contains a stray ESC byte (strip ran after cap?): %q", got)
+	}
+	if n := len([]rune(got)); n != maxCharterLen {
+		t.Fatalf("expected %d runes after cap, got %d", maxCharterLen, n)
+	}
+}
+
 // SetCustomPrompt writes the room charter via a targeted single-field endpoint
 // (SetManager pattern) rather than the positional Update, which would reset the
 // charter on every grid-layout change. The value must round-trip through Get.
