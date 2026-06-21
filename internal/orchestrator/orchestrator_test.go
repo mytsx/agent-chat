@@ -27,24 +27,23 @@ type fakePTYManager struct {
 type sentNotification struct {
 	sessionID string
 	text      string
-	withCR    bool
 }
 
 func newTestOrchestrator() (*Orchestrator, *[]sentNotification) {
 	var sent []sentNotification
 	var mu sync.Mutex
 	o := &Orchestrator{
-		ptyManager:        nil,
-		agentSessions:     make(map[string]map[string]string),
-		lastNotified:      make(map[string]time.Time),
-		pendingTimers:     make(map[string]*time.Timer),
-		pendingMsgs:       make(map[string][]pendingNotification),
-		deferStartedAt:    make(map[string]time.Time),
-		typingQuietWindow: 50 * time.Millisecond,
-		maxDeferral:       200 * time.Millisecond,
-		injectFunc: func(sessionID, text string, withCR bool) {
+		ptyManager:     nil,
+		agentSessions:  make(map[string]map[string]string),
+		lastNotified:   make(map[string]time.Time),
+		pendingTimers:  make(map[string]*time.Timer),
+		pendingMsgs:    make(map[string][]pendingNotification),
+		deferStartedAt: make(map[string]time.Time),
+		reArmInterval:  50 * time.Millisecond,
+		maxDeferral:    200 * time.Millisecond,
+		injectFunc: func(sessionID, text string) {
 			mu.Lock()
-			sent = append(sent, sentNotification{sessionID, text, withCR})
+			sent = append(sent, sentNotification{sessionID, text})
 			mu.Unlock()
 		},
 	}

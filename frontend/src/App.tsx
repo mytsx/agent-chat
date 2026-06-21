@@ -43,9 +43,12 @@ function AppContent() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
-  // Notification that couldn't be injected into a terminal because the user kept
-  // typing past the deferral cap — surfaced here so it isn't silently lost.
-  const [deferredNotice, setDeferredNotice] = useState<{ agentName: string; prompt: string } | null>(null);
+  // Notifications that couldn't be injected into a terminal because the user kept
+  // a pending input line past the deferral cap — surfaced here so they aren't
+  // silently lost. A queue (not a single value) so concurrent deferrals from
+  // multiple sessions don't overwrite each other (review C4).
+  const [deferredNotices, setDeferredNotices] = useState<Array<{ id: number; agentName: string; prompt: string }>>([]);
+  const deferredIdRef = useRef(0);
 
   const toggleSidebar = () => {
     if (sidebarRef.current) {
@@ -100,7 +103,9 @@ function AppContent() {
       });
       EventsOn("notification:deferred", (data: { agentName?: string; prompt?: string }) => {
         if (data?.agentName) {
-          setDeferredNotice({ agentName: data.agentName, prompt: data.prompt ?? "" });
+          const agentName = data.agentName;
+          const prompt = data.prompt ?? "";
+          setDeferredNotices((prev) => [...prev, { id: deferredIdRef.current++, agentName, prompt }]);
         }
       });
       cleanupFn = () => {
@@ -137,7 +142,10 @@ function AppContent() {
   const chatDir = activeTeam?.name || "default";
 
   const dismissWorktreeNotice = useCallback(() => setWorktreeNotice(null), []);
-  const dismissDeferredNotice = useCallback(() => setDeferredNotice(null), []);
+  const dismissDeferredNotice = useCallback(
+    (id: number) => setDeferredNotices((prev) => prev.filter((n) => n.id !== id)),
+    []
+  );
 
   const handleSendPrompt = (sessionID: string, content: string) => {
     SendPromptToAgent(sessionID, content, {}).catch((e) => {
@@ -155,14 +163,14 @@ function AppContent() {
           <button type="button" onClick={dismissWorktreeNotice}>×</button>
         </div>
       )}
-      {deferredNotice && (
-        <div className="deferred-notice" title={deferredNotice.prompt}>
+      {deferredNotices.map((notice) => (
+        <div key={notice.id} className="deferred-notice" title={notice.prompt}>
           <span>
-            🔔 <strong>{deferredNotice.agentName}</strong> için yeni mesaj bildirimi siz yazarken ertelendi ve terminale otomatik iletilemedi — agent&apos;a elle haber verebilir veya <code>read_messages</code> demesini bekleyebilirsiniz.
+            🔔 <strong>{notice.agentName}</strong> için yeni mesaj bildirimi siz yazarken ertelendi ve terminale otomatik iletilemedi — agent&apos;a elle haber verebilir veya <code>read_messages</code> demesini bekleyebilirsiniz.
           </span>
-          <button type="button" onClick={dismissDeferredNotice}>×</button>
+          <button type="button" onClick={() => dismissDeferredNotice(notice.id)}>×</button>
         </div>
-      )}
+      ))}
       <TabBar />
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">

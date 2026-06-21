@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// ── Typing-deferral tests (issue #15) ──
+// ── Pending-input deferral tests (issue #15 + review) ──
 
-// While the user is typing, an out-of-cooldown notification must be queued
-// (deferred) instead of injected immediately into the PTY.
-func TestNotifyAgent_DefersWhileTyping(t *testing.T) {
+// While the user has an unsubmitted input line, an out-of-cooldown notification
+// must be queued (deferred) instead of injected.
+func TestNotifyAgent_DefersWhilePendingInput(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return true }
+	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
 
 	o.notifyAgent("/rooms/t", "agent-1", "sess-1", "agent-2", false)
@@ -27,7 +27,7 @@ func TestNotifyAgent_DefersWhileTyping(t *testing.T) {
 	o.mu.Unlock()
 
 	if len(*sent) != 0 {
-		t.Errorf("typing user: notification must not be injected immediately, got %d", len(*sent))
+		t.Errorf("pending input: notification must not be injected immediately, got %d", len(*sent))
 	}
 	if pending != 1 {
 		t.Errorf("expected 1 pending notification, got %d", pending)
@@ -40,42 +40,52 @@ func TestNotifyAgent_DefersWhileTyping(t *testing.T) {
 	}
 }
 
-// When the user is not typing, behaviour is unchanged: immediate send with CR.
-func TestNotifyAgent_ImmediateWhenNotTyping(t *testing.T) {
+// With no pending input, behaviour is unchanged: inject immediately.
+func TestNotifyAgent_ImmediateWhenNoPending(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return false }
+	o.pendingInputFunc = func(string) bool { return false }
 
 	o.notifyAgent("/rooms/t", "agent-1", "sess-1", "agent-2", false)
 
 	if len(*sent) != 1 {
-		t.Fatalf("not typing: expected immediate send, got %d", len(*sent))
+		t.Fatalf("no pending input: expected immediate inject, got %d", len(*sent))
 	}
-	if !(*sent)[0].withCR {
-		t.Error("not typing: trailing CR should be sent")
+	if !strings.Contains((*sent)[0].text, "agent-2") {
+		t.Errorf("notification should mention sender, got %q", (*sent)[0].text)
 	}
 }
 
-// Even when an injection does happen, the trailing CR must be skipped if the
-// user is typing — this is the deterministic guard against early-submit.
-func TestSendToTerminal_SkipsCRWhileTyping(t *testing.T) {
+// tryInject must refuse to write (and report false) when the user has pending
+// input — the last-line-of-defence against corrupting a half-typed line.
+func TestTryInject_SkipsWhenPending(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return true }
+	o.pendingInputFunc = func(string) bool { return true }
 
-	o.sendToTerminal("sess-1", "[agent-chat] hi")
+	if o.tryInject("sess-1", "[agent-chat] hi") {
+		t.Error("tryInject should return false when input is pending")
+	}
+	if len(*sent) != 0 {
+		t.Errorf("tryInject must not write while pending, got %d", len(*sent))
+	}
+}
 
+func TestTryInject_InjectsWhenNoPending(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.pendingInputFunc = func(string) bool { return false }
+
+	if !o.tryInject("sess-1", "[agent-chat] hi") {
+		t.Error("tryInject should return true when no pending input")
+	}
 	if len(*sent) != 1 {
-		t.Fatalf("expected 1 injection, got %d", len(*sent))
-	}
-	if (*sent)[0].withCR {
-		t.Error("typing: trailing CR must be skipped to avoid early submit")
+		t.Errorf("expected 1 injection, got %d", len(*sent))
 	}
 }
 
-// At flush time, if the user is still typing and we are within maxDeferral, the
-// single timer slot must be RE-ARMED (not a second timer) and nothing sent.
-func TestFlushPending_ReArmsWhileTyping(t *testing.T) {
+// At flush time, if the user still has pending input and we are within
+// maxDeferral, the single timer slot must be RE-ARMED (not a second timer).
+func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return true }
+	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
 
 	o.mu.Lock()
@@ -95,7 +105,7 @@ func TestFlushPending_ReArmsWhileTyping(t *testing.T) {
 	o.mu.Unlock()
 
 	if len(*sent) != 0 {
-		t.Errorf("still typing within cap: must not send, got %d", len(*sent))
+		t.Errorf("still pending within cap: must not send, got %d", len(*sent))
 	}
 	if pending != 1 {
 		t.Errorf("pending must be kept for the re-arm, got %d", pending)
@@ -105,11 +115,45 @@ func TestFlushPending_ReArmsWhileTyping(t *testing.T) {
 	}
 }
 
-// Once maxDeferral is exceeded while the user keeps typing, the notification is
-// routed to the UI fallback instead of being injected into the PTY.
+// C2: if the queue was cleared (e.g. UnregisterAgent) before flush acquires the
+// lock, flush must NOT re-arm a stale timer even if input is pending.
+func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.pendingInputFunc = func(string) bool { return true }
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	// pendingMsgs[key] intentionally empty/absent; stale timer + defer stamp present.
+	o.deferStartedAt[key] = time.Now()
+	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
+	o.mu.Unlock()
+
+	o.flushPending("/rooms/t", "agent-1", "sess-1")
+
+	o.mu.Lock()
+	_, hasTimer := o.pendingTimers[key]
+	_, hasDefer := o.deferStartedAt[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if len(*sent) != 0 {
+		t.Errorf("empty queue: nothing should be sent, got %d", len(*sent))
+	}
+	if hasTimer {
+		t.Error("empty queue: stale timer must NOT be re-armed")
+	}
+	if hasDefer {
+		t.Error("empty queue: deferStartedAt must be cleaned up")
+	}
+}
+
+// Once maxDeferral is exceeded while the user keeps a pending line, the
+// notification is routed to the UI fallback instead of the PTY.
 func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return true }
+	o.pendingInputFunc = func(string) bool { return true }
 	var uiPrompts []string
 	o.SetDeferredHandler(func(sessionID, agentName, prompt string) {
 		uiPrompts = append(uiPrompts, prompt)
@@ -150,11 +194,11 @@ func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 	}
 }
 
-// When typing stops, a deferred batch flushes normally (with CR) and the
+// When the input line clears, a deferred batch flushes normally and the
 // deferral bookkeeping is cleared.
-func TestFlushPending_SendsWhenTypingStopped(t *testing.T) {
+func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return false } // user stopped typing
+	o.pendingInputFunc = func(string) bool { return false } // input line cleared
 	key := "/rooms/t:agent-1"
 
 	o.mu.Lock()
@@ -170,13 +214,10 @@ func TestFlushPending_SendsWhenTypingStopped(t *testing.T) {
 	o.mu.Unlock()
 
 	if len(*sent) != 1 {
-		t.Fatalf("typing stopped: should flush exactly once, got %d", len(*sent))
+		t.Fatalf("input cleared: should flush exactly once, got %d", len(*sent))
 	}
 	if !strings.Contains((*sent)[0].text, "2 new messages") {
 		t.Errorf("expected batched wording, got %q", (*sent)[0].text)
-	}
-	if !(*sent)[0].withCR {
-		t.Error("not typing: CR should be sent on flush")
 	}
 	if hasDefer {
 		t.Error("deferStartedAt should be cleared after a successful flush")
@@ -187,7 +228,7 @@ func TestFlushPending_SendsWhenTypingStopped(t *testing.T) {
 // awkward "1 new messages".
 func TestFlushPending_SingleMessageWording(t *testing.T) {
 	o, sent := newTestOrchestrator()
-	o.typingFunc = func(string) bool { return false }
+	o.pendingInputFunc = func(string) bool { return false }
 	key := "/rooms/t:agent-1"
 
 	o.mu.Lock()

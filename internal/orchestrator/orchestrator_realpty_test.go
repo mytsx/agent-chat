@@ -21,11 +21,11 @@ func TestSendToTerminal_DoesNotBlockUserDuringSettle(t *testing.T) {
 	defer m.Close(id)
 
 	o := New(m)
-	o.typingFunc = func(string) bool { return false }
+	o.pendingInputFunc = func(string) bool { return false }
 
 	done := make(chan struct{})
 	go func() {
-		o.sendToTerminal(id, "[agent-chat] hi")
+		o.tryInject(id, "[agent-chat] hi")
 		close(done)
 	}()
 

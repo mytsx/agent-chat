@@ -15,47 +15,49 @@ func newSessionForTest(m *Manager, id string) *PTYSession {
 	return sess
 }
 
-func TestUserTypingRecently_AfterRegister(t *testing.T) {
+func TestHasPendingInput_AfterRegister(t *testing.T) {
 	m := NewManager(nil)
 	newSessionForTest(m, "s1")
 
 	m.RegisterUserInput("s1")
 
-	if !m.UserTypingRecently("s1", time.Second) {
-		t.Error("expected UserTypingRecently=true right after RegisterUserInput")
+	if !m.HasPendingInput("s1") {
+		t.Error("expected HasPendingInput=true right after RegisterUserInput")
 	}
 }
 
-func TestUserTypingRecently_AfterWindow(t *testing.T) {
+// A typed-but-unsubmitted line stays "pending" no matter how old it is — there
+// is no quiet window, because the user's text is still sitting in the input
+// buffer until they press Enter (issue #15 review: C3).
+func TestHasPendingInput_StaysPendingWhenOld(t *testing.T) {
 	m := NewManager(nil)
 	newSessionForTest(m, "s1")
 
 	m.RegisterUserInput("s1")
-
-	// Window is tiny; sleep past it so the input is no longer "recent".
 	time.Sleep(20 * time.Millisecond)
-	if m.UserTypingRecently("s1", 5*time.Millisecond) {
-		t.Error("expected UserTypingRecently=false after the window elapsed")
+
+	if !m.HasPendingInput("s1") {
+		t.Error("old unsubmitted input must still count as pending (no quiet window)")
 	}
 }
 
-func TestUserTypingRecently_NeverTyped(t *testing.T) {
+func TestHasPendingInput_NeverTyped(t *testing.T) {
 	m := NewManager(nil)
 	newSessionForTest(m, "s1")
 
-	if m.UserTypingRecently("s1", time.Second) {
-		t.Error("expected UserTypingRecently=false when the user never typed")
+	if m.HasPendingInput("s1") {
+		t.Error("expected HasPendingInput=false when the user never typed")
 	}
 }
 
-func TestUserTypingRecently_UnknownSession(t *testing.T) {
+func TestHasPendingInput_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
-	if m.UserTypingRecently("ghost", time.Second) {
-		t.Error("expected UserTypingRecently=false for an unknown session")
+	if m.HasPendingInput("ghost") {
+		t.Error("expected HasPendingInput=false for an unknown session")
 	}
 }
 
-func TestClearUserInput_ResetsTyping(t *testing.T) {
+func TestClearUserInput_ClearsPending(t *testing.T) {
 	m := NewManager(nil)
 	newSessionForTest(m, "s1")
 
@@ -64,8 +66,8 @@ func TestClearUserInput_ResetsTyping(t *testing.T) {
 	// injection becomes safe immediately even though typing just happened.
 	m.ClearUserInput("s1")
 
-	if m.UserTypingRecently("s1", time.Second) {
-		t.Error("expected UserTypingRecently=false after ClearUserInput")
+	if m.HasPendingInput("s1") {
+		t.Error("expected HasPendingInput=false after ClearUserInput")
 	}
 }
 

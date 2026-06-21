@@ -313,20 +313,20 @@ func (m *Manager) ClearUserInput(sessionID string) {
 	session.lastUserInputNano.Store(0)
 }
 
-// UserTypingRecently reports whether the user typed into the session within the
-// given window. Returns false for unknown sessions or when no input is pending.
-func (m *Manager) UserTypingRecently(sessionID string, window time.Duration) bool {
+// HasPendingInput reports whether the session has user-typed input that has not
+// yet been submitted (Enter). It is true from the first keystroke until
+// ClearUserInput is called (on Enter). There is deliberately NO quiet window: a
+// line the user typed and then paused on is still sitting in the input buffer,
+// so injecting into it would corrupt it (issue #15 review: C3). Returns false
+// for unknown sessions or when the buffer is empty.
+func (m *Manager) HasPendingInput(sessionID string) bool {
 	m.mu.RLock()
 	session, ok := m.sessions[sessionID]
 	m.mu.RUnlock()
 	if !ok {
 		return false
 	}
-	nano := session.lastUserInputNano.Load()
-	if nano == 0 {
-		return false
-	}
-	return time.Since(time.Unix(0, nano)) < window
+	return session.lastUserInputNano.Load() != 0
 }
 
 // Resize resizes a PTY session

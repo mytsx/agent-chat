@@ -816,14 +816,19 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 			session.AgentName, len(raw), raw, data)
 	}
 
-	// Track user typing so the orchestrator can defer notification injection and
-	// avoid splitting a half-typed line (issue #15). Focus events are not real
-	// typing; a trailing CR/LF means the line was submitted (buffer now empty).
+	// Track pending user input so the orchestrator can defer notification
+	// injection and avoid splitting a half-typed line (issue #15). Focus events
+	// are not user typing; a trailing CR/LF submits the line.
 	switch {
 	case data == "\x1b[I" || data == "\x1b[O":
 		// terminal focus in/out — not user typing, ignore
 	case strings.HasSuffix(data, "\r") || strings.HasSuffix(data, "\n"):
+		// Write the Enter FIRST, then clear the pending flag. Clearing before the
+		// byte is serialized would briefly mark the (still-unsubmitted) line as
+		// safe, letting an injection win the write mutex and corrupt it (review C5).
+		err := a.ptyManager.Write(sessionID, []byte(data))
 		a.ptyManager.ClearUserInput(sessionID)
+		return err
 	default:
 		a.ptyManager.RegisterUserInput(sessionID)
 	}

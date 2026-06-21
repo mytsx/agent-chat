@@ -130,28 +130,28 @@ type Orchestrator struct {
 	pendingTimers map[string]*time.Timer
 	pendingMsgs   map[string][]pendingNotification
 	// deferStartedAt records when a notification first started being deferred
-	// because the user was typing — used to cap the deferral at maxDeferral.
+	// because the user had pending input — used to cap the deferral at maxDeferral.
 	deferStartedAt map[string]time.Time
 
-	// typingQuietWindow: how long after the last keystroke the user is still
-	// considered "typing" (injection is deferred during this window).
-	typingQuietWindow time.Duration
+	// reArmInterval: how often a deferred notification re-checks whether the
+	// user's input line has cleared (Enter) before trying to inject again.
+	reArmInterval time.Duration
 	// maxDeferral: hard cap on how long a notification may be deferred while the
-	// user keeps typing; once exceeded, it is routed to the UI instead of the PTY.
+	// user keeps a pending line; once exceeded, it is routed to the UI instead of
+	// the PTY.
 	maxDeferral time.Duration
 
 	// onDeferredToUI is the mandatory fallback: when maxDeferral is exceeded and
-	// the user is still typing, the notification is surfaced in the UI rather
-	// than injected into the PTY (where it would corrupt the user's input).
+	// the user still has pending input, the notification is surfaced in the UI
+	// rather than injected into the PTY (where it would corrupt the user's input).
 	onDeferredToUI func(sessionID, agentName, prompt string)
 
-	// injectFunc overrides the real PTY injection for testing. withCR reports
-	// whether the trailing carriage return would be sent. If nil, the real PTY
-	// path is used.
-	injectFunc func(sessionID, text string, withCR bool)
-	// typingFunc overrides the user-typing query for testing. If nil, the real
-	// pty.Manager query is used.
-	typingFunc func(sessionID string) bool
+	// injectFunc overrides the real PTY injection for testing. If nil, the real
+	// PTY path is used.
+	injectFunc func(sessionID, text string)
+	// pendingInputFunc overrides the pending-input query for testing. If nil, the
+	// real pty.Manager query is used.
+	pendingInputFunc func(sessionID string) bool
 }
 
 // pendingNotification holds info about a message waiting in the cooldown window.
@@ -160,45 +160,48 @@ type pendingNotification struct {
 }
 
 const (
-	// defaultTypingQuietWindow: keystrokes within this window mean the user is
-	// still typing, so injection is deferred.
-	defaultTypingQuietWindow = 1500 * time.Millisecond
+	// defaultReArmInterval: how often a deferred notification re-checks whether
+	// the user's input line has cleared (Enter) before trying to inject again.
+	defaultReArmInterval = 1500 * time.Millisecond
 	// defaultMaxDeferral caps how long a notification is held while the user
-	// keeps typing before falling back to the UI. Kept well under the 300s stale
-	// timeout so notifications never silently rot.
+	// keeps a pending line before falling back to the UI. Kept well under the
+	// 300s stale timeout so notifications never silently rot.
 	defaultMaxDeferral = 12 * time.Second
 )
 
 // New creates a new orchestrator
 func New(ptyManager *ptymgr.Manager) *Orchestrator {
 	return &Orchestrator{
-		ptyManager:        ptyManager,
-		agentSessions:     make(map[string]map[string]string),
-		lastNotified:      make(map[string]time.Time),
-		pendingTimers:     make(map[string]*time.Timer),
-		pendingMsgs:       make(map[string][]pendingNotification),
-		deferStartedAt:    make(map[string]time.Time),
-		typingQuietWindow: defaultTypingQuietWindow,
-		maxDeferral:       defaultMaxDeferral,
+		ptyManager:     ptyManager,
+		agentSessions:  make(map[string]map[string]string),
+		lastNotified:   make(map[string]time.Time),
+		pendingTimers:  make(map[string]*time.Timer),
+		pendingMsgs:    make(map[string][]pendingNotification),
+		deferStartedAt: make(map[string]time.Time),
+		reArmInterval:  defaultReArmInterval,
+		maxDeferral:    defaultMaxDeferral,
 	}
 }
 
 // SetDeferredHandler installs the UI fallback invoked when a notification cannot
-// be safely injected into the PTY (maxDeferral exceeded while the user types).
+// be safely injected into the PTY (maxDeferral exceeded while the user has a
+// pending input line).
 func (o *Orchestrator) SetDeferredHandler(fn func(sessionID, agentName, prompt string)) {
 	o.onDeferredToUI = fn
 }
 
-// userTyping reports whether the user is currently typing into the session.
+// hasPendingInput reports whether the user has an unsubmitted input line in the
+// session (anything typed since the last Enter). Injecting into such a line
+// would corrupt it, so notifications are deferred while it is true.
 // IMPORTANT: this queries pty.Manager (which locks its own mutex); callers must
 // invoke it OUTSIDE o.mu to preserve lock ordering (never hold o.mu while
 // locking pty.Manager.mu).
-func (o *Orchestrator) userTyping(sessionID string) bool {
-	if o.typingFunc != nil {
-		return o.typingFunc(sessionID)
+func (o *Orchestrator) hasPendingInput(sessionID string) bool {
+	if o.pendingInputFunc != nil {
+		return o.pendingInputFunc(sessionID)
 	}
 	if o.ptyManager != nil {
-		return o.ptyManager.UserTypingRecently(sessionID, o.typingQuietWindow)
+		return o.ptyManager.HasPendingInput(sessionID)
 	}
 	return false
 }
@@ -285,36 +288,75 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	return AnalysisResult{Action: "notify", Reason: "Informational", IsQuestion: false}
 }
 
-// sendToTerminal writes a short notification to a PTY.
-// No user content is included — the agent reads the full message via MCP.
+// buildPrompt builds the single-message notification text.
+func buildPrompt(isBroadcast bool, fromAgent, agentName string) string {
+	if isBroadcast {
+		return fmt.Sprintf("[agent-chat] Broadcast from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+	}
+	return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+}
+
+// buildBatchedPrompt builds the notification text for a batch of pending msgs,
+// deduplicating senders (first-seen order) and reading naturally for one msg.
+func buildBatchedPrompt(pending []pendingNotification, agentName string) string {
+	seen := make(map[string]struct{}, len(pending))
+	senders := make([]string, 0, len(pending))
+	for _, p := range pending {
+		if _, ok := seen[p.from]; ok {
+			continue
+		}
+		seen[p.from] = struct{}{}
+		senders = append(senders, p.from)
+	}
+	if len(pending) == 1 {
+		return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.",
+			senders[0], agentName)
+	}
+	return fmt.Sprintf("[agent-chat] %d new messages from %s. read_messages(\"%s\") to read and respond.",
+		len(pending), strings.Join(senders, ", "), agentName)
+}
+
+// tryInject performs an atomic, lag-free notification injection into a PTY. It
+// returns false WITHOUT writing anything if the user has pending input (the
+// caller must keep deferring) — this is the last-line-of-defence check against
+// corrupting a half-typed line.
 //
-// The whole injection runs under the session's write mutex (WriteAtomic) so a
-// user keystroke cannot land between the notification's bytes. The trailing CR
-// is conditional: if the user is typing it is skipped, so a half-typed line is
-// never submitted early.
-func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
+// For Claude/Gemini the pending-input check and the bracketed-paste write run
+// together under the per-session write mutex (a short critical section, no
+// sleep), so a racing keystroke is either observed by the check (→ we skip) or
+// blocked until the paste lands (→ it appends after our text, never splitting
+// it). The settle then runs OUTSIDE the lock (no input lag), and the trailing CR
+// is always sent: the buffer was empty at paste time, so submitting is safe and
+// pokes the agent. For copilot the whole char-by-char sequence must stay atomic.
+func (o *Orchestrator) tryInject(sessionID, text string) bool {
 	if o.injectFunc != nil {
-		// Test seam — withCR reflects the call-time decision.
-		o.injectFunc(sessionID, text, !o.userTyping(sessionID))
-		return
+		if o.hasPendingInput(sessionID) {
+			return false
+		}
+		o.injectFunc(sessionID, text)
+		return true
 	}
 
 	session := o.ptyManager.GetSession(sessionID)
 	if session == nil {
-		log.Printf("[ORCH] sendToTerminal: session not found id=%s", ptymgr.ShortID(sessionID))
-		return
+		log.Printf("[ORCH] tryInject: session not found id=%s", ptymgr.ShortID(sessionID))
+		return true // nothing to defer to
 	}
 	agentName := session.AgentName
-
-	log.Printf("[ORCH] sendToTerminal: cli=%s agent=%s textLen=%d", session.CLIType, agentName, len(text))
+	log.Printf("[ORCH] tryInject: cli=%s agent=%s textLen=%d", session.CLIType, agentName, len(text))
 
 	if session.CLIType == "copilot" {
 		// Copilot's Ink/React TUI needs character-by-character input; the whole
 		// sequence (focus-in + chars + CR) must be one atomic block, so a user
-		// keystroke can't interleave and garble the command. The inter-char
-		// sleeps therefore run under the write mutex. Injection only fires when
-		// the user is idle, so this rarely blocks anyone.
+		// keystroke can't interleave and garble the command. The inter-char sleeps
+		// therefore run under the write mutex (injection only fires when the user
+		// has no pending line, so this rarely blocks anyone).
+		injected := false
 		err := o.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
+			if o.hasPendingInput(sessionID) {
+				return nil
+			}
+			injected = true
 			if err := write([]byte("\x1b[I")); err != nil {
 				return err
 			}
@@ -326,179 +368,184 @@ func (o *Orchestrator) sendToTerminal(sessionID string, text string) {
 				time.Sleep(5 * time.Millisecond)
 			}
 			time.Sleep(100 * time.Millisecond)
-			if o.userTyping(sessionID) {
-				log.Printf("[ORCH] sendToTerminal: skipping CR, user resumed typing agent=%s", agentName)
-				return nil
-			}
 			return write([]byte("\r"))
 		})
 		if err != nil {
-			log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
+			log.Printf("[ORCH] tryInject write error agent=%s: %v", agentName, err)
 		}
-		return
+		return injected
 	}
 
-	// Claude/Gemini: the bracketed-paste block is a single write, so the write
-	// mutex is held only briefly. The 200ms settle (giving the CLI's TUI time to
-	// register the paste before the CR submits it) runs OUTSIDE the lock, so a
-	// user keystroke is never blocked/lagged. The trailing CR is then written
-	// under the lock together with a final typing re-check, so a keystroke can't
-	// be submitted between the check and the CR.
+	// Claude/Gemini: short atomic {pending-check + bracketed paste}; settle
+	// outside the lock; then the trailing CR.
 	const (
 		bracketOpen  = "\x1b[200~"
 		bracketClose = "\x1b[201~"
 	)
-	if err := o.ptyManager.Write(sessionID, []byte(bracketOpen+text+bracketClose)); err != nil {
-		log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
-		return
-	}
-	time.Sleep(200 * time.Millisecond)
+	injected := false
 	err := o.ptyManager.WriteAtomic(sessionID, func(write func([]byte) error) error {
-		if o.userTyping(sessionID) {
-			log.Printf("[ORCH] sendToTerminal: skipping CR, user resumed typing agent=%s", agentName)
+		if o.hasPendingInput(sessionID) {
 			return nil
 		}
-		return write([]byte("\r"))
+		injected = true
+		return write([]byte(bracketOpen + text + bracketClose))
 	})
 	if err != nil {
-		log.Printf("[ORCH] sendToTerminal write error agent=%s: %v", agentName, err)
+		log.Printf("[ORCH] tryInject write error agent=%s: %v", agentName, err)
+	}
+	if !injected {
+		return false
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := o.ptyManager.Write(sessionID, []byte("\r")); err != nil {
+		log.Printf("[ORCH] tryInject CR write error agent=%s: %v", agentName, err)
+	}
+	return true
+}
+
+// queueLocked appends a pending notification and arms the flush timer if one is
+// not already running. Caller MUST hold o.mu. When pending is true the
+// deferStartedAt stamp is set so maxDeferral can be enforced.
+func (o *Orchestrator) queueLocked(key, chatDir, agentName, sessionID, fromAgent string, pending, withinCooldown bool, elapsed time.Duration) {
+	o.pendingMsgs[key] = append(o.pendingMsgs[key], pendingNotification{from: fromAgent})
+	if pending {
+		if _, ok := o.deferStartedAt[key]; !ok {
+			o.deferStartedAt[key] = time.Now()
+		}
+	}
+	if _, exists := o.pendingTimers[key]; !exists {
+		delay := o.reArmInterval
+		if withinCooldown {
+			if rem := NotifyCooldown - elapsed; rem > delay {
+				delay = rem
+			}
+		}
+		o.pendingTimers[key] = time.AfterFunc(delay, func() {
+			o.flushPending(chatDir, agentName, sessionID)
+		})
 	}
 }
 
-// notifyAgent sends a notification to an agent with cooldown/batching.
-// If the agent was recently notified, subsequent messages are batched.
+// notifyAgent sends a notification to an agent. It batches within the cooldown
+// window and defers while the user has a pending input line; otherwise it
+// injects immediately.
 func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent string, isBroadcast bool) {
 	key := chatDir + ":" + agentName
 
-	// Query typing OUTSIDE o.mu (lock ordering: never hold o.mu while locking
-	// pty.Manager.mu).
-	typing := o.userTyping(sessionID)
+	// Query pending-input OUTSIDE o.mu (lock ordering: never hold o.mu while
+	// locking pty.Manager.mu).
+	pending := o.hasPendingInput(sessionID)
 
 	o.mu.Lock()
 	elapsed := time.Since(o.lastNotified[key])
 	withinCooldown := elapsed < NotifyCooldown
-
-	if withinCooldown || typing {
-		// Queue this notification. The same pending mechanism serves both the
-		// cooldown batch and the typing-defer; a single timer drives the flush.
-		o.pendingMsgs[key] = append(o.pendingMsgs[key], pendingNotification{from: fromAgent})
-		if typing {
-			if _, ok := o.deferStartedAt[key]; !ok {
-				o.deferStartedAt[key] = time.Now()
-			}
-		}
-		if _, exists := o.pendingTimers[key]; !exists {
-			delay := o.typingQuietWindow
-			if withinCooldown {
-				delay = NotifyCooldown - elapsed
-			}
-			o.pendingTimers[key] = time.AfterFunc(delay, func() {
-				o.flushPending(chatDir, agentName, sessionID)
-			})
-		}
+	if withinCooldown || pending {
+		o.queueLocked(key, chatDir, agentName, sessionID, fromAgent, pending, withinCooldown, elapsed)
 		pendingCount := len(o.pendingMsgs[key])
 		o.mu.Unlock()
-		log.Printf("[ORCH] Notification queued for agent=%s (typing=%v cooldown=%v), pending=%d",
-			agentName, typing, withinCooldown, pendingCount)
+		log.Printf("[ORCH] Notification queued for agent=%s (pending=%v cooldown=%v), count=%d",
+			agentName, pending, withinCooldown, pendingCount)
+		return
+	}
+	o.mu.Unlock()
+
+	// Outside cooldown and no pending input — inject immediately.
+	if o.tryInject(sessionID, buildPrompt(isBroadcast, fromAgent, agentName)) {
+		o.mu.Lock()
+		o.lastNotified[key] = time.Now()
+		o.mu.Unlock()
+		log.Printf("[ORCH] Notified agent=%s session=%s", agentName, ptymgr.ShortID(sessionID))
 		return
 	}
 
-	// Outside cooldown and not typing — send immediately
-	o.lastNotified[key] = time.Now()
+	// Raced: pending input appeared between the check and the injection → defer.
+	o.mu.Lock()
+	o.queueLocked(key, chatDir, agentName, sessionID, fromAgent, true, false, 0)
 	o.mu.Unlock()
-
-	var prompt string
-	if isBroadcast {
-		prompt = fmt.Sprintf("[agent-chat] Broadcast from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
-	} else {
-		prompt = fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
-	}
-	log.Printf("[ORCH] Notifying agent=%s session=%s", agentName, ptymgr.ShortID(sessionID))
-	o.sendToTerminal(sessionID, prompt)
+	log.Printf("[ORCH] Immediate inject raced into pending input, deferred agent=%s", agentName)
 }
 
-// flushPending sends a batched notification for accumulated messages. If the
-// user is still typing it RE-ARMs the existing timer (up to maxDeferral); once
-// the cap is exceeded it routes the notification to the UI fallback instead of
-// injecting into the PTY.
+// flushPending injects (or re-defers) the accumulated notifications for a key.
+// If the user still has a pending line it RE-ARMs the single timer (up to
+// maxDeferral); once the cap is exceeded it routes to the UI fallback instead of
+// corrupting the PTY input.
 func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 	key := chatDir + ":" + agentName
 
-	// Query typing OUTSIDE o.mu (lock ordering).
-	typing := o.userTyping(sessionID)
+	// Query pending-input OUTSIDE o.mu (lock ordering).
+	pending := o.hasPendingInput(sessionID)
 
 	o.mu.Lock()
-	if typing {
+	if len(o.pendingMsgs[key]) == 0 {
+		// Nothing to flush — e.g. UnregisterAgent cleared the queue between the
+		// check above and acquiring the lock. Don't re-arm a stale timer (C2).
+		delete(o.pendingTimers, key)
+		delete(o.deferStartedAt, key)
+		o.mu.Unlock()
+		return
+	}
+
+	if pending {
 		startedAt, hasStart := o.deferStartedAt[key]
 		if !hasStart {
-			// First time we observe typing for this batch (e.g. a cooldown batch
-			// whose flush coincides with the user starting to type).
 			startedAt = time.Now()
 			o.deferStartedAt[key] = startedAt
 		}
 		if time.Since(startedAt) < o.maxDeferral {
 			// Within the cap — RE-ARM the SAME timer slot (no second timer), keep
-			// the queued messages, and try again after another quiet window.
-			if tm, ok := o.pendingTimers[key]; ok {
+			// the queued messages, and try again after another interval.
+			if tm := o.pendingTimers[key]; tm != nil {
 				tm.Stop()
 			}
-			o.pendingTimers[key] = time.AfterFunc(o.typingQuietWindow, func() {
+			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
 				o.flushPending(chatDir, agentName, sessionID)
 			})
 			o.mu.Unlock()
-			log.Printf("[ORCH] Notification deferred (user typing) agent=%s", agentName)
+			log.Printf("[ORCH] Notification deferred (pending input) agent=%s", agentName)
 			return
 		}
-		// maxDeferral exceeded — fall through to the fallback below.
+		// maxDeferral exceeded — fall through to the UI fallback below.
 	}
 
-	pending := o.pendingMsgs[key]
+	msgs := o.pendingMsgs[key]
 	delete(o.pendingMsgs, key)
 	delete(o.pendingTimers, key)
 	delete(o.deferStartedAt, key)
 	o.lastNotified[key] = time.Now()
 	o.mu.Unlock()
 
-	if len(pending) == 0 {
-		return
-	}
+	prompt := buildBatchedPrompt(msgs, agentName)
 
-	// Collect unique senders (preserving first-seen order).
-	seen := make(map[string]struct{}, len(pending))
-	senderList := make([]string, 0, len(pending))
-	for _, p := range pending {
-		if _, ok := seen[p.from]; ok {
-			continue
-		}
-		seen[p.from] = struct{}{}
-		senderList = append(senderList, p.from)
-	}
-
-	var prompt string
-	if len(pending) == 1 {
-		prompt = fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.",
-			senderList[0], agentName)
-	} else {
-		prompt = fmt.Sprintf("[agent-chat] %d new messages from %s. read_messages(\"%s\") to read and respond.",
-			len(pending), strings.Join(senderList, ", "), agentName)
-	}
-
-	if typing {
-		// maxDeferral exceeded but the user is still typing: injecting now would
-		// corrupt their input line. Route to the UI instead (mandatory fallback).
+	if pending {
+		// maxDeferral exceeded but the user still has a pending line: injecting
+		// would corrupt it. Route to the UI instead (mandatory fallback).
 		if o.onDeferredToUI != nil {
 			log.Printf("[ORCH] maxDeferral exceeded, routing notification to UI agent=%s", agentName)
 			o.onDeferredToUI(sessionID, agentName, prompt)
 		} else {
 			// No handler wired (e.g. headless): don't fail silently. The message
-			// itself is still in the hub — the agent can read_messages later.
+			// is still in the hub — the agent can read_messages later.
 			log.Printf("[ORCH] WARN: maxDeferral exceeded but no UI handler set; auto-poke dropped for agent=%s", agentName)
 		}
 		return
 	}
 
-	log.Printf("[ORCH] Flushing %d batched notifications for agent=%s", len(pending), agentName)
-	o.sendToTerminal(sessionID, prompt)
+	log.Printf("[ORCH] Flushing %d batched notifications for agent=%s", len(msgs), agentName)
+	if !o.tryInject(sessionID, prompt) {
+		// Raced into pending input → re-defer the whole batch on a fresh timer.
+		o.mu.Lock()
+		o.pendingMsgs[key] = append(o.pendingMsgs[key], msgs...)
+		if _, ok := o.deferStartedAt[key]; !ok {
+			o.deferStartedAt[key] = time.Now()
+		}
+		if _, exists := o.pendingTimers[key]; !exists {
+			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
+				o.flushPending(chatDir, agentName, sessionID)
+			})
+		}
+		o.mu.Unlock()
+		log.Printf("[ORCH] Flush raced into pending input, re-deferred agent=%s", agentName)
+	}
 }
 
 // ProcessMessage processes a single message and notifies relevant agents
