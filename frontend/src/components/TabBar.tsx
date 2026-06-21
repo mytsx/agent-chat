@@ -108,10 +108,11 @@ export default function TabBar() {
             <button
               className="tab-save"
               title="Session'u kaydet (odanın değişmez anlık görüntüsü)"
+              aria-label="Session'u kaydet"
               onClick={(e) => handleSaveSession(t.id, e)}
               disabled={savingTeamID === t.id}
             >
-              💾
+              <span aria-hidden="true">💾</span>
             </button>
           )}
           {t.id === activeTeamID && (

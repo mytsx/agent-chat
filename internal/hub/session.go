@@ -123,11 +123,11 @@ func (h *Hub) saveSession(room string) (path string, count int, skipped bool, er
 	}
 	tmpPath := finalPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return "", 0, false, fmt.Errorf("write session temp %q: %w", room, err)
+		return "", 0, false, fmt.Errorf("write session temp %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
-		return "", 0, false, fmt.Errorf("rename session %q: %w", room, err)
+		return "", 0, false, fmt.Errorf("rename session %s -> %s: %w", tmpPath, finalPath, err)
 	}
 	h.sessionLastID[room] = maxID
 	return finalPath, len(snapshot.Messages), false, nil

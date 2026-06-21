@@ -351,7 +351,11 @@ func (c *HubClient) SaveSession(room string) (count int, saved bool, err error) 
 		Count int  `json:"count"`
 	}
 	if len(resp.Data) > 0 {
-		_ = json.Unmarshal(resp.Data, &body)
+		// Surface a decode failure rather than silently reporting {saved:false,
+		// count:0}, which would mask a protocol drift as a benign "no new content".
+		if err := json.Unmarshal(resp.Data, &body); err != nil {
+			return 0, false, fmt.Errorf("decode save_session response: %w", err)
+		}
 	}
 	return body.Count, body.Saved, nil
 }

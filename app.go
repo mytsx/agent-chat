@@ -316,11 +316,14 @@ func (a *App) shutdown(ctx context.Context) {
 		go func() {
 			defer close(saveDone)
 			for _, t := range a.teamStore.List() {
-				if t.Name == "" {
-					continue
-				}
+				// An empty team name means the default room (the hub's resolveRoom
+				// maps "" → default), so it must NOT be skipped here.
 				if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
-					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", t.Name, err)
+					room := t.Name
+					if room == "" {
+						room = "default"
+					}
+					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", room, err)
 				}
 			}
 		}()
@@ -1205,12 +1208,11 @@ func (a *App) SaveSession(teamID string) (SaveSessionResult, error) {
 	if err != nil {
 		return SaveSessionResult{}, err
 	}
-	if t.Name == "" {
-		return SaveSessionResult{}, fmt.Errorf("oda adı boş")
-	}
 	if a.hubClient == nil {
 		return SaveSessionResult{}, fmt.Errorf("hub bağlantısı yok")
 	}
+	// An empty team name means the default room (the hub's resolveRoom maps "" →
+	// default), so it is valid here — not an error.
 	count, saved, err := a.hubClient.SaveSession(t.Name)
 	if err != nil {
 		return SaveSessionResult{}, err

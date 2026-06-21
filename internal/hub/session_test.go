@@ -322,6 +322,48 @@ func TestHandleSaveSession_DesktopWritesSnapshot(t *testing.T) {
 	}
 }
 
+// TestHandleSaveSession_EmptyRoomResolvesToDefault verifies an empty room name
+// resolves to the default room (ValidateName allows empty; the hub maps "" →
+// default), so saving the default room is not skipped or rejected.
+func TestHandleSaveSession_EmptyRoomResolvesToDefault(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir) // default room is "default"
+	h.desktopAuthToken = "secret"
+
+	room := h.getOrCreateRoom("default")
+	if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(desktop, types.Request{
+		ID:   "id",
+		Type: "identify",
+		Data: mustRawJSON(t, map[string]any{"client_type": "desktop", "auth_token": "secret"}),
+	})
+	if r := readResponse(t, desktop, "identify"); !r.Success {
+		t.Fatalf("desktop identify should succeed: %s", r.Error)
+	}
+
+	h.handleRequest(desktop, types.Request{ID: "1", Type: "save_session", Room: ""}) // empty → default
+	resp := readResponse(t, desktop, "save_session")
+	if !resp.Success {
+		t.Fatalf("save_session with empty room should succeed: %s", resp.Error)
+	}
+	var body struct {
+		Saved bool `json:"saved"`
+	}
+	if err := json.Unmarshal(resp.Data, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Saved {
+		t.Fatal("empty room must resolve to the default room and save, not skip")
+	}
+	if files := readSessionFiles(t, dir, "default"); len(files) != 1 {
+		t.Fatalf("empty-room save wrote %d files under default, want 1", len(files))
+	}
+}
+
 // TestHandleSaveSession_UnknownRoomNoPhantom verifies save_session on a
 // never-created room succeeds with saved=false, writes nothing, and does not
 // materialize a phantom room.
@@ -558,8 +600,9 @@ func TestSaveSession_StatErrorSurfacesNotSpin(t *testing.T) {
 	}
 }
 
-// readSessionFiles lists a room's session snapshot files (epoch.json), sorted by a room's session snapshot files (epoch.json), sorted by
-// name (epoch order), and returns their full paths.
+// readSessionFiles lists a room's session snapshot files (epoch.json) and returns
+// their full paths. os.ReadDir returns entries sorted by name, which for the
+// fixed-width epoch filenames is chronological order.
 func readSessionFiles(t *testing.T, dataDir, room string) []string {
 	t.Helper()
 	dir := filepath.Join(dataDir, "hub-state", "sessions", room)
