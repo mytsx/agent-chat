@@ -75,17 +75,16 @@ func (r *RoomState) nextID() int {
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	r.cleanupStaleLocked()
 
 	if _, exists := r.agents[agentName]; exists {
-		r.mu.Unlock()
 		return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", agentName)
 	}
 
 	if strings.EqualFold(strings.TrimSpace(role), "manager") {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
-			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
 		r.managerAgent = agentName
@@ -111,16 +110,13 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	dropped := r.appendMessageLocked(sysMsg)
+	// Append without truncating: a join (especially a manager's own join) must
+	// not drop history out from under the joiner's first read_all_messages. Only
+	// SendMessage truncates, which bounds any room with conversation activity.
+	r.messages = append(r.messages, sysMsg)
 	r.dirty = true
 
 	agentsCopy := r.copyAgentsLocked()
-	fn := r.archiveFn
-	r.mu.Unlock()
-
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
 	return sysMsg, agentsCopy, nil
 }
 
@@ -167,9 +163,13 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 // the retained tail — returning the dropped (oldest) messages as a cheap copy so
 // the caller can archive them AFTER releasing the lock. The retained tail is
 // moved into a fresh array so the old backing array (holding the dropped
-// messages) becomes garbage immediately. Every append path (send, join, leave)
-// goes through here so the room is uniformly bounded, which keeps the manager's
-// bounded "read all" instruction able to cover the full retained history.
+// messages) becomes garbage immediately.
+//
+// Only SendMessage uses this. Join/Leave append their system messages WITHOUT
+// truncating, so a joining manager's own message can't drop history before its
+// first read. A room with conversation activity stays bounded here; a room
+// driven purely by join/leave churn (no sends) can grow past the cap — a
+// pathological case whose real fix is an archive read path (deferred phase).
 //
 // Durability note: truncation archiving is asynchronous (the design's hot-path
 // requirement), so a crash after the periodic snapshot persists the truncated
@@ -264,9 +264,9 @@ func (r *RoomState) ListAgents(agentName string) map[string]types.Agent {
 // Leave removes an agent from the room, returning a system message.
 func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if _, ok := r.agents[agentName]; !ok {
-		r.mu.Unlock()
 		return types.Message{}, false
 	}
 
@@ -284,14 +284,11 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	dropped := r.appendMessageLocked(sysMsg)
+	// Append without truncating (see Join): leave system messages must not drop
+	// conversation history. SendMessage is the only truncation path.
+	r.messages = append(r.messages, sysMsg)
 	r.dirty = true
-	fn := r.archiveFn
-	r.mu.Unlock()
 
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
 	return sysMsg, true
 }
 
@@ -352,17 +349,18 @@ func (r *RoomState) ResetManagerLockIfDifferent(managerAgent string) {
 func (r *RoomState) ClearArchived(maxID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if maxID <= 0 {
-		r.messages = []types.Message{}
-	} else {
-		// messages are append-ordered by ID, so binary-search the first kept one.
-		idx := sort.Search(len(r.messages), func(i int) bool {
-			return r.messages[i].ID > maxID
-		})
-		retained := make([]types.Message, len(r.messages)-idx)
-		copy(retained, r.messages[idx:])
-		r.messages = retained
-	}
+	// Keep only messages newer than the archived snapshot. messages are
+	// append-ordered by ID, so binary-search the first kept one. This handles an
+	// empty snapshot (maxID == 0) correctly: a message that raced in afterwards
+	// has ID > 0 and is kept rather than wiped — no special "wipe all" branch,
+	// which would have dropped exactly that racing message.
+	idx := sort.Search(len(r.messages), func(i int) bool {
+		return r.messages[i].ID > maxID
+	})
+	retained := make([]types.Message, len(r.messages)-idx)
+	copy(retained, r.messages[idx:])
+	r.messages = retained
+
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
 	r.managerLastSeen = 0
