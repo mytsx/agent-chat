@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"desktop/internal/types"
 	"desktop/internal/validation"
@@ -164,7 +165,14 @@ func (h *Hub) appendArchive(room string, msgs []types.Message) error {
 		return nil
 	}
 
+	// Defense-in-depth beyond ValidateName: confirm the room (a user-influenced
+	// path segment) cannot escape the archive dir before opening the file. The
+	// cleaned-prefix containment check mirrors sessionsDir and makes the path
+	// provably safe to static path-injection analysis.
 	path := filepath.Join(dir, room+".jsonl")
+	if !strings.HasPrefix(path, dir+string(os.PathSeparator)) {
+		return fmt.Errorf("archive room %q escapes archive dir", room)
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("open archive %s: %w", room, err)
