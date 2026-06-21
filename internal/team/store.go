@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"desktop/internal/sanitize"
 	"desktop/internal/validation"
 
 	"github.com/google/uuid"
@@ -285,12 +286,11 @@ const maxCharterLen = 2000
 //   - the bracketed-paste markers (\x1b[200~ / \x1b[201~) plus every C0 control
 //     byte and DEL — a raw ESC or an embedded paste terminator could otherwise
 //     end paste mode early and let the rest of the charter run as live keystrokes;
-//   - C1 control bytes (U+0080-U+009F), the 8-bit forms of ESC-prefixed sequences
-//     (e.g. U+009B ≈ CSI) — control-char hygiene for the paste;
-//   - Unicode bidi/format controls and line/paragraph separators (LRM/RLM, the
-//     bidi embeddings/overrides/isolates, U+FEFF, U+2028/U+2029) — Trojan-Source
-//     class: they could make the charter a human reviews differ from the bytes the
-//     agent actually receives.
+//   - C1 control bytes and the invisible Unicode format set (bidi controls,
+//     zero-width chars, BOM, Tags) plus line/paragraph separators — Trojan-Source
+//     class. Classification is shared with the broadcast injection path via the
+//     sanitize package so the two cannot drift (see sanitize.IsControl /
+//     IsInvisibleFormat).
 //
 // Newline and tab are preserved so multi-line charters survive. ValidateName is
 // deliberately NOT applied: a charter is free prose, not an identifier. Finally
@@ -309,15 +309,8 @@ func sanitizeCharter(text string) string {
 		switch r {
 		case '\n', '\t':
 			return r // preserve line breaks and tabs in multi-line charters
-		case 0x2028, 0x2029, // line / paragraph separators
-			0x200e, 0x200f, // LRM / RLM
-			0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // bidi embeddings / overrides
-			0x2066, 0x2067, 0x2068, 0x2069, // bidi isolates (LRI/RLI/FSI/PDI)
-			0xfeff: // BOM / zero-width no-break space
-			return -1
 		}
-		// Drop C0 controls, DEL, and C1 controls (0x80-0x9f, the 8-bit ESC forms).
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
 			return -1
 		}
 		return r

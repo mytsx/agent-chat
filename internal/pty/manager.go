@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"desktop/internal/sanitize"
+
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
@@ -355,16 +357,26 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// injection path. Sent raw, control characters would act as live keys —
 		// a newline submits the line (splitting a multiline broadcast even with
 		// submit=false), Tab triggers autocomplete, ESC starts an escape sequence.
-		// So every C0 control / DEL is flattened to a space, keeping the injected
-		// text literal (review: Codex P2 + completeness sweep). \r\n collapses to a
+		// So every C0/C1 control / DEL is flattened to a space, keeping the injected
+		// text literal (review: Codex P2 + completeness sweep). Invisible bidi/format
+		// controls are dropped outright (Trojan-Source hygiene). \r\n collapses to a
 		// single space first so a CRLF doesn't become two.
 		flat := strings.ReplaceAll(text, "\r\n", " ")
 		flat = strings.Map(func(r rune) rune {
-			if r < 0x20 || r == 0x7f {
+			if sanitize.IsInvisibleFormat(r) {
+				return -1
+			}
+			if sanitize.IsControl(r) {
 				return ' '
 			}
 			return r
 		}, flat)
+		// Nothing left after sanitization (e.g. an all-invisible payload): no-op so
+		// we never write a focus-in or leave a sticky pending flag for content that
+		// was never visible.
+		if flat == "" {
+			return nil
+		}
 		if err := m.writeLocked(session, []byte("\x1b[I")); err != nil {
 			return err
 		}
@@ -393,6 +405,25 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		)
 		safe := strings.ReplaceAll(text, bracketOpen, "")
 		safe = strings.ReplaceAll(safe, bracketClose, "")
+		// Strip control/format runes that survive the marker removal: C0/C1/DEL (a
+		// stray ESC could still start an escape sequence inside the paste) and the
+		// invisible Unicode format set (Trojan-Source). \n and \t are preserved —
+		// paste mode delivers multiline content literally.
+		safe = strings.Map(func(r rune) rune {
+			switch r {
+			case '\n', '\t':
+				return r
+			}
+			if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
+				return -1
+			}
+			return r
+		}, safe)
+		// Nothing left after sanitization: no-op rather than writing an empty paste
+		// (and, for submit=true, a blank Enter) or leaving a sticky pending flag.
+		if safe == "" {
+			return nil
+		}
 		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
 			return err
 		}
