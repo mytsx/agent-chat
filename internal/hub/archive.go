@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -42,7 +43,7 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	h.archiveLifecycleMu.Lock()
 	if h.archiveDraining {
 		h.archiveLifecycleMu.Unlock()
-		h.appendArchive(room, msgs)
+		h.archiveBestEffort(room, msgs)
 		return
 	}
 	h.archiveProducers.Add(1)
@@ -55,7 +56,7 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	select {
 	case h.archiveCh <- archiveJob{room: room, msgs: msgs}:
 	default:
-		h.appendArchive(room, msgs)
+		h.archiveBestEffort(room, msgs)
 	}
 }
 
@@ -65,7 +66,7 @@ func (h *Hub) drainArchiveBacklog() {
 	for {
 		select {
 		case job := <-h.archiveCh:
-			h.appendArchive(job.room, job.msgs)
+			h.archiveBestEffort(job.room, job.msgs)
 		default:
 			return
 		}
@@ -80,12 +81,12 @@ func (h *Hub) runArchiveWriter() {
 	for {
 		select {
 		case job := <-h.archiveCh:
-			h.appendArchive(job.room, job.msgs)
+			h.archiveBestEffort(job.room, job.msgs)
 		case <-h.done:
 			for {
 				select {
 				case job := <-h.archiveCh:
-					h.appendArchive(job.room, job.msgs)
+					h.archiveBestEffort(job.room, job.msgs)
 				default:
 					return
 				}
@@ -94,23 +95,31 @@ func (h *Hub) runArchiveWriter() {
 	}
 }
 
+// archiveBestEffort runs appendArchive and logs any failure without returning
+// it. Used by the async paths (writer goroutine, shutdown drain, saturated-
+// backlog fallback) where there is no caller to surface the error to.
+func (h *Hub) archiveBestEffort(room string, msgs []types.Message) {
+	if err := h.appendArchive(room, msgs); err != nil {
+		h.logger.Printf("Archive write failed (room %s): %v", room, err)
+	}
+}
+
 // appendArchive appends messages to a room's append-only archive at
-// hub-state/archive/{room}.jsonl (one JSON-encoded Message per line). It is
-// best-effort: every failure is logged, never returned, so it can run on the
-// message hot path without breaking room operations. The room name is
-// validated to prevent path traversal. An empty data dir or message slice is a
-// silent no-op.
+// hub-state/archive/{room}.jsonl (one JSON-encoded Message per line). The room
+// name is validated to prevent path traversal. An empty data dir or message
+// slice is a silent no-op. The returned error lets synchronous callers
+// (archive_room / DeleteTeam) observe a failed preservation; async callers wrap
+// it with archiveBestEffort.
 //
 // Phase-A limitation: the archive grows without bound — there is no rotation,
 // size cap, or de-duplication yet. Rotation/compaction is deferred to a later
 // phase (see docs/PLAN-room-summary-archive.md).
-func (h *Hub) appendArchive(room string, msgs []types.Message) {
+func (h *Hub) appendArchive(room string, msgs []types.Message) error {
 	if len(msgs) == 0 || h.dataDir == "" {
-		return
+		return nil
 	}
 	if err := validation.ValidateName(room); err != nil {
-		h.logger.Printf("Archive skipped for invalid room name %q: %v", room, err)
-		return
+		return fmt.Errorf("invalid archive room name %q: %w", room, err)
 	}
 
 	// Serialize all archive writes: the async writer goroutine and synchronous
@@ -119,35 +128,38 @@ func (h *Hub) appendArchive(room string, msgs []types.Message) {
 	h.archiveMu.Lock()
 	defer h.archiveMu.Unlock()
 
+	// MkdirAll is kept here (not hoisted to startup) so appendArchive stays
+	// self-contained — callable synchronously from archive_room and from tests
+	// without the writer goroutine. On an existing dir it is a single cheap stat,
+	// and this path is not hot (truncation fires ~every 200 messages).
 	dir := h.archiveDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		h.logger.Printf("Failed to create archive dir: %v", err)
-		return
+		return fmt.Errorf("create archive dir: %w", err)
 	}
 
+	// Encode straight into the buffer (no per-message intermediate slice);
+	// Encoder.Encode appends the trailing newline for us.
 	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	for _, m := range msgs {
-		b, err := json.Marshal(m)
-		if err != nil {
-			h.logger.Printf("Failed to marshal archived message (room %s, id %d): %v", room, m.ID, err)
+		if err := enc.Encode(m); err != nil {
+			h.logger.Printf("Skipping unencodable archived message (room %s, id %d): %v", room, m.ID, err)
 			continue
 		}
-		buf.Write(b)
-		buf.WriteByte('\n')
 	}
 	if buf.Len() == 0 {
-		return
+		return nil
 	}
 
 	path := filepath.Join(dir, room+".jsonl")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		h.logger.Printf("Failed to open archive for room %s: %v", room, err)
-		return
+		return fmt.Errorf("open archive %s: %w", room, err)
 	}
 	defer f.Close()
 
 	if _, err := f.Write(buf.Bytes()); err != nil {
-		h.logger.Printf("Failed to append archive for room %s: %v", room, err)
+		return fmt.Errorf("append archive %s: %w", room, err)
 	}
+	return nil
 }

@@ -148,6 +148,13 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 
 	// Truncate if needed, capturing the dropped (oldest) messages as a cheap
 	// in-memory copy so they can be archived after the lock is released.
+	//
+	// Durability note: archiving is asynchronous (the design's hot-path
+	// requirement), so there is a small window where a crash after the periodic
+	// snapshot persists the truncated room but before the async writer drains
+	// would lose the dropped batch. The window is microseconds (the writer is
+	// always ready) versus the 5s snapshot interval; a crash-recovery queue is
+	// possible future work but is intentionally out of scope for Phase-A.
 	var dropped []types.Message
 	if len(r.messages) > maxMessagesInRoom {
 		cut := len(r.messages) - truncateToMessages

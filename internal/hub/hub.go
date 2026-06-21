@@ -149,6 +149,11 @@ func (h *Hub) Shutdown() {
 	h.archiveProducers.Wait()
 
 	// Wait for the writer to flush, then sweep up anything it left behind.
+	// Producers are already quiesced, so the channel holds a bounded set
+	// (<= archiveBufferSize) of small batches that flush well under the timeout
+	// in any realistic case. The timeout is only a safety valve against a hung
+	// disk; if it ever fires, drainArchiveBacklog below still flushes whatever
+	// remains in the channel synchronously.
 	h.mu.RLock()
 	archiveStarted := h.archiveStarted
 	h.mu.RUnlock()
@@ -156,7 +161,7 @@ func (h *Hub) Shutdown() {
 		select {
 		case <-h.archiveDone:
 		case <-time.After(2 * time.Second):
-			h.logger.Println("Archive writer drain timed out")
+			h.logger.Println("Archive writer drain timed out; flushing remaining backlog synchronously")
 		}
 	}
 	h.drainArchiveBacklog()

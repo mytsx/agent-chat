@@ -473,6 +473,41 @@ func TestHandleArchiveRoom_UnknownRoomNoPhantom(t *testing.T) {
 	}
 }
 
+// TestHandleArchiveRoom_ReportsWriteFailure verifies the synchronous archive_room
+// path surfaces a write failure to the caller instead of falsely reporting
+// success (so DeleteTeam can't silently delete a team whose archive failed).
+func TestHandleArchiveRoom_ReportsWriteFailure(t *testing.T) {
+	// Point dataDir at a regular file so creating hub-state/archive under it fails.
+	tmp := t.TempDir()
+	badDataDir := filepath.Join(tmp, "not-a-dir")
+	if err := os.WriteFile(badDataDir, []byte("x"), 0600); err != nil {
+		t.Fatalf("seed bad data dir: %v", err)
+	}
+	h := newArchiveHub(badDataDir)
+	h.desktopAuthToken = "secret"
+
+	room := h.getOrCreateRoom("proj")
+	if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(desktop, types.Request{
+		ID:   "id",
+		Type: "identify",
+		Data: mustRawJSON(t, map[string]any{"client_type": "desktop", "auth_token": "secret"}),
+	})
+	if r := readResponse(t, desktop, "identify"); !r.Success {
+		t.Fatalf("desktop identify should succeed: %s", r.Error)
+	}
+
+	h.handleRequest(desktop, types.Request{ID: "1", Type: "archive_room", Room: "proj"})
+	resp := readResponse(t, desktop, "archive_room")
+	if resp.Success {
+		t.Fatalf("expected archive_room to fail when the archive cannot be written")
+	}
+}
+
 // readArchiveLines parses a room's archive JSONL file into messages.
 func readArchiveLines(t *testing.T, dataDir, room string) []types.Message {
 	t.Helper()

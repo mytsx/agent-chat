@@ -607,11 +607,20 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 		return
 	}
 
+	// Ordering caveat: if a truncation batch for this room is still queued on the
+	// async writer when this synchronous flush runs, the retained tail can land
+	// in the file before that older batch. No message is lost and every line
+	// carries an ID and timestamp, so a reader can order them; a stricter
+	// file-order guarantee is deferred along with archive read tooling.
 	var msgs []types.Message
 	if roomState := h.getRoom(room); roomState != nil {
 		msgs = roomState.GetMessages()
 	}
-	h.appendArchive(room, msgs)
+	if err := h.appendArchive(room, msgs); err != nil {
+		h.logger.Printf("archive_room failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("oda arşivlenemedi: %v", err))
+		return
+	}
 
 	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))
 	respData, _ := json.Marshal(map[string]any{"text": text, "archived": len(msgs)})

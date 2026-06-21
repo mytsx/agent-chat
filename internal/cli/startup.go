@@ -37,7 +37,10 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, selectedPrompt, 
 	readInstruction := fmt.Sprintf("Odaya katıldıktan sonra read_messages(\"%s\") ile mesajları oku ve diğer agent'larla iletişime geç.", agentName)
 	if isManager {
 		role = "manager"
-		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0) ile tüm mesajları oku ve yönlendir."
+		// read_all_messages varsayılan limit'i 15'tir; limit verilmezse manager
+		// sessizce yalnızca son 15 mesajı görür. Tüm geçmişi (oda en çok 500 mesaj
+		// tutar) okuması için limit'i açıkça yüksek geç.
+		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0, limit=1000) ile tüm mesajları oku ve yönlendir."
 	}
 
 	joinInstruction := fmt.Sprintf(
