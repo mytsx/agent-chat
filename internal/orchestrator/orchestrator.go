@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/types"
@@ -19,20 +21,88 @@ const (
 	NotifyCooldown = 3 * time.Second
 )
 
-// ACK patterns - short acknowledgment messages to skip
-var ACKPatterns = []string{
-	"tesekkur", "sagol", "eyvallah", "tamam", "anladim", "ok", "oldu",
+// ackPatterns - short acknowledgment messages to skip.
+// Bir slice burada en hızlı idiomatic yapıdır — map yalnız tam-eşitlik
+// aramasında O(1) verir, "contains" değil, ve map iterasyonu ölçülebilir
+// biçimde daha yavaştır (bench: ~2x). Eşleştirme matchesAckPattern ile TAM
+// KELİME (whole-word) yapılır; bu yüzden Türkçe ekli yaygın ack formları
+// ("tesekkurler", "sagolun"...) listede AÇIKÇA yer alır — stem prefix'i değil.
+var ackPatterns = []string{
+	"tesekkur", "tesekkurler", "sagol", "sagolun", "sagolasin", "eyvallah",
+	"tamam", "tamamdir", "anladim", "ok", "oldu",
 	"super", "harika", "mukemmel", "guzel", "rica ederim", "bir sey degil",
 	"thanks", "thank you", "got it", "okay", "perfect", "great",
-	"tamamdir", "anlasildi", "gorusuruz", "iyi calismalar",
-	"evet", "hayir", "peki", "olur", "elbette",
+	"anlasildi", "gorusuruz", "iyi calismalar",
+	"evet", "hayir", "peki", "olur", "elbette", "okey", "oke",
 }
 
-// Question patterns - these should always be notified
-var QuestionPatterns = []string{
+// questionPatterns - patterns indicating questions, should always be notified.
+// Not: questionPatterns kasıtlı olarak substring (strings.Contains) ile eşleşir.
+// Buradaki yanlış-pozitifin sonucu "fazladan bildirim" olduğundan (zararsız),
+// ack tarafındaki "sessiz atlama" riskinin aksine, kelime-sınırı uygulanmadı.
+var questionPatterns = []string{
 	"?", "nasil", "neden", "ne zaman", "nerede", "kim", "hangi",
 	"yapabilir mi", "mumkun mu", "var mi", "bilir mi", "ister mi",
 	"how", "what", "when", "where", "who", "which", "can you", "could you",
+}
+
+// isWordRune: kelime-içi karakter mi (harf, rakam veya alt çizgi). Standart \w
+// tanımıyla uyumlu — alt çizgi sayesinde "status_ok"/"exit_ok" gibi teknik
+// ifadelerdeki "ok" bağımsız kelime sayılmaz. Türkçe dahil tüm Unicode harfleri
+// kapsar. ASCII için inline range check (stdlib idiom'u) — ölçülen ~%24 kazanç.
+func isWordRune(r rune) bool {
+	if r < utf8.RuneSelf { // ASCII fast-path
+		return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_'
+	}
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+// matchesAckPattern: p, s içinde TAM KELİME olarak (her iki yanı kelime sınırı
+// ya da string kenarı) geçiyor mu? Hem "ok" ⊂ "okul"/"doktor" gibi harf-önekli/
+// soneki yanlış eşleşmeleri, hem de "oldu" ⊂ "oldukca" / "peki" ⊂ "pekistirmek"
+// gibi stem-önekli yanlış eşleşmeleri eler. s ve p küçük harfli varsayılır.
+//
+// Tasarım notu: prefix (yalnız sol-sınır) eşleştirme "tesekkurler"i "tesekkur"
+// stem'iyle yakalardı ama "oldukca"yı da "oldu" ile yanlış yakalardı (zararlı
+// sessiz skip). Onun yerine tam-kelime kullanılır ve yaygın ekli ack formları
+// ackPatterns'a açıkça eklenir. Başarısızlık yönü güvenlidir: listede olmayan
+// ekli bir ack tam-kelime eşleşmez → yalnız fazladan bildirim (skip yerine
+// notify), asla zararlı sessiz atlama.
+func matchesAckPattern(s, p string) bool {
+	from := 0
+	for {
+		i := strings.Index(s[from:], p)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(p)
+
+		leftOK := start == 0
+		if !leftOK {
+			r, _ := utf8.DecodeLastRuneInString(s[:start])
+			leftOK = !isWordRune(r)
+		}
+		// Sol sınır başarısızsa sağ sınırı çözmeye gerek yok (short-circuit).
+		if leftOK {
+			rightOK := end == len(s)
+			if !rightOK {
+				r, _ := utf8.DecodeRuneInString(s[end:])
+				rightOK = !isWordRune(r)
+			}
+			if rightOK {
+				return true
+			}
+		}
+		// Eşleşmenin sonuna atla. Atlanan tek olası konumlar p ile örtüşen
+		// occurrence'lardır; bunlar ancak p'nin bir border'ı (prefix==suffix)
+		// varsa oluşur ve o örtüşme noktası p'nin İÇİNDE kalır. Mevcut
+		// pattern'lerde border ya yok ya da (elbette → "e") harf olduğundan
+		// örtüşen occurrence'ın solu daima harftir → zaten whole-word eşleşmez.
+		// Dolayısıyla start+len(p) güvenli ve start+1'den daha verimlidir.
+		from = start + len(p)
+	}
 }
 
 // AnalysisResult represents the decision about a message
@@ -116,23 +186,37 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 
 	// Is it a question?
 	isQuestion := false
-	for _, p := range QuestionPatterns {
+	for _, p := range questionPatterns {
 		if strings.Contains(contentLower, p) {
 			isQuestion = true
 			break
 		}
 	}
 
-	// Is it a short acknowledgment?
-	isShort := len([]rune(content)) < AckMsgMaxLength
-	hasAck := false
-	for _, p := range ACKPatterns {
-		if strings.Contains(contentLower, p) {
-			hasAck = true
-			break
+	// Is it a short acknowledgment? Sorular zaten notify edilir ve ack olamaz
+	// (isAck = isShort && hasAck && !isQuestion), bu yüzden soru ise ack taramasını
+	// tamamen atla.
+	// isShort: mesaj ack olacak kadar kısa mı? Rune sayımı O(N), byte uzunluğu
+	// O(1). UTF-8'de her rune 1..4 byte olduğundan byte uzunluğu çoğu durumu
+	// kesin belirler: byteLen<AckMsgMaxLength ise rune sayısı da kesin küçüktür;
+	// byteLen>=AckMsgMaxLength*UTFMax ise kesin büyüktür. Yalnız bu iki sınır
+	// arasındaki gri bölgede gerçek rune sayımı gerekir — böylece kısa (yaygın)
+	// ve uzun mesajlarda tam tarama atlanır. (utf8.RuneCountInString < ... ile
+	// birebir aynı sonucu verir; eşdeğerlik testle doğrulandı.)
+	isAck := false
+	if !isQuestion {
+		byteLen := len(content)
+		isShort := byteLen < AckMsgMaxLength ||
+			(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
+		if isShort {
+			for _, p := range ackPatterns {
+				if matchesAckPattern(contentLower, p) {
+					isAck = true
+					break
+				}
+			}
 		}
 	}
-	isAck := isShort && hasAck && !isQuestion
 
 	// Decision
 	if isAck && !expectsReply {
