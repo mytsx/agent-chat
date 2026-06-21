@@ -1152,6 +1152,15 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 	return updated, nil
 }
 
+// SetCustomPrompt sets a team's room charter (start-of-room context / mission).
+// The charter is injected into every agent's startup prompt via composeAgentPrompt
+// → ComposeStartupPrompt (the teamPrompt slot), so it reaches new agents on join.
+// It does NOT affect already-running agents. No hub sync is needed: the charter is
+// startup-prompt context only and does not touch manager routing.
+func (a *App) SetCustomPrompt(teamID, text string) (team.Team, error) {
+	return a.teamStore.SetCustomPrompt(teamID, text)
+}
+
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // newTestStore creates a Store backed by a temp dir for isolated tests.
@@ -442,5 +444,286 @@ func TestUpsertAgentConcurrent(t *testing.T) {
 	}
 	if len(reloaded.Agents) == 0 || len(reloaded.Agents) > 26 {
 		t.Fatalf("unexpected agent count after concurrent upserts: %d", len(reloaded.Agents))
+	}
+}
+
+// The charter (custom_prompt) is free text but is pasted verbatim into the agent
+// PTY at startup via bracketed paste (sendStartupPrompt). sanitizeCharter must
+// strip anything that could break that paste — raw ESC, the bracketed-paste
+// markers themselves, and other C0 control bytes — while preserving newline and
+// tab so multi-line charters survive. Mirrors the InjectText sanitization
+// (internal/pty/manager.go).
+func TestSanitizeCharter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain text unchanged", "Bu oda X projesi için kuruldu.", "Bu oda X projesi için kuruldu."},
+		{"newline and tab preserved", "satır1\nsatır2\tson", "satır1\nsatır2\tson"},
+		{"strips raw ESC", "a\x1bb", "ab"},
+		{"strips bracketed-paste close marker", "a\x1b[201~b", "ab"},
+		{"strips bracketed-paste open marker", "a\x1b[200~b", "ab"},
+		{"strips carriage return (keeps newline)", "a\r\nb", "a\nb"},
+		{"strips NUL and bell", "a\x00\x07b", "ab"},
+		{"strips DEL", "a\x7fb", "ab"},
+		{"empty stays empty", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeCharter(c.in); got != c.want {
+				t.Errorf("sanitizeCharter(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// The charter has a soft length cap. The cap is rune-based so a multibyte
+// (Turkish) character is never split mid-encoding.
+func TestSanitizeCharterCapsLengthRuneSafe(t *testing.T) {
+	in := strings.Repeat("ç", maxCharterLen+500)
+	got := sanitizeCharter(in)
+	if n := len([]rune(got)); n != maxCharterLen {
+		t.Fatalf("expected %d runes after cap, got %d", maxCharterLen, n)
+	}
+	// Must remain valid UTF-8 (no split multibyte rune at the boundary).
+	if !utf8.ValidString(got) {
+		t.Fatalf("capped charter is not valid UTF-8")
+	}
+}
+
+// C1 control bytes (U+0080-U+009F), Unicode bidi/format controls, and the
+// line/paragraph separators all sit above the C0/DEL range the base table covers
+// and must also be stripped: they are never legitimate in charter prose, and the
+// bidi overrides in particular could make the charter a human reviews in the modal
+// differ from the bytes pasted into the agent (Trojan-Source class). Runes are
+// built from code points so the test source stays pure ASCII (a literal U+FEFF
+// would be an illegal BOM in Go source).
+func TestSanitizeCharterStripsControlAndFormatRunes(t *testing.T) {
+	strip := []struct {
+		name string
+		r    rune
+	}{
+		{"C1 CSI", 0x009b},
+		{"C1 NEL", 0x0085},
+		{"C1 low bound", 0x0080},
+		{"C1 high bound", 0x009f},
+		{"bidi RLO", 0x202e},
+		{"bidi LRO", 0x202d},
+		{"bidi isolate LRI", 0x2066},
+		{"bidi isolate PDI", 0x2069},
+		{"LRM", 0x200e},
+		{"RLM", 0x200f},
+		{"BOM/ZWNBSP", 0xfeff},
+		{"line separator", 0x2028},
+		{"paragraph separator", 0x2029},
+	}
+	for _, c := range strip {
+		in := "a" + string(c.r) + "b"
+		if got := sanitizeCharter(in); got != "ab" {
+			t.Errorf("%s (U+%04X): sanitizeCharter(%q) = %q, want %q", c.name, c.r, in, got, "ab")
+		}
+	}
+
+	// Turkish letters (Latin-1 supplement + Latin Extended-A) must survive — they
+	// are outside every stripped range.
+	const tr = "çğıöşü ÇĞİÖŞÜ"
+	if got := sanitizeCharter(tr); got != tr {
+		t.Errorf("Turkish letters altered: got %q, want %q", got, tr)
+	}
+}
+
+// Pin the strip-before-cap ordering: a bracketed-paste marker straddling the rune
+// cap boundary must be removed entirely (no stray ESC), and the result must be
+// exactly maxCharterLen runes. If the cap ran before the strip, truncation could
+// slice through the marker and leave a live ESC in the output.
+func TestSanitizeCharterStripsMarkerStraddlingCap(t *testing.T) {
+	in := strings.Repeat("a", maxCharterLen-2) + "\x1b[201~" + strings.Repeat("b", 50)
+	got := sanitizeCharter(in)
+
+	if strings.ContainsRune(got, 0x1b) {
+		t.Fatalf("result contains a stray ESC byte (strip ran after cap?): %q", got)
+	}
+	if n := len([]rune(got)); n != maxCharterLen {
+		t.Fatalf("expected %d runes after cap, got %d", maxCharterLen, n)
+	}
+}
+
+// SetCustomPrompt writes the room charter via a targeted single-field endpoint
+// (SetManager pattern) rather than the positional Update, which would reset the
+// charter on every grid-layout change. The value must round-trip through Get.
+func TestSetCustomPromptRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	const charter = "Bu oda ödeme servisi refactor'u için.\nKurallar: küçük PR'lar."
+	updated, err := s.SetCustomPrompt(tm.ID, charter)
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if updated.CustomPrompt != charter {
+		t.Fatalf("returned CustomPrompt = %q, want %q", updated.CustomPrompt, charter)
+	}
+
+	got, err := s.Get(tm.ID)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.CustomPrompt != charter {
+		t.Fatalf("Get CustomPrompt = %q, want %q", got.CustomPrompt, charter)
+	}
+}
+
+// The charter must survive a store reload (persisted to teams.json, not just held
+// in memory).
+func TestSetCustomPromptPersistsToDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+
+	const charter = "Kalıcı oda misyonu."
+	if _, err := s.SetCustomPrompt(tm.ID, charter); err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("reload NewStore failed: %v", err)
+	}
+	reloaded, err := s2.Get(tm.ID)
+	if err != nil {
+		t.Fatalf("reload Get failed: %v", err)
+	}
+	if reloaded.CustomPrompt != charter {
+		t.Fatalf("reloaded CustomPrompt = %q, want %q", reloaded.CustomPrompt, charter)
+	}
+}
+
+// SetCustomPrompt must sanitize its input (it is pasted into the PTY at startup).
+func TestSetCustomPromptSanitizes(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+
+	updated, err := s.SetCustomPrompt(tm.ID, "misyon\x1b[201~\x00 bitiş")
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if want := "misyon bitiş"; updated.CustomPrompt != want {
+		t.Fatalf("CustomPrompt = %q, want sanitized %q", updated.CustomPrompt, want)
+	}
+}
+
+// Setting the charter must not disturb the team's other fields (name, agents,
+// manager). It is a single-field update.
+func TestSetCustomPromptPreservesOtherFields(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{
+		{Name: "Pilot", Role: "Lead", CLIType: "claude", SlotIndex: 0},
+	})
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+
+	updated, err := s.SetCustomPrompt(tm.ID, "yeni misyon")
+	if err != nil {
+		t.Fatalf("SetCustomPrompt failed: %v", err)
+	}
+	if updated.Name != "TeamA" {
+		t.Fatalf("Name changed: %q", updated.Name)
+	}
+	if updated.ManagerAgent != "Pilot" {
+		t.Fatalf("ManagerAgent changed: %q", updated.ManagerAgent)
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0].Name != "Pilot" || updated.Agents[0].Role != "Lead" {
+		t.Fatalf("Agents changed: %+v", updated.Agents)
+	}
+}
+
+func TestSetCustomPromptUnknownTeam(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.SetCustomPrompt("does-not-exist", "x"); err == nil {
+		t.Fatal("expected error for unknown team, got nil")
+	}
+}
+
+// SetCustomPrompt must skip the disk write when the sanitized charter equals the
+// stored one (matches UpsertAgent's no-op optimization). This also covers the case
+// where the raw input differs but sanitizes to the same value (e.g. a trailing
+// control char is stripped), which the frontend isDirty check cannot detect.
+// Proven with the sentinel-file technique: a skipped write leaves the sentinel.
+func TestSetCustomPromptSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon"); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+
+	// Identical charter → skip write → sentinel survives.
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon"); err != nil {
+		t.Fatalf("no-op SetCustomPrompt should succeed: %v", err)
+	}
+	if raw, _ := os.ReadFile(filePath); !bytes.Equal(raw, sentinel) {
+		t.Fatalf("identical SetCustomPrompt rewrote the file: %s", raw)
+	}
+
+	// Raw differs but sanitizes to the same value → also skip.
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("rewrite sentinel failed: %v", err)
+	}
+	if _, err := s.SetCustomPrompt(tm.ID, "misyon\x00"); err != nil {
+		t.Fatalf("sanitize-equal SetCustomPrompt should succeed: %v", err)
+	}
+	if raw, _ := os.ReadFile(filePath); !bytes.Equal(raw, sentinel) {
+		t.Fatalf("sanitize-equal SetCustomPrompt rewrote the file: %s", raw)
+	}
+
+	// A genuinely different charter must write valid JSON.
+	if _, err := s.SetCustomPrompt(tm.ID, "yeni misyon"); err != nil {
+		t.Fatalf("changed SetCustomPrompt failed: %v", err)
+	}
+	raw, _ := os.ReadFile(filePath)
+	var disk []Team
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatalf("changed SetCustomPrompt should rewrite valid JSON: %s", raw)
+	}
+	if len(disk) != 1 || disk[0].CustomPrompt != "yeni misyon" {
+		t.Fatalf("changed charter not persisted: %+v", disk)
+	}
+}
+
+// When save() fails, SetCustomPrompt must roll back its in-memory mutation so the
+// store doesn't diverge from teams.json — composeAgentPrompt reads the in-memory
+// store, so a charter the UI thinks failed to save would otherwise still be
+// injected into new agents until restart. Mirrors UpsertAgent's rollback
+// (forced cross-platform by removing the data dir so the temp-file write fails).
+func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", nil)
+	if _, err := s.SetCustomPrompt(tm.ID, "ilk misyon"); err != nil {
+		t.Fatalf("seed SetCustomPrompt failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.SetCustomPrompt(tm.ID, "yeni misyon"); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	got, _ := s.Get(tm.ID)
+	if got.CustomPrompt != "ilk misyon" {
+		t.Fatalf("CustomPrompt not rolled back in memory: got %q, want %q", got.CustomPrompt, "ilk misyon")
 	}
 }

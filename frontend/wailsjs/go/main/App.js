@@ -94,6 +94,10 @@ export function SendPromptToAgent(arg1, arg2, arg3) {
   return window['go']['main']['App']['SendPromptToAgent'](arg1, arg2, arg3);
 }
 
+export function SetCustomPrompt(arg1, arg2) {
+  return window['go']['main']['App']['SetCustomPrompt'](arg1, arg2);
+}
+
 export function SetGlobalPrompt(arg1) {
   return window['go']['main']['App']['SetGlobalPrompt'](arg1);
 }
