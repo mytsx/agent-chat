@@ -43,9 +43,20 @@ type Hub struct {
 	// archiveCh feeds dropped/cleared messages to the async archive writer.
 	// archiveDone is closed by the writer once it has drained on shutdown.
 	// archiveStarted guards the shutdown drain wait (writer only runs after Run).
+	// archiveMu serializes appendArchive so the writer goroutine and synchronous
+	// archive_room / shutdown writes never interleave on the same file.
 	archiveCh      chan archiveJob
 	archiveDone    chan struct{}
 	archiveStarted bool
+	archiveMu      sync.Mutex
+	// archiveProducers counts in-flight enqueueArchive callers. archiveDraining,
+	// set once under archiveLifecycleMu during Shutdown, flips every later enqueue
+	// to a synchronous write. Together they let Shutdown wait for all async
+	// producers to finish their hand-off before the final drain, so no job is
+	// orphaned in archiveCh after the writer and drain have both stopped.
+	archiveLifecycleMu sync.Mutex
+	archiveDraining    bool
+	archiveProducers   sync.WaitGroup
 
 	listener net.Listener
 }
@@ -122,7 +133,22 @@ func (h *Hub) Port() int {
 func (h *Hub) Shutdown() {
 	close(h.done)
 
-	// Wait for the archive writer to flush its backlog (only if it was started).
+	// Stop accepting new connections first, so the inflow of archive jobs winds
+	// down before we drain.
+	if h.listener != nil {
+		h.listener.Close()
+	}
+
+	// Quiesce async archive producers: after archiveDraining is set every new
+	// enqueue writes synchronously, and Wait blocks until producers already
+	// registered have finished handing their job to the channel (or written it
+	// directly). The channel then holds a fixed, fully drainable set.
+	h.archiveLifecycleMu.Lock()
+	h.archiveDraining = true
+	h.archiveLifecycleMu.Unlock()
+	h.archiveProducers.Wait()
+
+	// Wait for the writer to flush, then sweep up anything it left behind.
 	h.mu.RLock()
 	archiveStarted := h.archiveStarted
 	h.mu.RUnlock()
@@ -133,14 +159,10 @@ func (h *Hub) Shutdown() {
 			h.logger.Println("Archive writer drain timed out")
 		}
 	}
+	h.drainArchiveBacklog()
 
 	// Persist all state
 	h.persistAll()
-
-	// Close listener
-	if h.listener != nil {
-		h.listener.Close()
-	}
 
 	// Close all client connections
 	h.mu.Lock()
@@ -226,6 +248,15 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	r.SetArchiveFn(h.archiveFnFor(room))
 	h.rooms[room] = r
 	return r
+}
+
+// getRoom returns the existing room state, or nil if the room has never been
+// created. Unlike getOrCreateRoom it does not materialize (and later persist) a
+// phantom empty room for a name that was never used.
+func (h *Hub) getRoom(room string) *RoomState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rooms[room]
 }
 
 // archiveFnFor builds the per-room callback that captures messages leaving the

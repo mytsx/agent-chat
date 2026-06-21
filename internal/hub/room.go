@@ -28,8 +28,11 @@ type RoomState struct {
 	managerLastSeen float64
 	// archiveFn, if set, receives messages that are about to leave the room
 	// (dropped by truncation or wiped by Clear) so they can be archived before
-	// they are lost. It is always invoked OUTSIDE the room lock and must not
-	// block on disk I/O. nil means archiving is disabled (backward compatible).
+	// they are lost. It is always invoked OUTSIDE the room lock. The wired hub
+	// callback normally hands off to an async writer, but may write synchronously
+	// when the backlog is saturated or during shutdown, so it can block briefly
+	// on disk I/O — never call it while holding the room lock. nil means
+	// archiving is disabled (backward compatible).
 	archiveFn func([]types.Message)
 }
 
@@ -150,7 +153,12 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 		cut := len(r.messages) - truncateToMessages
 		dropped = make([]types.Message, cut)
 		copy(dropped, r.messages[:cut])
-		r.messages = r.messages[cut:]
+		// Move the retained tail into a fresh array rather than reslicing, so the
+		// old (large) backing array — which still holds the dropped messages —
+		// becomes garbage now instead of lingering until the next reallocation.
+		retained := make([]types.Message, truncateToMessages, maxMessagesInRoom+1)
+		copy(retained, r.messages[cut:])
+		r.messages = retained
 	}
 
 	r.dirty = true

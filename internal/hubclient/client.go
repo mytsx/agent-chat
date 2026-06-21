@@ -319,7 +319,8 @@ func (c *HubClient) ClearRoom(room string) (*types.Response, error) {
 }
 
 // ArchiveRoom flushes a room's current messages to its append-only archive,
-// synchronously on the hub. Returns once the messages are on disk (or on error).
+// synchronously on the hub. Returns once the hub has written them (buffered to
+// the OS, consistent with the hub's other persistence — not fsync'd) or on error.
 func (c *HubClient) ArchiveRoom(room string) error {
 	resp, err := c.Send(types.Request{Type: "archive_room", Room: room})
 	if err != nil {

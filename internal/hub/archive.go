@@ -33,11 +33,42 @@ func (h *Hub) enqueueArchive(room string, msgs []types.Message) {
 	if len(msgs) == 0 || h.dataDir == "" {
 		return
 	}
+
+	// Register as an in-flight async producer, unless the shutdown drain has
+	// begun — then write synchronously. This is the barrier that prevents loss:
+	// once archiveDraining is set no new job enters archiveCh, and Shutdown waits
+	// for already-registered producers to finish their hand-off, so a job can
+	// never be orphaned in the channel after the writer and drain have stopped.
+	h.archiveLifecycleMu.Lock()
+	if h.archiveDraining {
+		h.archiveLifecycleMu.Unlock()
+		h.appendArchive(room, msgs)
+		return
+	}
+	h.archiveProducers.Add(1)
+	h.archiveLifecycleMu.Unlock()
+	defer h.archiveProducers.Done()
+
+	// Hand off to the writer without blocking the caller. If the backlog is
+	// saturated, write synchronously rather than stall the message path — never
+	// drop. appendArchive serializes with the writer via archiveMu.
 	select {
 	case h.archiveCh <- archiveJob{room: room, msgs: msgs}:
-	case <-h.done:
-		// Writer is stopping/stopped: persist directly rather than drop.
+	default:
 		h.appendArchive(room, msgs)
+	}
+}
+
+// drainArchiveBacklog synchronously writes any archive jobs still buffered after
+// the writer goroutine has exited. Called once during shutdown.
+func (h *Hub) drainArchiveBacklog() {
+	for {
+		select {
+		case job := <-h.archiveCh:
+			h.appendArchive(job.room, job.msgs)
+		default:
+			return
+		}
 	}
 }
 
@@ -69,6 +100,10 @@ func (h *Hub) runArchiveWriter() {
 // message hot path without breaking room operations. The room name is
 // validated to prevent path traversal. An empty data dir or message slice is a
 // silent no-op.
+//
+// Phase-A limitation: the archive grows without bound — there is no rotation,
+// size cap, or de-duplication yet. Rotation/compaction is deferred to a later
+// phase (see docs/PLAN-room-summary-archive.md).
 func (h *Hub) appendArchive(room string, msgs []types.Message) {
 	if len(msgs) == 0 || h.dataDir == "" {
 		return
@@ -77,6 +112,12 @@ func (h *Hub) appendArchive(room string, msgs []types.Message) {
 		h.logger.Printf("Archive skipped for invalid room name %q: %v", room, err)
 		return
 	}
+
+	// Serialize all archive writes: the async writer goroutine and synchronous
+	// callers (archive_room RPC, shutdown drain) can target the same file at
+	// once, and concurrent appends could otherwise interleave a partial write.
+	h.archiveMu.Lock()
+	defer h.archiveMu.Unlock()
 
 	dir := h.archiveDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {

@@ -593,10 +593,12 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 
 // handleArchiveRoom flushes a room's current messages to its append-only
 // archive. It is restricted to the authorized desktop app (the desktop is the
-// only caller — e.g. DeleteTeam — that needs a synchronous flush guarantee).
-// The write is synchronous so the response confirms the messages are on disk.
-// The archive is append-only, so repeated calls may duplicate current messages;
-// that is acceptable and never loses history.
+// only caller — e.g. DeleteTeam — that needs a synchronous flush). The write is
+// synchronous, so the response confirms the hub has written the messages (the
+// archive, like the rest of the hub's persistence, is buffered to the OS — not
+// fsync'd). The archive is append-only, so repeated calls may duplicate current
+// messages; that is acceptable and never loses history. A room that was never
+// created archives nothing rather than materializing a phantom empty room.
 func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
@@ -605,8 +607,10 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 		return
 	}
 
-	roomState := h.getOrCreateRoom(room)
-	msgs := roomState.GetMessages()
+	var msgs []types.Message
+	if roomState := h.getRoom(room); roomState != nil {
+		msgs = roomState.GetMessages()
+	}
 	h.appendArchive(room, msgs)
 
 	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -357,6 +358,118 @@ func TestClearRoomViaDesktopArchivesToDisk(t *testing.T) {
 	}
 	if n := len(room.GetMessages()); n != 0 {
 		t.Fatalf("room should be cleared, but %d messages remain", n)
+	}
+}
+
+// TestEnqueueArchiveWhileDrainingWritesSynchronously verifies the shutdown
+// barrier's gate: once archiveDraining is set, enqueueArchive bypasses the
+// channel and writes synchronously, so a job can't be orphaned in a channel the
+// writer has stopped draining.
+func TestEnqueueArchiveWhileDrainingWritesSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+
+	// Simulate that Shutdown has begun draining. No writer goroutine is running.
+	h.archiveLifecycleMu.Lock()
+	h.archiveDraining = true
+	h.archiveLifecycleMu.Unlock()
+
+	h.enqueueArchive("room1", []types.Message{{ID: 1, From: "a", To: "all", Content: "x"}})
+
+	got := readArchiveLines(t, dir, "room1")
+	if len(got) != 1 {
+		t.Fatalf("enqueue while draining wrote %d messages, want 1 (synchronous)", len(got))
+	}
+}
+
+// TestShutdownDrainsBufferedArchive verifies the end-to-end no-loss guarantee:
+// jobs buffered in archiveCh are flushed to disk by a full Shutdown sequence.
+func TestShutdownDrainsBufferedArchive(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+	h.mu.Lock()
+	h.archiveStarted = true
+	h.mu.Unlock()
+	go h.runArchiveWriter()
+
+	for i := 0; i < 3; i++ {
+		h.enqueueArchive("room1", []types.Message{{ID: i + 1, From: "a", To: "all", Content: "x"}})
+	}
+
+	// Full graceful shutdown: quiesce producers, drain writer, sweep backlog.
+	h.Shutdown()
+
+	got := readArchiveLines(t, dir, "room1")
+	if len(got) != 3 {
+		t.Fatalf("shutdown flushed %d messages, want 3", len(got))
+	}
+}
+
+// TestAppendArchiveConcurrentNoLoss exercises appendArchive from many goroutines
+// at once (mirroring the writer goroutine racing a synchronous archive_room RPC)
+// and asserts every message lands exactly once — no loss, no interleaved/corrupt
+// lines. Guards the serialization invariant; also a -race exercise.
+func TestAppendArchiveConcurrentNoLoss(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+
+	const goroutines = 8
+	const perG = 50
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(base int) {
+			defer wg.Done()
+			for i := 0; i < perG; i++ {
+				id := base*perG + i + 1
+				h.appendArchive("room1", []types.Message{{ID: id, From: "a", To: "all", Content: "x"}})
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	got := readArchiveLines(t, dir, "room1")
+	if len(got) != goroutines*perG {
+		t.Fatalf("concurrent append: %d lines, want %d (loss or corruption)", len(got), goroutines*perG)
+	}
+	seen := make(map[int]int)
+	for _, m := range got {
+		seen[m.ID]++
+	}
+	for id := 1; id <= goroutines*perG; id++ {
+		if seen[id] != 1 {
+			t.Fatalf("ID %d appeared %d times, want exactly 1", id, seen[id])
+		}
+	}
+}
+
+// TestHandleArchiveRoom_UnknownRoomNoPhantom verifies archiving a never-used
+// room writes nothing and does not materialize a phantom empty room.
+func TestHandleArchiveRoom_UnknownRoomNoPhantom(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+	h.desktopAuthToken = "secret"
+
+	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(desktop, types.Request{
+		ID:   "id",
+		Type: "identify",
+		Data: mustRawJSON(t, map[string]any{"client_type": "desktop", "auth_token": "secret"}),
+	})
+	if r := readResponse(t, desktop, "identify"); !r.Success {
+		t.Fatalf("desktop identify should succeed: %s", r.Error)
+	}
+
+	h.handleRequest(desktop, types.Request{ID: "1", Type: "archive_room", Room: "ghost"})
+	if r := readResponse(t, desktop, "archive_room"); !r.Success {
+		t.Fatalf("archive_room on unknown room should still succeed: %s", r.Error)
+	}
+
+	if h.getRoom("ghost") != nil {
+		t.Fatalf("archiving an unknown room created a phantom room")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hub-state", "archive", "ghost.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("archiving an unknown room wrote a file: err=%v", err)
 	}
 }
 
