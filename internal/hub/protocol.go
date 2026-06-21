@@ -35,6 +35,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleClearRoom(c, req)
 	case "archive_room":
 		h.handleArchiveRoom(c, req)
+	case "save_session":
+		h.handleSaveSession(c, req)
 	case "get_last_message_id":
 		h.handleGetLastMessageID(c, req)
 	case "list_rooms":
@@ -618,6 +620,10 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 		maxID = msgs[n-1].ID
 	}
 	roomState.ClearArchived(maxID)
+	// The clear resets message IDs (next message restarts at 1), so forget the
+	// last-snapshot ID — otherwise the next session's coincidental ID match could
+	// wrongly skip its snapshot.
+	h.resetSessionTracking(room)
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
 	respData, _ := json.Marshal(map[string]string{"text": text})
@@ -659,6 +665,37 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 
 	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))
 	respData, _ := json.Marshal(map[string]any{"text": text, "archived": len(msgs)})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
+// handleSaveSession writes an immutable per-session snapshot of the room's full
+// current state (messages + agent roster) to hub-state/sessions/{room}/{epoch}.json.
+// It is restricted to the authorized desktop app (the only caller — DeleteTeam,
+// shutdown, manual save). Unlike archive_room's rolling append-only stream, each
+// call produces a distinct file that is never overwritten or pruned. An empty or
+// unchanged room is skipped (saved=false) rather than written. A room that was
+// never created saves nothing rather than materializing a phantom empty room.
+func (h *Hub) handleSaveSession(c *Client, req types.Request) {
+	room := h.resolveRoom(req.Room)
+
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop session kaydedebilir")
+		return
+	}
+
+	_, count, skipped, err := h.saveSession(room)
+	if err != nil {
+		h.logger.Printf("save_session failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("session kaydedilemedi: %v", err))
+		return
+	}
+
+	saved := !skipped
+	text := fmt.Sprintf("ℹ️ '%s' odasında kaydedilecek yeni içerik yok.", room)
+	if saved {
+		text = fmt.Sprintf("\U0001f4be '%s' odası session olarak kaydedildi (%d mesaj).", room, count)
+	}
+	respData, _ := json.Marshal(map[string]any{"text": text, "saved": saved, "count": count})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 

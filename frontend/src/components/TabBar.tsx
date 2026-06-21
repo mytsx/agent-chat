@@ -13,10 +13,13 @@ export default function TabBar() {
     deleteTeam,
     removeTeamLocal,
     setCustomPrompt,
+    saveSession,
   } = useTeams();
   const { removeAllForTeam } = useTerminals();
   const [showCreate, setShowCreate] = useState(false);
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
+  const [savingTeamID, setSavingTeamID] = useState<string | null>(null);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   // Two-step create: the team is created first, then its charter is persisted via
   // the dedicated SetCustomPrompt endpoint (kept separate so the charter has a
@@ -55,6 +58,29 @@ export default function TabBar() {
     setEditingTeam(t);
   };
 
+  // Manually snapshot the active room's session (immutable on-disk copy for #29).
+  // Reentrancy-guarded; the transient result note auto-dismisses.
+  const handleSaveSession = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (savingTeamID) return;
+    setSavingTeamID(id);
+    setSaveMsg(null);
+    try {
+      const r = await saveSession(id);
+      setSaveMsg(
+        r.saved
+          ? `💾 Session kaydedildi (${r.count} mesaj)`
+          : "ℹ️ Kaydedilecek yeni içerik yok"
+      );
+    } catch (err) {
+      setSaveMsg("⚠️ Session kaydedilemedi");
+      if (import.meta.env.DEV) console.warn("saveSession failed:", err);
+    } finally {
+      setSavingTeamID(null);
+      window.setTimeout(() => setSaveMsg(null), 2800);
+    }
+  };
+
   return (
     <div className="tab-bar">
       {teams.map((t) => (
@@ -64,6 +90,16 @@ export default function TabBar() {
           onClick={() => setActiveTeam(t.id)}
         >
           <span className="tab-name">{t.name}</span>
+          {t.id === activeTeamID && (
+            <button
+              className="tab-save"
+              title="Session'u kaydet (odanın değişmez anlık görüntüsü)"
+              onClick={(e) => handleSaveSession(t.id, e)}
+              disabled={savingTeamID === t.id}
+            >
+              💾
+            </button>
+          )}
           {t.id === activeTeamID && (
             <button
               className="tab-edit"
@@ -87,6 +123,8 @@ export default function TabBar() {
       <button className="tab-add" onClick={() => setShowCreate(true)}>
         +
       </button>
+
+      {saveMsg && <span className="tab-save-msg">{saveMsg}</span>}
 
       {showCreate && (
         <RoomCharterModal

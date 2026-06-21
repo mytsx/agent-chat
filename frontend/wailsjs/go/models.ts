@@ -45,6 +45,20 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class SaveSessionResult {
+	    saved: boolean;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveSessionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.saved = source["saved"];
+	        this.count = source["count"];
+	    }
+	}
 
 }
 

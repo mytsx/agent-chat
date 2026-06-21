@@ -55,6 +55,15 @@ type Hub struct {
 	archiveClosed bool
 	archiveMu     sync.Mutex
 
+	// sessionMu serializes session-snapshot writes (saveSession) and guards
+	// sessionLastID. Like archiveMu it may be held across disk I/O — the session
+	// path is low-frequency (termination hooks / manual save), not the hot message
+	// path. sessionLastID maps room → highest message ID captured by its last
+	// snapshot, so an unchanged room (no new messages, hence no roster change since
+	// join/leave append system messages) is skipped rather than re-snapshotted.
+	sessionMu     sync.Mutex
+	sessionLastID map[string]int
+
 	// Graceful request shutdown (mirrors http.Server.Shutdown for our hijacked
 	// WebSocket message loop). requestsClosed, set once under requestMu, makes
 	// readPump stop handling new requests; inflightRequests counts handlers in
@@ -85,6 +94,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		done:             make(chan struct{}),
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
+		sessionLastID:    make(map[string]int),
 	}
 }
 

@@ -305,6 +305,20 @@ func (a *App) monitorHub() {
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
+	// Snapshot each team's room as a session BEFORE closing the hub client, so a
+	// quit captures the in-flight conversation (#28). Best-effort and skip-aware:
+	// the hub skips empty/unchanged rooms, so idle quits write nothing.
+	if a.hubClient != nil && a.teamStore != nil {
+		for _, t := range a.teamStore.List() {
+			if t.Name == "" {
+				continue
+			}
+			if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
+				log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", t.Name, err)
+			}
+		}
+	}
+
 	// Close hub client
 	if a.hubClient != nil {
 		a.hubClient.Close()
@@ -1161,18 +1175,51 @@ func (a *App) SetCustomPrompt(teamID, text string) (team.Team, error) {
 	return a.teamStore.SetCustomPrompt(teamID, text)
 }
 
+// SaveSessionResult reports the outcome of a manual session save to the UI.
+type SaveSessionResult struct {
+	Saved bool `json:"saved"` // false when the room was empty or unchanged
+	Count int  `json:"count"` // snapshotted message count
+}
+
+// SaveSession writes an immutable per-session snapshot of a team's room (messages
+// + agent roster) to hub-state/sessions/{room}/{epoch}.json via the hub. It backs
+// the manual "Session'u Kaydet" button. The hub skips an empty or unchanged room
+// (Saved=false). Each save is a distinct, never-overwritten file; #29 later reads
+// these snapshots to summarize past sessions and inject them at room setup.
+func (a *App) SaveSession(teamID string) (SaveSessionResult, error) {
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return SaveSessionResult{}, err
+	}
+	if t.Name == "" {
+		return SaveSessionResult{}, fmt.Errorf("oda adı boş")
+	}
+	if a.hubClient == nil {
+		return SaveSessionResult{}, fmt.Errorf("hub bağlantısı yok")
+	}
+	count, saved, err := a.hubClient.SaveSession(t.Name)
+	if err != nil {
+		return SaveSessionResult{}, err
+	}
+	return SaveSessionResult{Saved: saved, Count: count}, nil
+}
+
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
 	sessions := a.ptyManager.GetSessionsByTeam(id)
 
-	// Flush the room's conversation to the append-only archive BEFORE closing
-	// terminals. A terminal close failure returns early below, so archiving
-	// must happen first and stay error-tolerant — losing the team is no reason
-	// to also lose its history.
+	// Preserve the room's history BEFORE closing terminals. A terminal close
+	// failure returns early below, so both writes must happen first and stay
+	// error-tolerant — losing the team is no reason to also lose its history.
+	// Two complementary artifacts: the rolling append-only archive (Phase-A) and
+	// an immutable per-session snapshot (#28) that #29 can later summarize.
 	if getErr == nil && t.Name != "" && a.hubClient != nil {
 		if err := a.hubClient.ArchiveRoom(t.Name); err != nil {
 			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
+		}
+		if _, _, err := a.hubClient.SaveSession(t.Name); err != nil {
+			log.Printf("[DELETE-TEAM] Session kaydedilemedi (%s): %v", t.Name, err)
 		}
 	}
 
