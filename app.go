@@ -841,6 +841,82 @@ func (a *App) WriteToTerminal(sessionID, data string) error {
 	return a.ptyManager.WriteUserInput(sessionID, []byte(data), submit)
 }
 
+// BroadcastToTeam injects the same text into every agent terminal of a team at
+// once, as if the user typed it into each one. It is NOT a chat message: the text
+// goes straight to each PTY's input line (raw fan-out, hub bypass) so it never
+// appears in room history. With submit=false (the UI default) the text is left
+// pending for the user to confirm in each terminal; submit=true also presses
+// Enter. Observer agents (#17) are excluded. Per-session failures are logged but
+// never abort the broadcast — one dead PTY must not cancel the rest.
+func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("broadcast metni boş olamaz")
+	}
+	sessions := a.ptyManager.GetSessionsByTeam(teamID)
+	if len(sessions) == 0 {
+		return fmt.Errorf("takımda açık terminal yok 📭")
+	}
+
+	roleOf := a.broadcastRoleLookup(teamID)
+	injected, errs := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
+
+	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
+		teamID, injected, len(sessions), submit, len(errs))
+	for _, e := range errs {
+		log.Printf("[BROADCAST] session error: %s", e)
+	}
+	return nil
+}
+
+// broadcastToSessions injects text into every session that should receive a
+// broadcast, skipping observer-role agents (#17-forward-wired: no agent has the
+// observer role today, so the filter is currently a no-op). Per-session inject
+// errors are collected but never abort the fan-out. Returns the number of
+// sessions injected and any per-session error strings.
+func broadcastToSessions(
+	sessions []*ptymgr.PTYSession,
+	text string,
+	submit bool,
+	roleOf func(agentName string) string,
+	inject func(sessionID, text string, submit bool) error,
+) (injected int, errs []string) {
+	for _, s := range sessions {
+		if isObserverRole(roleOf(s.AgentName)) {
+			continue
+		}
+		if err := inject(s.ID, text, submit); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", s.AgentName, err))
+			continue
+		}
+		injected++
+	}
+	return injected, errs
+}
+
+// isObserverRole reports whether a team role designates an observer agent, which
+// must be excluded from broadcasts (#17). Compared case-insensitively so the
+// observer feature can store the role in any casing.
+func isObserverRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), "observer")
+}
+
+// broadcastRoleLookup returns a role resolver for a team's agents, used to filter
+// observers out of a broadcast. A team-load failure yields an all-empty resolver
+// (no agent treated as observer) so a transient store error never silently drops
+// every target.
+func (a *App) broadcastRoleLookup(teamID string) func(agentName string) string {
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		log.Printf("[BROADCAST] takım rolleri okunamadı team=%s: %v", teamID, err)
+		return func(string) string { return "" }
+	}
+	roles := make(map[string]string, len(t.Agents))
+	for _, ag := range t.Agents {
+		roles[ag.Name] = ag.Role
+	}
+	return func(name string) string { return roles[name] }
+}
+
 // ResizeTerminal resizes a terminal
 func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 	return a.ptyManager.Resize(sessionID, uint16(cols), uint16(rows))

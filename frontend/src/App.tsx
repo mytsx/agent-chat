@@ -6,6 +6,7 @@ import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
 // useTerminals imported by PromptLibrary for target picker
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
+import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
 import Sidebar from "./components/Sidebar";
 import "./styles/globals.css";
@@ -175,6 +176,7 @@ function AppContent() {
         </div>
       ))}
       <TabBar />
+      <BroadcastBar />
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">
           <Panel minSize="30%">

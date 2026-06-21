@@ -1313,6 +1313,85 @@ html, body, #root {
   padding: 0 4px;
 }
 
+/* ============ Broadcast Bar ============ */
+.broadcast-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.broadcast-bar-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.broadcast-bar-input {
+  flex: 1;
+  resize: none;
+  min-height: 28px;
+  max-height: 120px;
+  padding: 5px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.broadcast-bar-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.broadcast-bar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.broadcast-bar-send {
+  padding: 5px 14px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--bg-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.broadcast-bar-send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.broadcast-bar-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.broadcast-bar-error {
+  font-size: 11px;
+  color: var(--danger);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wizard-hint {
   font-size: 11px;
   color: var(--text-muted);
