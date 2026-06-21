@@ -196,6 +196,11 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		prev := t.Agents // keep the old slice for rollback
 		for j, existing := range t.Agents {
 			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
+				// Match is case-insensitive, but keep the stored Name's original
+				// casing: Team.ManagerAgent holds that spelling and resolveManagerIntent
+				// compares it case-sensitively, so a case-only re-create must not
+				// rewrite the name and break manager recognition.
+				cfg.Name = existing.Name
 				// Preserve Role when the upsert payload omits it.
 				if cfg.Role == "" {
 					cfg.Role = existing.Role

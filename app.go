@@ -545,7 +545,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		if origWorkDir != "" {
 			cfgWorkDir = origWorkDir
 		}
-		if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
+		// When reopening an existing worktree directly (restart), workDir points
+		// into our worktrees dir and origWorkDir is empty. The config was already
+		// captured correctly on the initial create, so skip persistence to avoid
+		// overwriting it with the worktree path + useWorktree=false.
+		worktreesRoot := filepath.Join(a.dataDir, "worktrees") + string(filepath.Separator)
+		if origWorkDir == "" && strings.HasPrefix(cfgWorkDir, worktreesRoot) {
+			log.Printf("[TEAM] CreateTerminal: agent=%s worktree dizininde yeniden açıldı, config korunuyor", agentName)
+		} else if _, err := a.teamStore.UpsertAgent(teamID, team.AgentConfig{
 			Name:        agentName,
 			PromptID:    promptID,
 			WorkDir:     cfgWorkDir,
@@ -586,16 +593,15 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	wtDir := session.WorktreeDir
 	wtRepo := session.WorktreeRepo
 
-	// Reconstruct the ORIGINAL create params. For a worktree agent, session.WorkDir
-	// points at the worktree; reopen against the original repo with useWorktree=true
-	// instead. CreateWorktree reuses the existing worktree idempotently, and the
-	// persisted config keeps work_dir pointing at the repo (not the worktree).
-	// Guard wtRepo != "" so a missing repo path can never blank out workDir; in that
-	// case fall back to the existing workDir (the worktree) with useWorktree=false.
-	useWorktree := false
-	if wtDir != "" && wtRepo != "" {
-		workDir = wtRepo
-		useWorktree = true
+	// Reopen the existing worktree DIRECTLY (run the PTY in wtDir, useWorktree=false).
+	// Recreating it via useWorktree=true would call git.CreateWorktree, which rejects
+	// a worktree whose branch has drifted from agent/<team>/<agent> — and since the
+	// old PTY is already closed below, that would leave the user with no terminal.
+	// Reusing wtDir preserves the worktree's current state. The team config was
+	// already captured correctly on the initial create, and CreateTerminal skips
+	// re-persisting a worktree path (see its persist block), so it isn't corrupted.
+	if wtDir != "" {
+		workDir = wtDir
 	}
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
@@ -605,9 +611,15 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex)
+	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex)
 	if err != nil {
 		return "", err
+	}
+
+	// Restore worktree info on the new session so future restarts still find it.
+	if s := a.ptyManager.GetSession(newSessionID); s != nil && wtDir != "" {
+		s.WorktreeDir = wtDir
+		s.WorktreeRepo = wtRepo
 	}
 
 	return newSessionID, nil
