@@ -158,7 +158,7 @@ func List(dataDir, room string) ([]Doc, error) {
 		}
 		data, rerr := os.ReadFile(filepath.Join(dir, stem+summaryExt))
 		if rerr != nil {
-			return nil, fmt.Errorf("summary: read %q: %w", stem, rerr)
+			continue // skip an unreadable summary file, keep the rest (graceful degradation)
 		}
 		docs = append(docs, docFromEpoch(room, epoch, string(data)))
 	}

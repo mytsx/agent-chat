@@ -219,6 +219,7 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
           </label>
           <textarea
             autoFocus
+            disabled={loading}
             value={loading ? "" : text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {

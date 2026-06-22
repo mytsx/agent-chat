@@ -2,6 +2,7 @@ package summary
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -142,6 +143,37 @@ func TestRejectsUnsafeRoom(t *testing.T) {
 		if _, _, err := Latest(dataDir, bad); err == nil {
 			t.Errorf("Latest(room=%q) = nil error, want rejection", bad)
 		}
+	}
+}
+
+// An unreadable summary file must be skipped (graceful degradation), not fail the
+// whole List/Latest — mirrors the transcript snapshot/archive skip (#29 review).
+func TestListSkipsUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0000 does not deny root")
+	}
+	dataDir := t.TempDir()
+	room := "r"
+	if _, err := Write(dataDir, room, "eski-okunur"); err != nil {
+		t.Fatal(err)
+	}
+	newest, err := Write(dataDir, room, "yeni-bozuk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make the NEWEST file unreadable.
+	bad := filepath.Join(dataDir, "hub-state", "summaries", room, newest.Epoch+".md")
+	if err := os.Chmod(bad, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) })
+
+	got, ok, err := Latest(dataDir, room)
+	if err != nil {
+		t.Fatalf("an unreadable summary must not fail Latest: %v", err)
+	}
+	if !ok || got.Text != "eski-okunur" {
+		t.Fatalf("Latest = (ok=%v, text=%q), want (true, eski-okunur) — unreadable newest skipped", ok, got.Text)
 	}
 }
 
