@@ -148,6 +148,11 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	}
 
 	c.mu.Lock()
+	// Bound the write so a wedged connection can't block here while holding c.mu —
+	// that would also stall Close() (it needs the same mutex), defeating Close's own
+	// write deadline. On timeout the write errors, the mutex releases, and the RPC
+	// fails like any other write error.
+	_ = conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
 	err = conn.WriteMessage(websocket.TextMessage, data)
 	c.mu.Unlock()
 	if err != nil {
