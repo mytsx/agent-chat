@@ -1008,7 +1008,11 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 // instructions feed the session summary. Best-effort: it never blocks or fails
 // the actual delivery, and is skipped for non-agent (plain shell) terminals.
 func (a *App) logUserPrompt(sessionID, content string) {
-	if a.hubClient == nil {
+	// Capture the hub client before spawning: the goroutine must not read the
+	// reassignable a.hubClient field (monitorHub swaps it on hub-crash recovery),
+	// which would race that write.
+	client := a.hubClient
+	if client == nil {
 		return
 	}
 	sess := a.ptyManager.GetSession(sessionID)
@@ -1028,7 +1032,7 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := a.hubClient.LogMessage(room, agent, content); err != nil {
+		if err := client.LogMessage(room, agent, content); err != nil {
 			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
 		}
 	}()
@@ -1037,16 +1041,19 @@ func (a *App) logUserPrompt(sessionID, content string) {
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
 // user_prompt addressed to "all" (#29).
 func (a *App) logTeamBroadcast(teamID, content string) {
-	if a.hubClient == nil {
+	// Capture the hub client before spawning (see logUserPrompt): the goroutine
+	// must not read the reassignable a.hubClient field.
+	client := a.hubClient
+	if client == nil {
 		return
 	}
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
-	// broadcast that already reached every agent. Tracked by promptLogWG.
+	// broadcast that already reached every agent. Tracked by promptLogN.
 	room := a.roomForTeam(teamID)
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := a.hubClient.LogMessage(room, "all", content); err != nil {
+		if err := client.LogMessage(room, "all", content); err != nil {
 			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
 		}
 	}()
