@@ -222,6 +222,7 @@ func (s *Store) SeedIfMissingByName(name, content, category string, tags []strin
 	}
 	s.prompts = append(s.prompts, p)
 	if err := s.save(); err != nil {
+		s.prompts = s.prompts[:len(s.prompts)-1] // roll back the in-memory add so it doesn't diverge from disk
 		return Prompt{}, false, err
 	}
 	return p, true, nil

@@ -99,6 +99,7 @@ func Write(dataDir, room, text string) (Doc, error) {
 
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(text), 0644); err != nil {
+		os.Remove(tmp) // don't leave an orphan temp on a partial/failed write
 		return Doc{}, fmt.Errorf("summary: write temp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
