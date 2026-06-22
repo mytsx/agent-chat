@@ -300,12 +300,15 @@ func (a *App) monitorHub() {
 		}
 		if state != nil && !state.Success() {
 			log.Printf("[HUB-MONITOR] Hub crashed (exit=%d), restarting...", state.ExitCode())
-			// Clean up old client and clear the field: if startHub/connectToHub below
-			// fail and return, readers must see nil ("hub not connected") rather than a
-			// closed client. connectToHub stores the fresh client on success.
+			// Clear the field first, then close the old client asynchronously. Store(nil)
+			// up front makes readers fast-fail ("hub not connected") immediately and means
+			// a return on startHub/connectToHub failure below leaves nil, not a dead
+			// client. Close runs in a goroutine because a wedged write can block it (it
+			// holds the client mutex during conn.WriteMessage) — the same hazard shutdown()
+			// bounds — and crash recovery must not stall on cleanup of the dead client.
 			if client := a.hubClient.Load(); client != nil {
-				client.Close()
 				a.hubClient.Store(nil)
+				go client.Close()
 			}
 			// Restart
 			time.Sleep(500 * time.Millisecond)
