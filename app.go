@@ -20,9 +20,9 @@ import (
 
 	"desktop/internal/cli"
 	"desktop/internal/git"
+	"desktop/internal/hub"
 	"desktop/internal/hubclient"
 	"desktop/internal/orchestrator"
-	"desktop/internal/hub"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/sanitize"

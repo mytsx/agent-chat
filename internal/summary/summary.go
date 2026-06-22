@@ -34,7 +34,7 @@ var writeMu sync.Mutex
 // Doc is a single saved per-session room summary.
 type Doc struct {
 	Room      string `json:"room"`
-	Epoch     string `json:"epoch"`      // unix-second filename stem; fixed-width so lexicographic order == chronological
+	Epoch     string `json:"epoch"` // unix-second filename stem; fixed-width so lexicographic order == chronological
 	Text      string `json:"text"`
 	CreatedAt string `json:"created_at"` // RFC3339, derived from the epoch
 }

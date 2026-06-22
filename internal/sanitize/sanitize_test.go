@@ -53,7 +53,7 @@ func TestIsInvisibleFormat(t *testing.T) {
 		0x2066, 0x2069, // bidi isolates
 		0xfeff,         // BOM / ZWNBSP
 		0x2028, 0x2029, // line / paragraph separators (Zl/Zp, not Cf)
-		0xe0061,        // a Tags-block char (invisible-payload smuggling)
+		0xe0061, // a Tags-block char (invisible-payload smuggling)
 	}
 	for _, r := range invisible {
 		if !IsInvisibleFormat(r) {
