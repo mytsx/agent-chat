@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
-import GridLayout, { WidthProvider, type Layout } from "react-grid-layout";
+import GridLayout, { WidthProvider, type LayoutItem } from "react-grid-layout/legacy";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import { parseGrid, gridCapacity, isCustomLayout, TerminalSession } from "../lib/types";
@@ -29,7 +29,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function normalizeLayout(item: Layout): Layout {
+function normalizeLayout(item: LayoutItem): LayoutItem {
   const w = clamp(Math.round(item.w || FREEFORM_DEFAULT_W), FREEFORM_MIN_W, FREEFORM_COLS);
   const x = clamp(Math.round(item.x || 0), 0, FREEFORM_COLS - w);
   return {
@@ -43,7 +43,7 @@ function normalizeLayout(item: Layout): Layout {
   };
 }
 
-function createDefaultLayoutItem(order: number, sessionID: string): Layout {
+function createDefaultLayoutItem(order: number, sessionID: string): LayoutItem {
   const perRow = Math.max(1, Math.floor(FREEFORM_COLS / FREEFORM_DEFAULT_W));
   return normalizeLayout({
     i: sessionID,
@@ -56,7 +56,7 @@ function createDefaultLayoutItem(order: number, sessionID: string): Layout {
   });
 }
 
-function layoutSignature(layout: Layout[]): string {
+function layoutSignature(layout: readonly LayoutItem[]): string {
   return layout
     .map((item) => normalizeLayout(item))
     .sort((a, b) => a.i.localeCompare(b.i))
@@ -64,11 +64,11 @@ function layoutSignature(layout: Layout[]): string {
     .join("|");
 }
 
-function layoutsEqual(a: Layout[], b: Layout[]): boolean {
+function layoutsEqual(a: readonly LayoutItem[], b: readonly LayoutItem[]): boolean {
   return layoutSignature(a) === layoutSignature(b);
 }
 
-function syncLayoutWithSessions(layout: Layout[], sessions: TerminalSession[]): Layout[] {
+function syncLayoutWithSessions(layout: LayoutItem[], sessions: TerminalSession[]): LayoutItem[] {
   const sessionIDs = new Set(sessions.map((s) => s.sessionID));
   const existing = layout.filter((item) => sessionIDs.has(item.i)).map(normalizeLayout);
   const existingIDs = new Set(existing.map((item) => item.i));
@@ -84,7 +84,7 @@ function syncLayoutWithSessions(layout: Layout[], sessions: TerminalSession[]): 
   return existing;
 }
 
-function readSavedCustomLayouts(): Record<string, Layout[]> {
+function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
   if (typeof window === "undefined") {
     return {};
   }
@@ -93,15 +93,15 @@ function readSavedCustomLayouts(): Record<string, Layout[]> {
     if (!raw) {
       return {};
     }
-    const parsed = JSON.parse(raw) as Record<string, Layout[]>;
-    const result: Record<string, Layout[]> = {};
+    const parsed = JSON.parse(raw) as Record<string, LayoutItem[]>;
+    const result: Record<string, LayoutItem[]> = {};
 
     for (const [teamID, layout] of Object.entries(parsed)) {
       if (!Array.isArray(layout)) {
         continue;
       }
       result[teamID] = layout
-        .filter((item): item is Layout => !!item && typeof item.i === "string")
+        .filter((item): item is LayoutItem => !!item && typeof item.i === "string")
         .map((item) => normalizeLayout(item));
     }
 
@@ -118,7 +118,7 @@ export default function TerminalGrid() {
   const [openingFromConfig, setOpeningFromConfig] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   const loadSummary = useSummaries((s) => s.loadSummary);
-  const [customLayouts, setCustomLayouts] = useState<Record<string, Layout[]>>(() =>
+  const [customLayouts, setCustomLayouts] = useState<Record<string, LayoutItem[]>>(() =>
     readSavedCustomLayouts()
   );
 
@@ -187,7 +187,7 @@ export default function TerminalGrid() {
     await updateTeam(team.id, team.name, layout, team.agents);
   };
 
-  const handleCustomLayoutChange = (layout: Layout[]) => {
+  const handleCustomLayoutChange = (layout: readonly LayoutItem[]) => {
     if (!team) return;
     setCustomLayouts((prev) => {
       const current = prev[team.id] ?? [];
