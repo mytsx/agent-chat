@@ -741,8 +741,11 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 		return
 	}
 	if len(content) > maxFieldLength {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("prompt too long: %d chars, max %d", len(content), maxFieldLength))
-		return
+		// The prompt was already delivered to the agent's PTY; logging is best-effort
+		// and fire-and-forget, so TRUNCATE the transcript record (at a rune boundary)
+		// rather than rejecting it — dropping it would silently omit a delivered
+		// instruction from the summary.
+		content = strings.ToValidUTF8(content[:maxFieldLength], "")
 	}
 
 	roomState := h.getOrCreateRoom(room)

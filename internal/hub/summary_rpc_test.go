@@ -90,6 +90,37 @@ func TestHandleLogMessage_EmptyContentRejected(t *testing.T) {
 	}
 }
 
+// A prompt the app already delivered to the agent's PTY can render above the field
+// cap; logging is fire-and-forget, so the transcript record must be TRUNCATED (not
+// rejected) — otherwise the summary silently omits an instruction the agent got.
+func TestHandleLogMessage_TruncatesOverlongContent(t *testing.T) {
+	h, _ := newTestHubClient()
+	c := desktopClient(h)
+	big := strings.Repeat("a", maxFieldLength+500)
+
+	req := types.Request{
+		ID:   "1",
+		Type: "log_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"to": "backend", "content": big}),
+	}
+	h.handleRequest(c, req)
+	resp := readResponse(t, c, "log_message")
+	if !resp.Success {
+		t.Fatalf("over-long content must be truncated+logged, not rejected: %s", resp.Error)
+	}
+	msgs := h.getRoom("r1").GetMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 logged message, got %d", len(msgs))
+	}
+	if len(msgs[0].Content) > maxFieldLength {
+		t.Fatalf("content not truncated: %d bytes (max %d)", len(msgs[0].Content), maxFieldLength)
+	}
+	if len(msgs[0].Content) == 0 {
+		t.Fatal("content truncated to empty")
+	}
+}
+
 func TestHandleReadSummary_NoSummary(t *testing.T) {
 	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
 	c := desktopClient(h)
