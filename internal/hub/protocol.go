@@ -774,12 +774,15 @@ func (h *Hub) handleReadSummary(c *Client, req types.Request) {
 		return
 	}
 
-	// A continued manager is steered here instead of read_all_messages, so refresh
-	// its heartbeat like the other read/poll handlers — otherwise an actively
-	// polling manager goes stale (managerTimeoutSec) and routing is bypassed.
+	// A continued agent is steered here instead of read_all_messages/read_messages,
+	// so refresh BOTH the manager lock heartbeat AND the roster LastSeen like the
+	// other read/poll handlers — otherwise an actively-polling manager goes stale
+	// (managerTimeoutSec → routing bypassed) and any polling agent gets evicted by
+	// roster stale cleanup (Agent.LastSeen) after the timeout.
 	if c.agentName != "" {
 		if rs := h.getRoom(room); rs != nil {
 			rs.TouchManagerHeartbeat(c.agentName)
+			rs.TouchAgentLastSeen(c.agentName)
 		}
 	}
 

@@ -374,6 +374,19 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 }
 
 // TouchManagerHeartbeat updates manager heartbeat if this agent is active manager.
+// TouchAgentLastSeen refreshes a roster agent's LastSeen, marking it active so
+// stale cleanup (which evicts by Agent.LastSeen) doesn't remove an agent that is
+// actively polling a read RPC. No-op if the agent isn't in the roster.
+func (r *RoomState) TouchAgentLastSeen(agentName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentName]; ok {
+		agent.LastSeen = types.Now()
+		r.agents[agentName] = agent
+		r.dirty = true
+	}
+}
+
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

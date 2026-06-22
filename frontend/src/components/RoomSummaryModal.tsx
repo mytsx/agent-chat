@@ -51,6 +51,13 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     };
   }, []);
 
+  // Always-current editor text, so a slow save can tell whether the user kept
+  // typing after clicking Save (and avoid clobbering those edits).
+  const textRef = useRef(text);
+  useEffect(() => {
+    textRef.current = text;
+  }, [text]);
+
   // Counted in code points to match the Go side; the backend stays source of truth.
   const SUMMARY_MAX = 8000;
   const len = [...text].length;
@@ -151,14 +158,18 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     setSaving(true);
     setError(null);
     try {
-      const info = await saveSummary(r, text);
+      const submitted = text;
+      const info = await saveSummary(r, submitted);
       if (!aliveRef.current || roomRef.current !== r) return; // closed/switched: don't apply
-      // Adopt the persisted value (backend may sanitize / cap / normalize CRLF) as
-      // BOTH the editor text and the dirty baseline, so isDirty goes false and a
-      // re-save doesn't create a duplicate file.
-      setText(info.text);
+      // The persisted value (backend may sanitize / cap / normalize CRLF) becomes
+      // the new dirty baseline. Only overwrite the editor with it if the user has
+      // NOT typed since clicking Save — otherwise keep their in-flight edits (which
+      // stay correctly marked dirty against the new baseline).
       setInitialText(info.text);
       setGeneratedAt(info.created_at);
+      if (textRef.current === submitted) {
+        setText(info.text);
+      }
       setNotice("💾 Özet kaydedildi.");
     } catch (e) {
       if (roomRef.current === r) setError(String(e));

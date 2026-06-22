@@ -199,6 +199,40 @@ func TestHandleReadSummary_RefreshesManagerHeartbeat(t *testing.T) {
 	}
 }
 
+// A continued agent steered to poll read_summary must keep its roster LastSeen
+// fresh too — stale cleanup removes agents by Agent.LastSeen (not the manager
+// lock), so a polling agent would otherwise be deleted after the stale timeout
+// (#29 Codex review; complements the manager-heartbeat refresh).
+func TestHandleReadSummary_RefreshesAgentLastSeen(t *testing.T) {
+	dataDir := t.TempDir()
+	h := New(dataDir, "default", log.New(io.Discard, "", 0))
+	if _, err := summary.Write(dataDir, "r1", "özet"); err != nil {
+		t.Fatal(err)
+	}
+	rs := h.getOrCreateRoom("r1")
+	if _, _, err := rs.Join("dev", "developer"); err != nil {
+		t.Fatal(err)
+	}
+	rs.mu.Lock()
+	ag := rs.agents["dev"]
+	ag.LastSeen = types.Now() - 1000
+	rs.agents["dev"] = ag
+	rs.mu.Unlock()
+
+	c := &Client{hub: h, send: make(chan []byte, 64), rooms: map[string]bool{}}
+	c.agentName = "dev"
+	c.joinedRoom = "r1"
+	h.handleReadSummary(c, types.Request{ID: "1", Type: "read_summary", Room: "r1"})
+	_ = readResponse(t, c, "read_summary")
+
+	rs.mu.Lock()
+	age := types.Now() - rs.agents["dev"].LastSeen
+	rs.mu.Unlock()
+	if age > 5 {
+		t.Fatalf("read_summary did not refresh agent roster LastSeen: age=%.0fs", age)
+	}
+}
+
 func TestHandleReadSummary_WrongRoomRejected(t *testing.T) {
 	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}

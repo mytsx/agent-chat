@@ -1010,10 +1010,10 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	if sess == nil || sess.AgentName == "" {
 		return
 	}
-	// A plain shell terminal gets an AgentName but never join_room's as an AI
-	// participant (no MCP startup), so a prompt sent to it isn't room agent
-	// traffic — don't record it as a user_prompt for the summary.
-	if sess.CLIType == string(cli.CLIShell) {
+	// Only real AI agents (MCP room participants) join the room; a plain shell — or
+	// a legacy/empty CLI type that falls through to the login shell — never does, so
+	// a prompt sent to it isn't room agent traffic and must not be logged (#29).
+	if !isAICLIType(sess.CLIType) {
 		return
 	}
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
@@ -1131,9 +1131,9 @@ func broadcastToSessions(
 		if o.skipped {
 			continue
 		}
-		// A plain shell is not a room AI participant; its delivery success/failure
-		// must not drive whether the broadcast is logged for the summary (#29).
-		isAI := sessions[i].CLIType != string(cli.CLIShell)
+		// Only real AI agents (MCP participants) count toward broadcast delivery for
+		// the summary; a plain shell or an empty/legacy CLI type does not (#29).
+		isAI := isAICLIType(sessions[i].CLIType)
 		if o.err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", o.agentName, o.err))
 		} else {
@@ -1157,6 +1157,20 @@ func broadcastToSessions(
 // observer feature can store the role in any casing.
 func isObserverRole(role string) bool {
 	return strings.EqualFold(strings.TrimSpace(role), "observer")
+}
+
+// isAICLIType reports whether a CLI type is an MCP room participant (a real AI
+// agent that runs join_room), as opposed to a plain shell or an empty/unknown
+// type (login-shell fallback, no MCP startup). #29 records prompts / counts
+// broadcast targets only for these — positively whitelisting AI CLIs avoids
+// mistaking an empty/legacy CLI type for an agent.
+func isAICLIType(cliType string) bool {
+	switch cliType {
+	case string(cli.CLIClaude), string(cli.CLIGemini), string(cli.CLICopilot), string(cli.CLICodex):
+		return true
+	default:
+		return false
+	}
 }
 
 // broadcastRoleLookup returns a role resolver for a team's agents, used to filter

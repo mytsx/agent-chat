@@ -75,6 +75,32 @@ func TestRenderSummaryPromptText_AppendsTranscriptWhenPlaceholderMissing(t *test
 
 // aiDelivered reflects AI-target delivery only: a failing plain shell must not
 // flip it false when every AI agent received the broadcast (#29 Codex review).
+func TestIsAICLIType(t *testing.T) {
+	for _, ai := range []string{"claude", "gemini", "copilot", "codex"} {
+		if !isAICLIType(ai) {
+			t.Errorf("isAICLIType(%q) = false, want true", ai)
+		}
+	}
+	for _, notAI := range []string{"shell", "", "bash", "zsh", "unknown"} {
+		if isAICLIType(notAI) {
+			t.Errorf("isAICLIType(%q) = true, want false (not an MCP room participant)", notAI)
+		}
+	}
+}
+
+// An empty/unknown CLI type is a plain shell (login-shell fallback, no MCP startup)
+// and must not count as an AI broadcast target (#29 Codex review).
+func TestBroadcastToSessions_AIDeliveredFalseForEmptyCLIType(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "x", AgentName: "Legacy", CLIType: ""},
+	}
+	inject, _ := recordingInject(nil)
+	_, _, aiDelivered := broadcastToSessions(sessions, "x", true, noRoles, inject)
+	if aiDelivered {
+		t.Fatal("empty CLIType must not count as an AI target")
+	}
+}
+
 func TestBroadcastToSessions_AIDeliveredIgnoresShellFailure(t *testing.T) {
 	sessions := []*ptymgr.PTYSession{
 		{ID: "ai", AgentName: "Alice", CLIType: "claude"},
