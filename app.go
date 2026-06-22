@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -51,9 +52,11 @@ type App struct {
 	teamStore     *team.Store
 	dataDir       string
 	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
-	// promptLogWG tracks the fire-and-forget user_prompt logging goroutines so a
-	// transcript read can drain them first and not miss a just-delivered prompt (#29).
-	promptLogWG sync.WaitGroup
+	// promptLogN counts in-flight fire-and-forget user_prompt logging goroutines so
+	// a transcript read can drain them first and not miss a just-delivered prompt
+	// (#29). An atomic counter (not a WaitGroup) because new logs can start
+	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
+	promptLogN atomic.Int64
 }
 
 // NewApp creates a new App application struct
@@ -1017,9 +1020,9 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
 	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
 	room, agent := a.roomForTeam(sess.TeamID), sess.AgentName
-	a.promptLogWG.Add(1)
+	a.promptLogN.Add(1)
 	go func() {
-		defer a.promptLogWG.Done()
+		defer a.promptLogN.Add(-1)
 		if err := a.hubClient.LogMessage(room, agent, content); err != nil {
 			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
 		}
@@ -1035,9 +1038,9 @@ func (a *App) logTeamBroadcast(teamID, content string) {
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
 	// broadcast that already reached every agent. Tracked by promptLogWG.
 	room := a.roomForTeam(teamID)
-	a.promptLogWG.Add(1)
+	a.promptLogN.Add(1)
 	go func() {
-		defer a.promptLogWG.Done()
+		defer a.promptLogN.Add(-1)
 		if err := a.hubClient.LogMessage(room, "all", content); err != nil {
 			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
 		}
@@ -1048,14 +1051,15 @@ func (a *App) logTeamBroadcast(teamID, content string) {
 // bounded by timeout so a stalled/wedged hub can't hang the caller (transcript
 // generation). Best-effort: on timeout it returns and the read proceeds.
 func (a *App) drainPromptLogs(timeout time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		a.promptLogWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
+	// Poll the atomic in-flight counter rather than WaitGroup.Wait(): new log
+	// goroutines may start (Add) concurrently with this drain, which a WaitGroup
+	// forbids racing with Wait (can panic). Bounded by timeout.
+	deadline := time.Now().Add(timeout)
+	for a.promptLogN.Load() > 0 {
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

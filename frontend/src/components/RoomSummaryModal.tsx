@@ -41,6 +41,16 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     roomRef.current = room;
   }, [room]);
 
+  // Tracks whether the modal is still mounted, so a late async completion (after
+  // the user closed the modal) doesn't write to the clipboard or touch state.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
   // Counted in code points to match the Go side; the backend stays source of truth.
   const SUMMARY_MAX = 8000;
   const len = [...text].length;
@@ -97,7 +107,9 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     setNotice(null);
     try {
       const prompt = await RenderSummaryPrompt(r);
-      if (roomRef.current !== r) return; // room switched mid-flight: drop stale result
+      // Drop the result if the room switched OR the modal was closed mid-flight —
+      // otherwise we'd overwrite the clipboard the user copied after dismissing.
+      if (!aliveRef.current || roomRef.current !== r) return;
       await navigator.clipboard.writeText(prompt);
       setNotice(
         "📋 Özet promptu panoya kopyalandı. Yeni/ayrı bir agent'a (oda dışı, tarafsız) yapıştır, çıkan özeti buraya geri yapıştır."
@@ -120,7 +132,7 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
       setBusyTranscript(true);
       try {
         const tx = await GetRoomTranscript(r);
-        if (roomRef.current !== r) return; // room switched: don't show stale transcript
+        if (!aliveRef.current || roomRef.current !== r) return; // closed/switched: drop
         setTranscript(tx);
       } catch (e) {
         if (roomRef.current === r) {
@@ -140,7 +152,11 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
     setError(null);
     try {
       const info = await saveSummary(r, text);
-      if (roomRef.current !== r) return; // room switched: don't apply to the new room's modal
+      if (!aliveRef.current || roomRef.current !== r) return; // closed/switched: don't apply
+      // Adopt the persisted value (backend may sanitize / cap / normalize CRLF) as
+      // BOTH the editor text and the dirty baseline, so isDirty goes false and a
+      // re-save doesn't create a duplicate file.
+      setText(info.text);
       setInitialText(info.text);
       setGeneratedAt(info.created_at);
       setNotice("💾 Özet kaydedildi.");
