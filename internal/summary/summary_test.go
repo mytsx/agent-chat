@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -149,8 +150,11 @@ func TestRejectsUnsafeRoom(t *testing.T) {
 // An unreadable summary file must be skipped (graceful degradation), not fail the
 // whole List/Latest — mirrors the transcript snapshot/archive skip (#29 review).
 func TestListSkipsUnreadableFile(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("chmod 0000 does not deny root")
+	// Summaries are raw text (no "corrupt content" the reader rejects), so the only
+	// way to exercise the ReadFile-error skip is an unreadable file via chmod —
+	// which is a no-op as root and on Windows, so skip there.
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("chmod 0000 does not deny read as root / on Windows")
 	}
 	dataDir := t.TempDir()
 	room := "r"

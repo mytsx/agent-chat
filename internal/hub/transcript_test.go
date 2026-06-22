@@ -241,30 +241,28 @@ func TestReadFullTranscriptMissingRoom(t *testing.T) {
 	}
 }
 
-// An unreadable snapshot file must be skipped (graceful degradation), not abort
-// the whole transcript read — matching the corrupt-JSON skip. Otherwise a single
-// permission glitch loses every other snapshot in the room.
-func TestReadFullTranscriptSkipsUnreadableSnapshot(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("chmod 0000 does not deny root; test is meaningless as root")
-	}
+// A corrupt (non-JSON) snapshot file must be skipped (graceful degradation), not
+// abort the whole transcript read — otherwise one damaged snapshot loses every
+// other snapshot in the room. Uses a corrupt-content sentinel (deterministic,
+// cross-platform) rather than chmod, which is platform-specific (no-op on Windows
+// / as root).
+func TestReadFullTranscriptSkipsCorruptSnapshot(t *testing.T) {
 	dataDir := t.TempDir()
 	room := "mixed"
-	txWriteSnapshot(t, dataDir, room, "1700000000", []types.Message{txMsg(1, "a")})
 	txWriteSnapshot(t, dataDir, room, "1700000005", []types.Message{txMsg(2, "b")})
 
-	bad := filepath.Join(dataDir, "hub-state", "sessions", room, "1700000000.json")
-	if err := os.Chmod(bad, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
+	// A snapshot whose contents are not valid PersistedRoom JSON.
+	dir := filepath.Join(dataDir, "hub-state", "sessions", room)
+	if err := os.WriteFile(filepath.Join(dir, "1700000000.json"), []byte("{bozuk snapshot"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) }) // let TempDir cleanup remove it
 
 	got, err := ReadFullTranscript(dataDir, room, 0, 0)
 	if err != nil {
-		t.Fatalf("an unreadable snapshot must not fail the whole read: %v", err)
+		t.Fatalf("a corrupt snapshot must not fail the whole read: %v", err)
 	}
 	if want := []int{2}; !eqInts(txIDs(got), want) {
-		t.Fatalf("ids = %v, want %v (unreadable snapshot skipped, readable kept)", txIDs(got), want)
+		t.Fatalf("ids = %v, want %v (corrupt snapshot skipped, valid kept)", txIDs(got), want)
 	}
 }
 
