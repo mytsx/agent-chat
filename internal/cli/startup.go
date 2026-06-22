@@ -17,7 +17,13 @@ const roomSummaryHeader = "## Önceki Session Özeti (bağlam)"
 // continuing agent inherits prior-session context. When a summary is present the
 // join instruction steers agents to read_summary instead of pulling the whole
 // history, avoiding the token bloat the summary exists to prevent.
-func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName string, isManager bool) string {
+//
+// agentMode (#17) selects the join role and read instruction: "manager" (routing
+// authority, reads all), "observer" (read-only outside eye — watches via
+// read_all_messages but is told not to send), or "" (a normal agent). A single
+// mode string is used rather than parallel bools so the manager/observer states
+// can never both be set.
+func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode string) string {
 	var parts []string
 
 	// 1. Base prompt (always included)
@@ -48,26 +54,39 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, sel
 	}
 
 	// 6. Join instruction (always included)
+	isManager := strings.EqualFold(strings.TrimSpace(agentMode), "manager")
+	isObserver := strings.EqualFold(strings.TrimSpace(agentMode), "observer")
+
 	role := strings.TrimSpace(agentRole)
 	if role == "" {
 		role = agentName
 	}
 	readInstruction := fmt.Sprintf("Odaya katıldıktan sonra read_messages(\"%s\") ile mesajları oku ve diğer agent'larla iletişime geç.", agentName)
-	if isManager {
+	switch {
+	case isManager:
 		role = "manager"
 		// read_all_messages varsayılan limit'i 15'tir; limit verilmezse manager
 		// sessizce yalnızca son 15 mesajı görür. Tüm geçmişi (oda en çok 500 mesaj
 		// tutar) okuması için limit'i açıkça yüksek geç.
 		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0, limit=1000) ile tüm mesajları oku ve yönlendir."
+	case isObserver:
+		// Observer salt-okunur dış gözdür: rolü, serbest agentRole'ü EZER ki hub
+		// onu tanıyıp send_message'ını reddetsin. Tüm trafiği read_all_messages ile
+		// izler, ama hiçbir agent'a mesaj göndermez — yalnızca kullanıcıyla konuşur.
+		role = "observer"
+		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0) ile odadaki tüm trafiği izle. DİĞER AGENT'LARA MESAJ GÖNDERME (send_message reddedilir); yalnızca kullanıcıyla konuş ve odanın gidişatını analiz et."
 	}
 	if hasSummary {
 		// Önceki session özeti zaten yukarıda enjekte edildi: agent'ı tüm geçmişi
 		// (limit=1000) çekmek yerine özete yönlendir; ayrıntı gerekirse read_summary
 		// ya da SINIRLI bir okuma yeter. Bu, özetin önlemek için var olduğu token
 		// şişmesini engeller.
-		if isManager {
+		switch {
+		case isManager:
 			readInstruction = "Önceki session özetini yukarıda okudun. Güncel ayrıntı için read_summary() çağır; yalnızca gerekiyorsa son mesajları read_all_messages(since_id=0, limit=50) ile çek ve yönlendir."
-		} else {
+		case isObserver:
+			readInstruction = "Önceki session özetini yukarıda okudun. Güncel trafiği read_all_messages(since_id=0) ile izle; DİĞER AGENT'LARA MESAJ GÖNDERME, yalnızca kullanıcıyla konuş."
+		default:
 			readInstruction = fmt.Sprintf("Önceki session özetini yukarıda okudun. Ayrıntı için read_summary() ya da read_messages(\"%s\") çağır ve diğer agent'larla iletişime geç.", agentName)
 		}
 	}

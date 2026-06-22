@@ -341,3 +341,90 @@ func TestBroadcastOutcomeError(t *testing.T) {
 		t.Errorf("full success must return nil, got %v", err)
 	}
 }
+
+// --- #17 observer: app-layer mode resolution + prompt composition ---
+
+func TestResolveAgentMode(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, err := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+		{Name: "dev", Role: "Developer", CLIType: "claude"},
+		{Name: "boss", CLIType: "claude"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetManager(tm.ID, "boss"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+
+	a := &App{teamStore: store}
+
+	cases := []struct {
+		agent string
+		want  string
+	}{
+		{"watcher", "observer"},
+		{"dev", ""},
+		{"boss", "manager"},
+	}
+	for _, c := range cases {
+		got, err := a.resolveAgentMode(tm.ID, c.agent, "")
+		if err != nil {
+			t.Fatalf("resolveAgentMode(%q): %v", c.agent, err)
+		}
+		if got != c.want {
+			t.Errorf("resolveAgentMode(%q) = %q, want %q", c.agent, got, c.want)
+		}
+	}
+}
+
+func TestIsObserverAgent(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "Watcher", Role: "OBSERVER", CLIType: "claude"}, // case-insensitive
+		{Name: "dev", Role: "Developer", CLIType: "claude"},
+	})
+	a := &App{teamStore: store}
+
+	if !a.isObserverAgent(tm.ID, "watcher") {
+		t.Error("watcher should be an observer (case-insensitive)")
+	}
+	if a.isObserverAgent(tm.ID, "dev") {
+		t.Error("dev is not an observer")
+	}
+	if a.isObserverAgent(tm.ID, "absent") {
+		t.Error("absent agent is not an observer")
+	}
+	if a.isObserverAgent("", "watcher") {
+		t.Error("empty teamID must resolve to not-observer")
+	}
+}
+
+func TestComposeAgentPrompt_ObserverInjectsObserverPrompt(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+	})
+	a := &App{teamStore: store, dataDir: t.TempDir()}
+
+	got := a.composeAgentPrompt(tm.ID, "watcher", "", "observer")
+	if !strings.Contains(got, `join_room("watcher", "observer")`) {
+		t.Fatalf("expected observer join instruction, got:\n%s", got)
+	}
+	if !strings.Contains(got, "outside eye") {
+		t.Fatalf("expected observer role prompt to be injected, got:\n%s", got)
+	}
+	if strings.Contains(got, "MANAGER agent for this room") {
+		t.Fatalf("observer prompt must not include the manager prompt:\n%s", got)
+	}
+}

@@ -15,6 +15,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// RoleObserver is the AgentConfig.Role value (#17) marking a read-only observer.
+// It is the single source the hub's IsObserver gate and broadcastRoleLookup read,
+// and is mutually exclusive with the team's ManagerAgent (an agent is one or the
+// other, never both).
+const RoleObserver = "observer"
+
 // AgentConfig represents an agent's configuration within a team
 type AgentConfig struct {
 	Name     string `json:"name"`
@@ -266,14 +272,84 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 
 	for i, t := range s.teams {
 		if t.ID == id {
+			prevMgr := s.teams[i].ManagerAgent
+			prevAgents := t.Agents
 			s.teams[i].ManagerAgent = managerAgent
+			// Mutual exclusion (#17): a manager is not an observer. Clear a stale
+			// observer Role on the new manager, else broadcastRoleLookup would wrongly
+			// skip the manager from broadcasts. Copy-on-write so concurrent readers of
+			// the shared Agents slice don't race.
+			if managerAgent != "" {
+				for j, a := range t.Agents {
+					if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(managerAgent)) {
+						if strings.EqualFold(strings.TrimSpace(a.Role), RoleObserver) {
+							updated := make([]AgentConfig, len(prevAgents))
+							copy(updated, prevAgents)
+							updated[j].Role = ""
+							s.teams[i].Agents = updated
+						}
+						break
+					}
+				}
+			}
 			if err := s.save(); err != nil {
+				s.teams[i].ManagerAgent = prevMgr
+				s.teams[i].Agents = prevAgents
 				return Team{}, err
 			}
 			return s.teams[i], nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
+}
+
+// SetObserver marks an agent as the room's read-only observer (#17) by setting its
+// Role to RoleObserver, appending the agent if it doesn't exist yet. Because an
+// agent can't be both manager and observer, the manager assignment is cleared if
+// this agent held it. The observer Role is what the hub's IsObserver gate and
+// broadcastRoleLookup read. Copy-on-write so concurrent readers don't race.
+func (s *Store) SetObserver(teamID, name string) (Team, error) {
+	if err := validation.ValidateName(name); err != nil {
+		return Team{}, fmt.Errorf("invalid agent name: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, t := range s.teams {
+		if t.ID != teamID {
+			continue
+		}
+		prevAgents := t.Agents
+		prevMgr := s.teams[i].ManagerAgent
+
+		updated := make([]AgentConfig, len(prevAgents))
+		copy(updated, prevAgents)
+		found := false
+		for j, a := range updated {
+			if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(name)) {
+				updated[j].Role = RoleObserver
+				found = true
+				break
+			}
+		}
+		if !found {
+			updated = append(updated, AgentConfig{Name: name, Role: RoleObserver})
+		}
+		s.teams[i].Agents = updated
+		// Mutual exclusion: an observer is not a manager.
+		if s.teams[i].IsManagerAgent(name) {
+			s.teams[i].ManagerAgent = ""
+		}
+
+		if err := s.save(); err != nil {
+			s.teams[i].Agents = prevAgents
+			s.teams[i].ManagerAgent = prevMgr
+			return Team{}, err
+		}
+		return s.teams[i], nil
+	}
+	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
 
 // maxCharterLen is the soft upper bound on a room charter (custom_prompt),
