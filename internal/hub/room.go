@@ -16,6 +16,10 @@ const (
 	maxFieldLength     = 32000
 	staleTimeout       = 300 // seconds
 	managerTimeoutSec  = 300
+	// roleObserver is the special, normalized role value (#17) for a read-only
+	// "outside eye" agent: it watches the room but is blocked from send_message.
+	// Like "manager" it is matched case-insensitively after trimming.
+	roleObserver = "observer"
 )
 
 // RoomState holds in-memory state for a single chat room.
@@ -385,6 +389,17 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 		r.agents[agentName] = agent
 		r.dirty = true
 	}
+}
+
+// IsObserver reports whether the named room agent joined with the observer role
+// (#17), compared case-insensitively after trimming. Used by handleSendMessage to
+// reject an observer's send_message and by handleGetAllMessages to grant it
+// read-only access to the full transcript. False if the agent is not in the roster.
+func (r *RoomState) IsObserver(agentName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	a, ok := r.agents[agentName]
+	return ok && strings.EqualFold(strings.TrimSpace(a.Role), roleObserver)
 }
 
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {

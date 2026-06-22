@@ -332,6 +332,17 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	roomState := h.getOrCreateRoom(room)
 
+	// Observer agents (#17) are read-only. Reject send_message BEFORE the manager
+	// gateway below, so an observer's message is never even rerouted to the manager
+	// — and because this returns before GetActiveManagerAndTouch, it cannot refresh
+	// the active manager's heartbeat. Keyed on the join-bound identity c.agentName
+	// (the from==c.agentName check above already pins it), so the gate can't be
+	// bypassed with a forged `from`.
+	if roomState.IsObserver(c.agentName) {
+		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
+		return
+	}
+
 	activeManager := roomState.GetActiveManagerAndTouch(data.From)
 
 	to := data.To
@@ -457,11 +468,23 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 			return
 		}
 		activeManager := roomState.GetActiveManager()
-		if activeManager == "" || !sameAgentName(c.agentName, activeManager) {
-			c.sendError(req.ID, req.Type, "yalnızca aktif manager tüm mesajları okuyabilir")
+		isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
+		// Observer agents (#17) get read-only access to the full transcript. The role
+		// is exclusive at the room level (an agent joins as either "manager" or
+		// "observer"), so isManager and isObserver never overlap.
+		isObserver := roomState.IsObserver(c.agentName)
+		if !isManager && !isObserver {
+			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya observer tüm mesajları okuyabilir")
 			return
 		}
-		roomState.TouchManagerHeartbeat(c.agentName)
+		if isManager {
+			roomState.TouchManagerHeartbeat(c.agentName)
+		} else {
+			// Refresh the observer's last_seen so a read_all-only poller is not
+			// stale-evicted (the read path itself doesn't touch last_seen). Without
+			// this the observer would lose read_all access after staleTimeout.
+			roomState.TouchAgentLastSeen(c.agentName)
+		}
 	}
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
 
