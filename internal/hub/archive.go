@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"desktop/internal/types"
 	"desktop/internal/validation"
@@ -17,9 +18,58 @@ import (
 const archiveBufferSize = 256
 
 // archiveJob carries a batch of messages leaving a room to the archive writer.
+// A job with done != nil is a flush barrier: it carries no messages and the
+// writer closes done after processing it, signalling that every job enqueued
+// before it has reached disk (the channel is FIFO).
 type archiveJob struct {
 	room string
 	msgs []types.Message
+	done chan struct{}
+}
+
+// processArchiveJob writes a job's messages (if any) and releases its flush
+// barrier (if any). Shared by the writer goroutine and the shutdown drain so a
+// pending flush is never left waiting.
+func (h *Hub) processArchiveJob(job archiveJob) {
+	if len(job.msgs) > 0 {
+		h.archiveBestEffort(job.room, job.msgs)
+	}
+	if job.done != nil {
+		close(job.done)
+	}
+}
+
+// flushArchive blocks until the async writer has drained every job enqueued so
+// far, so a subsequent disk read sees the full archive. It enqueues a FIFO
+// barrier behind the current backlog and waits for the writer to reach it.
+// Best-effort: on shutdown or if the writer is wedged it returns rather than
+// hang (callers are low-frequency: session save / transcript read).
+func (h *Hub) flushArchive() {
+	if h.dataDir == "" {
+		return
+	}
+	// No writer running (unit/in-process hubs built with New but not Run): there is
+	// nothing draining archiveCh, so a barrier would just block until the timeout.
+	// Skip — there is no async backlog to flush.
+	h.mu.Lock()
+	started := h.archiveStarted
+	h.mu.Unlock()
+	if !started {
+		return
+	}
+	done := make(chan struct{})
+	select {
+	case h.archiveCh <- archiveJob{done: done}:
+	case <-h.done:
+		return // shutting down; drainArchiveBacklog handles the rest
+	case <-time.After(2 * time.Second):
+		return // writer wedged; don't block the caller
+	}
+	select {
+	case <-done:
+	case <-h.done:
+	case <-time.After(2 * time.Second):
+	}
 }
 
 // archiveDir returns the directory holding per-room append-only archives.
@@ -74,7 +124,7 @@ func (h *Hub) drainArchiveBacklog() {
 	for {
 		select {
 		case job := <-h.archiveCh:
-			h.archiveBestEffort(job.room, job.msgs)
+			h.processArchiveJob(job)
 		default:
 			return
 		}
@@ -89,12 +139,12 @@ func (h *Hub) runArchiveWriter() {
 	for {
 		select {
 		case job := <-h.archiveCh:
-			h.archiveBestEffort(job.room, job.msgs)
+			h.processArchiveJob(job)
 		case <-h.done:
 			for {
 				select {
 				case job := <-h.archiveCh:
-					h.archiveBestEffort(job.room, job.msgs)
+					h.processArchiveJob(job)
 				default:
 					return
 				}

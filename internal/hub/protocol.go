@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"desktop/internal/summary"
 	"desktop/internal/types"
 	"desktop/internal/validation"
 )
@@ -37,6 +38,10 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleArchiveRoom(c, req)
 	case "save_session":
 		h.handleSaveSession(c, req)
+	case "log_message":
+		h.handleLogMessage(c, req)
+	case "read_summary":
+		h.handleReadSummary(c, req)
 	case "get_last_message_id":
 		h.handleGetLastMessageID(c, req)
 	case "list_rooms":
@@ -696,6 +701,105 @@ func (h *Hub) handleSaveSession(c *Client, req types.Request) {
 		text = fmt.Sprintf("\U0001f4be '%s' odası session olarak kaydedildi (%d mesaj).", room, count)
 	}
 	respData, _ := json.Marshal(map[string]any{"text": text, "saved": saved, "count": count})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
+// handleLogMessage records an out-of-band human→agent prompt in the room
+// transcript as a "user_prompt" message (#29). Desktop-authorized only: the
+// "from" identity is server-forced to the user sentinel so a logged prompt can
+// never be confused with — or spoof — real agent traffic. The message goes
+// through the normal append/broadcast path so it is snapshotted, archived, and
+// shown live, but the orchestrator must skip user_prompt so it is never injected
+// back into agent terminals (it was already delivered to the target PTY).
+func (h *Hub) handleLogMessage(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop prompt loglayabilir")
+		return
+	}
+
+	var data struct {
+		To      string `json:"to"`
+		Content string `json:"content"`
+	}
+	data.To = "all"
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		c.sendError(req.ID, req.Type, "invalid log_message payload")
+		return
+	}
+
+	room := h.resolveRoom(req.Room)
+
+	if data.To != "all" {
+		if err := validation.ValidateName(data.To); err != nil {
+			c.sendError(req.ID, req.Type, err.Error())
+			return
+		}
+	}
+	content := strings.TrimSpace(data.Content)
+	if content == "" {
+		c.sendError(req.ID, req.Type, "boş prompt loglanmaz")
+		return
+	}
+	if len(content) > maxFieldLength {
+		// The prompt was already delivered to the agent's PTY; logging is best-effort
+		// and fire-and-forget, so TRUNCATE the transcript record (at a rune boundary)
+		// rather than rejecting it — dropping it would silently omit a delivered
+		// instruction from the summary.
+		content = strings.ToValidUTF8(content[:maxFieldLength], "")
+	}
+
+	roomState := h.getOrCreateRoom(room)
+	msg := roomState.LogUserPrompt(types.UserPromptFrom, data.To, content)
+
+	respData, _ := json.Marshal(map[string]any{"ok": true, "message_id": msg.ID})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+
+	h.broadcastEvent(room, "message_new", map[string]any{"message": msg})
+}
+
+// handleReadSummary returns the newest saved per-session summary for a room
+// (#29). Readable by any agent joined to the room (so a continuing agent can pull
+// prior context cheaply instead of the whole history) or by the authorized
+// desktop.
+func (h *Hub) handleReadSummary(c *Client, req types.Request) {
+	room := h.resolveRoom(req.Room)
+
+	if c.agentName == "" {
+		if !c.isDesktopAuthorized() {
+			c.sendError(req.ID, req.Type, "önce join_room veya yetkili desktop identify çağırmalısınız")
+			return
+		}
+	} else if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s", c.joinedRoom))
+		return
+	}
+
+	// A continued agent is steered here instead of read_all_messages/read_messages,
+	// so refresh BOTH the manager lock heartbeat AND the roster LastSeen like the
+	// other read/poll handlers — otherwise an actively-polling manager goes stale
+	// (managerTimeoutSec → routing bypassed) and any polling agent gets evicted by
+	// roster stale cleanup (Agent.LastSeen) after the timeout.
+	if c.agentName != "" {
+		if rs := h.getRoom(room); rs != nil {
+			rs.TouchManagerHeartbeat(c.agentName)
+			rs.TouchAgentLastSeen(c.agentName)
+		}
+	}
+
+	doc, ok, err := summary.Latest(h.dataDir, room)
+	if err != nil {
+		h.logger.Printf("read_summary failed for %s: %v", room, err)
+		c.sendError(req.ID, req.Type, fmt.Sprintf("özet okunamadı: %v", err))
+		return
+	}
+	if !ok {
+		respData, _ := json.Marshal(map[string]string{"text": "\U0001f4ed Bu oda için henüz özet yok."})
+		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		return
+	}
+
+	text := fmt.Sprintf("\U0001f4dd Önceki session özeti (%s):\n\n%s", doc.CreatedAt, doc.Text)
+	respData, _ := json.Marshal(map[string]string{"text": text})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 

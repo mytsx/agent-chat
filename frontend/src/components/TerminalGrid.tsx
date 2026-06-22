@@ -7,6 +7,8 @@ import { parseGrid, gridCapacity, isCustomLayout, TerminalSession } from "../lib
 import TerminalPane from "./TerminalPane";
 import SetupWizard from "./SetupWizard";
 import GridSelector from "./GridSelector";
+import RoomSummaryModal from "./RoomSummaryModal";
+import { useSummaries, useSummaryFor } from "../store/useSummaries";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
@@ -114,6 +116,8 @@ export default function TerminalGrid() {
   const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, openTeamFromConfig } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
   const [openingFromConfig, setOpeningFromConfig] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
+  const loadSummary = useSummaries((s) => s.loadSummary);
   const [customLayouts, setCustomLayouts] = useState<Record<string, LayoutItem[]>>(() =>
     readSavedCustomLayouts()
   );
@@ -121,6 +125,12 @@ export default function TerminalGrid() {
   const team = teams.find((t) => t.id === activeTeamID);
   const currentGridLayout = team?.grid_layout ?? "1x1";
   const teamSessions = team ? (sessions[team.id] ?? []) : [];
+  const roomName = team?.name ?? "";
+  const roomSummary = useSummaryFor(roomName);
+  // Load the room's saved summary so the "continue" panel can surface it (#29).
+  useEffect(() => {
+    if (roomName) loadSummary(roomName);
+  }, [roomName, loadSummary]);
   const { cols, rows } = parseGrid(currentGridLayout);
   const capacity = gridCapacity(currentGridLayout);
   const isCustomMode = isCustomLayout(currentGridLayout);
@@ -396,6 +406,16 @@ export default function TerminalGrid() {
               {openingFromConfig ? "Açılıyor..." : "Config ile Aç"}
             </button>
           )}
+          {(team.agents?.length ?? 0) > 0 && teamSessions.length === 0 && roomSummary?.exists && (
+            <button
+              type="button"
+              className="btn-sm"
+              onClick={() => setShowSummary(true)}
+              title="Önceki session'ın özeti — devam eden agent'lara verilecek bağlam"
+            >
+              📝 Önceki Özet
+            </button>
+          )}
           {isCustomMode && (
             <button
               type="button"
@@ -423,6 +443,10 @@ export default function TerminalGrid() {
         <div className="terminal-grid-content">
           {renderResizablePanels()}
         </div>
+      )}
+
+      {showSummary && roomName && (
+        <RoomSummaryModal room={roomName} onClose={() => setShowSummary(false)} />
       )}
     </div>
   );

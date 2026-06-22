@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRooms } from "../store/useRooms";
 import { useTeams } from "../store/useTeams";
 import { useMessages, useAgentsFor } from "../store/useMessages";
 import MessageFeed from "./MessageFeed";
+import RoomSummaryModal from "./RoomSummaryModal";
 import { RoomSummary } from "../lib/types";
 
 // truncateToMessages in the hub — rooms at/above this cap show only the most
@@ -96,6 +97,7 @@ function RoomDetail({
   const loadMessages = useMessages((s) => s.loadMessages);
   const loadAgents = useMessages((s) => s.loadAgents);
   const agents = useAgentsFor(room);
+  const [showSummary, setShowSummary] = useState(false);
 
   useEffect(() => {
     loadMessages(room);
@@ -125,6 +127,13 @@ function RoomDetail({
         >
           {isActiveTeam ? "● live" : "○ static"}
         </span>
+        <button
+          className="room-back"
+          title="Bu session'ın özetini üret / düzenle"
+          onClick={() => setShowSummary(true)}
+        >
+          📝 Özet
+        </button>
       </div>
       <div className="room-detail-agents">
         {agentNames.length > 0 ? (
@@ -143,6 +152,10 @@ function RoomDetail({
       </div>
       {/* maxMessages=0 → show full retained history, not the sidebar's 50-msg preview */}
       <MessageFeed chatDir={room} maxMessages={0} />
+
+      {showSummary && (
+        <RoomSummaryModal room={room} onClose={() => setShowSummary(false)} />
+      )}
     </div>
   );
 }

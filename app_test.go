@@ -31,6 +31,118 @@ func recordingInject(failFor map[string]bool) (func(string, string, bool) error,
 func noRoles(string) string { return "" }
 
 // All non-observer sessions receive the injection with the broadcast text.
+func TestRenderSummaryPromptText_DoesNotReprocessTranscript(t *testing.T) {
+	// A transcript that itself mentions {{ROOM}}/{{TRANSCRIPT}} (agents editing
+	// prompt templates) must survive verbatim — the fixed fields are rendered
+	// first and the transcript is inserted last, never reprocessed.
+	template := "Oda: {{ROOM}}\n--- TRANSCRIPT ---\n{{TRANSCRIPT}}"
+	transcript := "alice: lütfen {{ROOM}} ve {{TRANSCRIPT}} placeholderlarını koru"
+
+	got := renderSummaryPromptText(template, "takim-a", transcript)
+
+	if !strings.Contains(got, "Oda: takim-a") {
+		t.Fatalf("ROOM not rendered: %q", got)
+	}
+	if !strings.Contains(got, "lütfen {{ROOM}} ve {{TRANSCRIPT}} placeholderlarını koru") {
+		t.Fatalf("transcript content was reprocessed/corrupted: %q", got)
+	}
+}
+
+func TestRenderSummaryPromptText_SanitizesOutput(t *testing.T) {
+	// The editable prompt template (and inserted content) reach the clipboard the
+	// user pastes into a neutral CLI, so the rendered output must be free of
+	// bracketed-paste terminators / control runes.
+	template := "Özetle:\x1b[201~kötü\nTranscript:\n{{TRANSCRIPT}}"
+	got := renderSummaryPromptText(template, "r", "merhaba")
+	if strings.Contains(got, "\x1b[201~") || strings.Contains(got, "\x1b") {
+		t.Fatalf("template paste-escape not stripped from rendered prompt: %q", got)
+	}
+	if !strings.Contains(got, "merhaba") || !strings.Contains(got, "Transcript:") {
+		t.Fatalf("expected content missing from rendered prompt: %q", got)
+	}
+}
+
+func TestRenderSummaryPromptText_AppendsTranscriptWhenPlaceholderMissing(t *testing.T) {
+	// If the user-edited template loses {{TRANSCRIPT}} (typo/removal), the rendered
+	// prompt must still contain the conversation — otherwise the neutral agent
+	// summarizes nothing / hallucinates.
+	template := "Lütfen özetle. (placeholder yok)"
+	got := renderSummaryPromptText(template, "r", "ÖNEMLİ KONUŞMA")
+	if !strings.Contains(got, "ÖNEMLİ KONUŞMA") {
+		t.Fatalf("transcript must be included even when template lacks {{TRANSCRIPT}}: %q", got)
+	}
+}
+
+// aiDelivered reflects AI-target delivery only: a failing plain shell must not
+// flip it false when every AI agent received the broadcast (#29 Codex review).
+func TestIsAICLIType(t *testing.T) {
+	for _, ai := range []string{"claude", "gemini", "copilot", "codex"} {
+		if !isAICLIType(ai) {
+			t.Errorf("isAICLIType(%q) = false, want true", ai)
+		}
+	}
+	for _, notAI := range []string{"shell", "", "bash", "zsh", "unknown"} {
+		if isAICLIType(notAI) {
+			t.Errorf("isAICLIType(%q) = true, want false (not an MCP room participant)", notAI)
+		}
+	}
+}
+
+// An empty/unknown CLI type is a plain shell (login-shell fallback, no MCP startup)
+// and must not count as an AI broadcast target (#29 Codex review).
+func TestBroadcastToSessions_AIDeliveredFalseForEmptyCLIType(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "x", AgentName: "Legacy", CLIType: ""},
+	}
+	inject, _ := recordingInject(nil)
+	_, _, aiDelivered := broadcastToSessions(sessions, "x", true, noRoles, inject)
+	if aiDelivered {
+		t.Fatal("empty CLIType must not count as an AI target")
+	}
+}
+
+func TestBroadcastToSessions_AIDeliveredIgnoresShellFailure(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "ai", AgentName: "Alice", CLIType: "claude"},
+		{ID: "sh", AgentName: "Shelly", CLIType: "shell"},
+	}
+	inject, _ := recordingInject(map[string]bool{"sh": true}) // only the shell errors
+
+	injected, errs, aiDelivered := broadcastToSessions(sessions, "x", true, noRoles, inject)
+
+	if !aiDelivered {
+		t.Fatalf("aiDelivered = false, want true (AI got it; only the shell failed). injected=%d errs=%v", injected, errs)
+	}
+}
+
+func TestBroadcastToSessions_AIDeliveredFalseWhenAIFails(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "ai", AgentName: "Alice", CLIType: "claude"},
+		{ID: "sh", AgentName: "Shelly", CLIType: "shell"},
+	}
+	inject, _ := recordingInject(map[string]bool{"ai": true}) // the AI agent errors
+
+	_, _, aiDelivered := broadcastToSessions(sessions, "x", true, noRoles, inject)
+
+	if aiDelivered {
+		t.Fatal("aiDelivered = true, want false (the AI target failed)")
+	}
+}
+
+func TestBroadcastToSessions_AIDeliveredFalseForShellOnlyTeam(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "sh1", AgentName: "S1", CLIType: "shell"},
+		{ID: "sh2", AgentName: "S2", CLIType: "shell"},
+	}
+	inject, _ := recordingInject(nil)
+
+	_, _, aiDelivered := broadcastToSessions(sessions, "x", true, noRoles, inject)
+
+	if aiDelivered {
+		t.Fatal("aiDelivered = true, want false (no AI participant in a shell-only team)")
+	}
+}
+
 func TestBroadcastToSessions_InjectsAllNonObserver(t *testing.T) {
 	sessions := []*ptymgr.PTYSession{
 		{ID: "a", AgentName: "Alice"},
@@ -39,7 +151,7 @@ func TestBroadcastToSessions_InjectsAllNonObserver(t *testing.T) {
 	}
 	inject, calls := recordingInject(nil)
 
-	injected, errs := broadcastToSessions(sessions, "merhaba", false, noRoles, inject)
+	injected, errs, _ := broadcastToSessions(sessions, "merhaba", false, noRoles, inject)
 
 	if injected != 3 {
 		t.Errorf("injected = %d, want 3", injected)
@@ -67,7 +179,7 @@ func TestBroadcastToSessions_SkipsObservers(t *testing.T) {
 	}
 	inject, calls := recordingInject(nil)
 
-	injected, errs := broadcastToSessions(sessions, "x", false, roleOf, inject)
+	injected, errs, _ := broadcastToSessions(sessions, "x", false, roleOf, inject)
 
 	if injected != 2 {
 		t.Errorf("injected = %d, want 2 (observer skipped)", injected)
@@ -92,7 +204,7 @@ func TestBroadcastToSessions_SwallowsPerSessionErrors(t *testing.T) {
 	}
 	inject, calls := recordingInject(map[string]bool{"dead": true})
 
-	injected, errs := broadcastToSessions(sessions, "x", false, noRoles, inject)
+	injected, errs, _ := broadcastToSessions(sessions, "x", false, noRoles, inject)
 
 	if injected != 2 {
 		t.Errorf("injected = %d, want 2 (one session failed)", injected)

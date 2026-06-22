@@ -30,6 +30,10 @@ export function GetMessages(arg1:string):Promise<Array<types.Message>>;
 
 export function GetPrompt(arg1:string):Promise<prompt.Prompt>;
 
+export function GetRoomSummary(arg1:string):Promise<main.RoomSummaryInfo>;
+
+export function GetRoomTranscript(arg1:string):Promise<string>;
+
 export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
@@ -46,9 +50,13 @@ export function OpenDirectoryDialog():Promise<string>;
 
 export function OpenTeamFromConfig(arg1:string):Promise<Array<main.OpenTeamResult>>;
 
+export function RenderSummaryPrompt(arg1:string):Promise<string>;
+
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
 
 export function RestartTerminal(arg1:string):Promise<string>;
+
+export function SaveRoomSummary(arg1:string,arg2:string):Promise<main.RoomSummaryInfo>;
 
 export function SaveSession(arg1:string):Promise<main.SaveSessionResult>;
 

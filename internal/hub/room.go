@@ -173,6 +173,35 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	return msg, nil
 }
 
+// LogUserPrompt records an out-of-band human→agent prompt in the transcript as a
+// "user_prompt" message (#29). Unlike SendMessage this is not agent traffic: no
+// manager routing, no expects_reply semantics — it is purely a record so the
+// prompts the user gave each agent become part of the summarized history. It goes
+// through the normal cap/archive path so it is snapshotted and archived like any
+// message. Callers MUST NOT re-inject it into agent terminals (it was already
+// delivered to the target agent's PTY); the orchestrator skips this type.
+func (r *RoomState) LogUserPrompt(from, to, content string) types.Message {
+	r.mu.Lock()
+	msg := types.Message{
+		ID:        r.nextID(),
+		From:      from,
+		To:        to,
+		Content:   content,
+		Timestamp: types.Timestamp(),
+		Type:      types.MsgTypeUserPrompt,
+		Priority:  "normal",
+	}
+	dropped := r.appendMessageLocked(msg)
+	r.dirty = true
+	fn := r.archiveFn
+	r.mu.Unlock()
+
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
+	return msg
+}
+
 // appendMessageLocked appends msg and, if the room exceeds the cap, truncates to
 // the retained tail — returning the dropped (oldest) messages as a cheap copy so
 // the caller can archive them AFTER releasing the lock. The retained tail is
@@ -221,6 +250,13 @@ func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnl
 		if msg.ID <= sinceID {
 			continue
 		}
+		// user_prompt is a transcript-only record of a prompt already delivered to
+		// the target agent's PTY; surfacing it on read would make the agent
+		// re-handle its own instruction (#29). It stays in the raw read + the
+		// summary transcript, just not in agent-facing reads.
+		if msg.Type == types.MsgTypeUserPrompt {
+			continue
+		}
 		if unreadOnly && msg.From == agentName {
 			continue
 		}
@@ -244,9 +280,16 @@ func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int) {
 
 	var filtered []types.Message
 	for _, m := range r.messages {
-		if m.ID > sinceID {
-			filtered = append(filtered, m)
+		if m.ID <= sinceID {
+			continue
 		}
+		// Exclude transcript-only user_prompt records from the manager's read too,
+		// so a polling manager doesn't re-route a prompt the user already gave an
+		// agent directly (#29). Still present in raw read + summary transcript.
+		if m.Type == types.MsgTypeUserPrompt {
+			continue
+		}
+		filtered = append(filtered, m)
 	}
 
 	totalCount := len(filtered)
@@ -331,6 +374,19 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 }
 
 // TouchManagerHeartbeat updates manager heartbeat if this agent is active manager.
+// TouchAgentLastSeen refreshes a roster agent's LastSeen, marking it active so
+// stale cleanup (which evicts by Agent.LastSeen) doesn't remove an agent that is
+// actively polling a read RPC. No-op if the agent isn't in the roster.
+func (r *RoomState) TouchAgentLastSeen(agentName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentName]; ok {
+		agent.LastSeen = types.Now()
+		r.agents[agentName] = agent
+		r.dirty = true
+	}
+}
+
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -405,10 +461,15 @@ func (r *RoomState) GetLastMessageID(agentName string) int {
 		}
 	}
 
-	if len(r.messages) == 0 {
-		return 0
+	// Return the last AGENT-VISIBLE message ID. user_prompt records are filtered
+	// from read_messages/read_all_messages, so including them here would let an
+	// agent seed its polling cursor past unread visible messages and skip them.
+	for i := len(r.messages) - 1; i >= 0; i-- {
+		if r.messages[i].Type != types.MsgTypeUserPrompt {
+			return r.messages[i].ID
+		}
 	}
-	return r.messages[len(r.messages)-1].ID
+	return 0
 }
 
 // GetAgents returns a snapshot of current agents (no cleanup).

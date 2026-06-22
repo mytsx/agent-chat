@@ -70,6 +70,15 @@ export interface RoomSummary {
   is_default: boolean;
 }
 
+// A saved per-session room summary (#29, mirrors main.RoomSummaryInfo).
+export interface RoomSummaryInfo {
+  room: string;
+  text: string;
+  epoch: string;
+  created_at: string;
+  exists: boolean;
+}
+
 export interface TerminalSession {
   sessionID: string;
   teamID: string;

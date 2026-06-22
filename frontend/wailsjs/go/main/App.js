@@ -50,6 +50,14 @@ export function GetPrompt(arg1) {
   return window['go']['main']['App']['GetPrompt'](arg1);
 }
 
+export function GetRoomSummary(arg1) {
+  return window['go']['main']['App']['GetRoomSummary'](arg1);
+}
+
+export function GetRoomTranscript(arg1) {
+  return window['go']['main']['App']['GetRoomTranscript'](arg1);
+}
+
 export function GetTeam(arg1) {
   return window['go']['main']['App']['GetTeam'](arg1);
 }
@@ -82,12 +90,20 @@ export function OpenTeamFromConfig(arg1) {
   return window['go']['main']['App']['OpenTeamFromConfig'](arg1);
 }
 
+export function RenderSummaryPrompt(arg1) {
+  return window['go']['main']['App']['RenderSummaryPrompt'](arg1);
+}
+
 export function ResizeTerminal(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResizeTerminal'](arg1, arg2, arg3);
 }
 
 export function RestartTerminal(arg1) {
   return window['go']['main']['App']['RestartTerminal'](arg1);
+}
+
+export function SaveRoomSummary(arg1, arg2) {
+  return window['go']['main']['App']['SaveRoomSummary'](arg1, arg2);
 }
 
 export function SaveSession(arg1) {

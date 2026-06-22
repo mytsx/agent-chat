@@ -301,6 +301,26 @@ func (c *HubClient) GetAllMessages(room string, sinceID, limit int) (*types.Resp
 	return c.Send(types.Request{Type: "get_all_messages", Room: room, Data: data})
 }
 
+// GetSummary reads the newest saved per-session summary for a room (#29).
+func (c *HubClient) GetSummary(room string) (*types.Response, error) {
+	return c.Send(types.Request{Type: "read_summary", Room: room})
+}
+
+// LogMessage records an out-of-band human→agent prompt in the room transcript
+// (#29). The hub stamps the sender identity (the user sentinel); the caller only
+// supplies the recipient ("all" or an agent name) and the prompt content.
+func (c *HubClient) LogMessage(room, to, content string) error {
+	data, _ := json.Marshal(map[string]any{"to": to, "content": content})
+	resp, err := c.Send(types.Request{Type: "log_message", Room: room, Data: data})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("log_message failed: %s", resp.Error)
+	}
+	return nil
+}
+
 // ListAgents lists agents in a room.
 func (c *HubClient) ListAgents(room, agentName string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{"agent_name": agentName})

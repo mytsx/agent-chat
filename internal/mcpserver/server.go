@@ -234,6 +234,26 @@ Returns:
 		),
 	), h.readAllMessages)
 
+	// read_summary
+	app.server.AddTool(mcp.NewTool("read_summary",
+		mcp.WithDescription(`Read the previous session's summary for this room, if one was saved.
+
+Prefer this over read_all_messages on join: it gives the prior-session context
+(goals, decisions, open items) in a few tokens instead of pulling the whole
+history. Read recent messages only for detail beyond the summary.
+
+Args:
+    room: Room name (empty = default room)
+
+Returns:
+    The latest saved summary, or a notice if none exists yet`),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithString("room",
+			mcp.Description("Room name (empty = default room)"),
+		),
+	), h.readSummary)
+
 	// get_last_message_id
 	app.server.AddTool(mcp.NewTool("get_last_message_id",
 		mcp.WithDescription(`Get the ID of the last message. Useful for polling new messages.

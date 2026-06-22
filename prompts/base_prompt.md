@@ -11,6 +11,7 @@ The `room` parameter is auto-configured via environment — you do NOT need to p
 | `send_message(from_agent, content, to_agent, expects_reply, priority)` | Send message (to_agent="all" for broadcast) |
 | `read_messages(agent_name, since_id, unread_only, limit)` | Read messages for you (default limit: 10) |
 | `read_all_messages(since_id, limit)` | Read ALL messages - for manager (default limit: 15) |
+| `read_summary()` | Read the previous session's summary, if saved. Prefer this on join over pulling the full history. |
 | `list_agents()` | List agents in the room |
 | `leave_room(agent_name)` | Leave the room |
 | `clear_room()` | Clear the room (use with caution!) |

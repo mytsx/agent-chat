@@ -13,16 +13,20 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"desktop/internal/cli"
 	"desktop/internal/git"
+	"desktop/internal/hub"
 	"desktop/internal/hubclient"
 	"desktop/internal/orchestrator"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
+	"desktop/internal/sanitize"
+	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
 	"desktop/internal/validation"
@@ -48,6 +52,11 @@ type App struct {
 	teamStore     *team.Store
 	dataDir       string
 	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
+	// promptLogN counts in-flight fire-and-forget user_prompt logging goroutines so
+	// a transcript read can drain them first and not miss a just-delivered prompt
+	// (#29). An atomic counter (not a WaitGroup) because new logs can start
+	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
+	promptLogN atomic.Int64
 }
 
 // NewApp creates a new App application struct
@@ -312,17 +321,23 @@ func (a *App) shutdown(ctx context.Context) {
 	// short budget so a wedged-but-alive hub can't stall quit for up to N×(RPC
 	// timeout): a healthy hub finishes in milliseconds (local disk writes); if the
 	// budget elapses we proceed rather than hang the UI.
-	if a.hubClient != nil {
+	if client := a.hubClient; client != nil {
 		saveDone := make(chan struct{})
 		go func() {
 			defer close(saveDone)
-			rooms, err := a.hubClient.ListRoomsDetailed()
+			// Flush in-flight fire-and-forget prompt logs to the hub BEFORE snapshotting
+			// (and before Close cancels their RPC), so a prompt sent right before quit
+			// isn't lost from the saved session/summary (#29). Bounded by the outer
+			// select's budget below. Uses the captured client (not the reassignable
+			// a.hubClient field) inside the goroutine.
+			a.drainPromptLogs(2 * time.Second)
+			rooms, err := client.ListRoomsDetailed()
 			if err != nil {
 				log.Printf("[SHUTDOWN] Oda listesi alınamadı, session kaydı atlanıyor: %v", err)
 				return
 			}
 			for _, r := range rooms {
-				if _, _, err := a.hubClient.SaveSession(r.Name); err != nil {
+				if _, _, err := client.SaveSession(r.Name); err != nil {
 					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", r.Name, err)
 				}
 			}
@@ -383,6 +398,33 @@ func (a *App) seedPrompts() {
 	managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
 
 	a.promptStore.Seed(string(basePrompt), string(managerPrompt))
+
+	// #29: the editable "session summary" prompt is seeded idempotently (by name)
+	// so it also reaches users with an already-populated library; user edits are
+	// preserved on subsequent runs.
+	if _, _, err := a.promptStore.SeedIfMissingByName(summaryPromptName, a.summaryPromptContent(), "task", []string{"summary", "session"}); err != nil {
+		log.Printf("[PROMPT] özet promptu seed edilemedi: %v", err)
+	}
+}
+
+// summaryPromptName is the stable display name of the seeded session-summary
+// prompt; it doubles as the lookup key for the user-editable version.
+const summaryPromptName = "Session Özeti Üretimi"
+
+// summaryMaxRunes caps a saved summary server-side, mirroring the frontend's
+// SUMMARY_MAX. The summary is injected into every continued agent's startup
+// prompt, so an unbounded save must not bloat continuation or exceed CLI limits.
+const summaryMaxRunes = 8000
+
+// summaryPromptContent returns the summary-prompt template the user can edit: the
+// stored prompt if one exists (preserving edits), otherwise the embedded default.
+func (a *App) summaryPromptContent() string {
+	for _, p := range a.promptStore.List() {
+		if p.Name == summaryPromptName {
+			return p.Content
+		}
+	}
+	return string(a.readEmbeddedPrompt("prompts/summary_prompt.md"))
 }
 
 func (a *App) readEmbeddedPrompt(path string) []byte {
@@ -803,7 +845,22 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 		}
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, selectedPrompt, agentName, agentRole, teamName, isManager)
+	// #29: inject the previous session's summary (if any) as its own segment after
+	// the charter, so a continuing agent inherits prior context. Best-effort — a
+	// read failure must never block agent startup. The summary is keyed by room
+	// name (Team.Name, or "default" for the default room).
+	summaryRoom := teamName
+	if summaryRoom == "" {
+		summaryRoom = "default"
+	}
+	var roomSummary string
+	if doc, ok, serr := summary.Latest(a.dataDir, summaryRoom); serr != nil {
+		log.Printf("[PROMPT] oda özeti okunamadı (%s): %v", summaryRoom, serr)
+	} else if ok {
+		roomSummary = doc.Text
+	}
+
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, isManager)
 }
 
 // sendStartupPrompt sends the initial prompt to a CLI agent
@@ -913,7 +970,7 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	roleOf := a.broadcastRoleLookup(teamID)
-	injected, errs := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
+	injected, errs, aiDelivered := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
 
 	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
 		teamID, injected, len(sessions), submit, len(errs))
@@ -934,7 +991,101 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 			"errors":   errs,
 		})
 	}
+
+	// #29: record the broadcast in the room transcript (as a user_prompt to "all")
+	// so it feeds the session summary — but ONLY on a submitted delivery where every
+	// AI target received it (aiDelivered). submit=false (the UI default) just leaves
+	// draft text the user may edit or never send; aiDelivered is false when no AI
+	// participant exists (shell-only team) or any AI target failed, while a shell-
+	// only failure no longer suppresses logging a broadcast all agents received.
+	if submit && aiDelivered {
+		a.logTeamBroadcast(teamID, text)
+	}
 	return broadcastOutcomeError(injected, errs)
+}
+
+// logUserPrompt records a human→agent prompt the app delivered to a single
+// terminal into the room transcript as a user_prompt (#29), so the user's
+// instructions feed the session summary. Best-effort: it never blocks or fails
+// the actual delivery, and is skipped for non-agent (plain shell) terminals.
+func (a *App) logUserPrompt(sessionID, content string) {
+	// Capture the hub client before spawning: the goroutine must not read the
+	// reassignable a.hubClient field (monitorHub swaps it on hub-crash recovery),
+	// which would race that write.
+	client := a.hubClient
+	if client == nil {
+		return
+	}
+	sess := a.ptyManager.GetSession(sessionID)
+	if sess == nil || sess.AgentName == "" {
+		return
+	}
+	// Only real AI agents (MCP room participants) join the room; a plain shell — or
+	// a legacy/empty CLI type that falls through to the login shell — never does, so
+	// a prompt sent to it isn't room agent traffic and must not be logged (#29).
+	if !isAICLIType(sess.CLIType) {
+		return
+	}
+	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
+	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
+	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
+	room, agent := a.roomForTeam(sess.TeamID), sess.AgentName
+	a.promptLogN.Add(1)
+	go func() {
+		defer a.promptLogN.Add(-1)
+		if err := client.LogMessage(room, agent, content); err != nil {
+			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
+		}
+	}()
+}
+
+// logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
+// user_prompt addressed to "all" (#29).
+func (a *App) logTeamBroadcast(teamID, content string) {
+	// Capture the hub client before spawning (see logUserPrompt): the goroutine
+	// must not read the reassignable a.hubClient field.
+	client := a.hubClient
+	if client == nil {
+		return
+	}
+	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
+	// broadcast that already reached every agent. Tracked by promptLogN.
+	room := a.roomForTeam(teamID)
+	a.promptLogN.Add(1)
+	go func() {
+		defer a.promptLogN.Add(-1)
+		if err := client.LogMessage(room, "all", content); err != nil {
+			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
+		}
+	}()
+}
+
+// drainPromptLogs waits for in-flight prompt-log goroutines to reach the hub,
+// bounded by timeout so a stalled/wedged hub can't hang the caller (transcript
+// generation). Best-effort: on timeout it returns and the read proceeds.
+func (a *App) drainPromptLogs(timeout time.Duration) {
+	// Poll the atomic in-flight counter rather than WaitGroup.Wait(): new log
+	// goroutines may start (Add) concurrently with this drain, which a WaitGroup
+	// forbids racing with Wait (can panic). Bounded by timeout.
+	deadline := time.Now().Add(timeout)
+	for a.promptLogN.Load() > 0 {
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// roomForTeam resolves a team ID to its room name, falling back to the default
+// room — matching CreateTerminal's derivation and composeAgentPrompt's summary
+// lookup so logged prompts land in the same room as agent traffic.
+func (a *App) roomForTeam(teamID string) string {
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil && t.Name != "" {
+			return t.Name
+		}
+	}
+	return "default"
 }
 
 // broadcastOutcomeError reports a broadcast as failed only when EVERY target
@@ -960,7 +1111,7 @@ func broadcastToSessions(
 	submit bool,
 	roleOf func(agentName string) string,
 	inject func(sessionID, text string, submit bool) error,
-) (injected int, errs []string) {
+) (injected int, errs []string, aiDelivered bool) {
 	// Inject into every target concurrently: each session has its own PTY fd and
 	// write mutex, so parallel writes don't contend, and the slow paths (copilot's
 	// per-char sleeps, submit=true's 200ms settle) no longer serialize on the
@@ -988,17 +1139,30 @@ func broadcastToSessions(
 	}
 	wg.Wait()
 
-	for _, o := range outcomes {
+	aiTotal, aiOK := 0, 0
+	for i, o := range outcomes {
 		if o.skipped {
 			continue
 		}
+		// Only real AI agents (MCP participants) count toward broadcast delivery for
+		// the summary; a plain shell or an empty/legacy CLI type does not (#29).
+		isAI := isAICLIType(sessions[i].CLIType)
 		if o.err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", o.agentName, o.err))
-			continue
+		} else {
+			injected++
 		}
-		injected++
+		if isAI {
+			aiTotal++
+			if o.err == nil {
+				aiOK++
+			}
+		}
 	}
-	return injected, errs
+	// aiDelivered: at least one AI target existed and every AI target received the
+	// broadcast (a shell-only failure no longer suppresses logging).
+	aiDelivered = aiTotal > 0 && aiOK == aiTotal
+	return injected, errs, aiDelivered
 }
 
 // isObserverRole reports whether a team role designates an observer agent, which
@@ -1006,6 +1170,20 @@ func broadcastToSessions(
 // observer feature can store the role in any casing.
 func isObserverRole(role string) bool {
 	return strings.EqualFold(strings.TrimSpace(role), "observer")
+}
+
+// isAICLIType reports whether a CLI type is an MCP room participant (a real AI
+// agent that runs join_room), as opposed to a plain shell or an empty/unknown
+// type (login-shell fallback, no MCP startup). #29 records prompts / counts
+// broadcast targets only for these — positively whitelisting AI CLIs avoids
+// mistaking an empty/legacy CLI type for an agent.
+func isAICLIType(cliType string) bool {
+	switch cliType {
+	case string(cli.CLIClaude), string(cli.CLIGemini), string(cli.CLICopilot), string(cli.CLICodex):
+		return true
+	default:
+		return false
+	}
 }
 
 // broadcastRoleLookup returns a role resolver for a team's agents, used to filter
@@ -1233,6 +1411,138 @@ func (a *App) SaveSession(teamID string) (SaveSessionResult, error) {
 	return SaveSessionResult{Saved: saved, Count: count}, nil
 }
 
+// RoomSummaryInfo carries a saved per-session summary to the UI. Exists is false
+// when the room has no summary yet (Text empty).
+type RoomSummaryInfo struct {
+	Room      string `json:"room"`
+	Text      string `json:"text"`
+	Epoch     string `json:"epoch"`
+	CreatedAt string `json:"created_at"`
+	Exists    bool   `json:"exists"`
+}
+
+// GetRoomTranscript returns the room's full conversation (snapshot ∪ archive,
+// deduped, oldest-first) as readable text for display and for embedding into the
+// summary prompt (#29). For a live room it first snapshots so the in-flight tail
+// is included; the snapshot call is best-effort.
+func (a *App) GetRoomTranscript(room string) (string, error) {
+	// Drain in-flight prompt-log goroutines first so a prompt the user sent moments
+	// ago (logged fire-and-forget) is already in the hub before we snapshot+read —
+	// otherwise the transcript could miss it (#29). Bounded so a wedged hub can't
+	// hang the read.
+	a.drainPromptLogs(2 * time.Second)
+	// Capture the client once (avoid a TOCTOU between the nil-check and the call —
+	// a.hubClient is reassignable by monitorHub).
+	if client := a.hubClient; client != nil {
+		if _, _, err := client.SaveSession(room); err != nil {
+			log.Printf("[SUMMARY] transcript için snapshot alınamadı (%s): %v", room, err)
+		}
+	}
+	msgs, err := hub.ReadFullTranscript(a.dataDir, room, 0, 0)
+	if err != nil {
+		return "", err
+	}
+	return formatTranscript(msgs), nil
+}
+
+// RenderSummaryPrompt returns the editable summary prompt with {{TRANSCRIPT}} and
+// {{ROOM}} filled in, ready to paste into a fresh, NEUTRAL agent (not a room
+// worker) so the summary is produced by an impartial observer (#29).
+func (a *App) RenderSummaryPrompt(room string) (string, error) {
+	transcript, err := a.GetRoomTranscript(room)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(transcript) == "" {
+		return "", fmt.Errorf("'%s' odasında özetlenecek mesaj yok", room)
+	}
+	return renderSummaryPromptText(a.summaryPromptContent(), room, transcript), nil
+}
+
+// renderSummaryPromptText fills the summary prompt template, rendering the fixed
+// fields (ROOM) FIRST and inserting the (untrusted) transcript LAST via a single
+// replace. RenderPrompt iterates its var map in unspecified order, so passing
+// TRANSCRIPT and ROOM together risks expanding TRANSCRIPT first and then having
+// the ROOM pass rewrite any {{ROOM}} the transcript itself contains (agents
+// editing prompt templates). Inserting the transcript last leaves its content
+// verbatim.
+func renderSummaryPromptText(template, room, transcript string) string {
+	withVars := prompt.RenderPrompt(template, map[string]string{"ROOM": room})
+	var rendered string
+	if strings.Contains(withVars, "{{TRANSCRIPT}}") {
+		rendered = strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
+	} else {
+		// The user-edited template lost its {{TRANSCRIPT}} placeholder (removal or
+		// typo): append the conversation so the neutral agent always gets it rather
+		// than summarizing nothing / hallucinating history.
+		rendered = withVars + "\n\n--- TRANSCRIPT ---\n" + transcript
+	}
+	// Sanitize the FINAL prompt: the user-editable template can carry control /
+	// bracketed-paste-escape runes that would otherwise reach the clipboard the
+	// user pastes into a neutral CLI. Idempotent for the already-clean transcript.
+	return sanitize.StripForTerminalPaste(rendered)
+}
+
+// GetRoomSummary returns the room's newest saved session summary (#29).
+func (a *App) GetRoomSummary(room string) (RoomSummaryInfo, error) {
+	doc, ok, err := summary.Latest(a.dataDir, room)
+	if err != nil {
+		return RoomSummaryInfo{}, err
+	}
+	return RoomSummaryInfo{Room: room, Text: doc.Text, Epoch: doc.Epoch, CreatedAt: doc.CreatedAt, Exists: ok}, nil
+}
+
+// SaveRoomSummary persists a user-produced/edited summary as a new immutable
+// per-session summary; "continue" later injects the newest one (#29).
+func (a *App) SaveRoomSummary(room, text string) (RoomSummaryInfo, error) {
+	// Clean control / bracketed-paste-escape runes before persisting: the saved
+	// summary is later injected into continued agents' startup prompts inside a
+	// bracketed paste (composeAgentPrompt → sendStartupPrompt), the same sink the
+	// charter sanitizes for. Done before the empty-check so an all-control payload
+	// is rejected rather than stored blank.
+	text = sanitize.StripForTerminalPaste(text)
+	if strings.TrimSpace(text) == "" {
+		return RoomSummaryInfo{}, fmt.Errorf("boş özet kaydedilmez")
+	}
+	// Enforce the rune cap server-side (the UI advertises it, but a direct/older
+	// runtime caller could bypass it). An oversized summary is injected into every
+	// continued agent's startup prompt, so cap it like the charter does.
+	if runes := []rune(text); len(runes) > summaryMaxRunes {
+		text = string(runes[:summaryMaxRunes])
+	}
+	doc, err := summary.Write(a.dataDir, room, text)
+	if err != nil {
+		return RoomSummaryInfo{}, err
+	}
+	return RoomSummaryInfo{Room: room, Text: doc.Text, Epoch: doc.Epoch, CreatedAt: doc.CreatedAt, Exists: true}, nil
+}
+
+// formatTranscript renders a message slice as readable, summarizer-friendly text.
+// Message content is cleaned of control / bracketed-paste-escape runes: the
+// rendered transcript feeds RenderSummaryPrompt, whose output the user copies and
+// pastes into a fresh CLI — an embedded \x1b[201~ in a stored message must not
+// break out of that paste. (From/To are validated agent names, so only the free
+// Content field needs cleaning.)
+func formatTranscript(msgs []types.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		content := sanitize.StripForTerminalPaste(m.Content)
+		switch m.Type {
+		case types.MsgTypeSystem:
+			fmt.Fprintf(&b, "[%s] SYSTEM: %s\n", m.Timestamp, content)
+		case types.MsgTypeUserPrompt:
+			fmt.Fprintf(&b, "[%s] 👤 KULLANICI → %s: %s\n", m.Timestamp, m.To, content)
+		default:
+			if m.OriginalTo != "" && m.OriginalTo != m.To {
+				fmt.Fprintf(&b, "[%s] %s → %s (orijinal: %s): %s\n", m.Timestamp, m.From, m.To, m.OriginalTo, content)
+			} else {
+				fmt.Fprintf(&b, "[%s] %s → %s: %s\n", m.Timestamp, m.From, m.To, content)
+			}
+		}
+	}
+	return b.String()
+}
+
 // DeleteTeam deletes a team
 func (a *App) DeleteTeam(id string) error {
 	t, getErr := a.teamStore.Get(id)
@@ -1300,10 +1610,16 @@ func (a *App) DeletePrompt(id string) error {
 	return a.promptStore.Delete(id)
 }
 
-// SendPromptToAgent renders a prompt and sends it to an agent's terminal
+// SendPromptToAgent renders a prompt and sends it to an agent's terminal. The
+// delivered prompt is also logged into the room transcript (#29) so the user's
+// instructions feed the session summary.
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
-	return a.ptyManager.Write(sessionID, []byte(rendered+"\n"))
+	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
+		return err
+	}
+	a.logUserPrompt(sessionID, rendered)
+	return nil
 }
 
 // IsGitRepo checks if a directory is inside a git repository.
