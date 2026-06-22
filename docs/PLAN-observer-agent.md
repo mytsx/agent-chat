@@ -1,5 +1,56 @@
 # Gözlemci Oda Agent'ı (Observer)
 
+## Drift Revizyonu (2026-06-22, #29/#12 merge-sonrası)
+
+> Bu plan #29 (session-summary) ve #12 (team-config) merge edilmeden ÖNCE yazıldı.
+> O zamandan beri imzalar ve altyapı değişti; aşağıdaki kararlar + drift
+> düzeltmeleri, plandaki çelişen eski kararları (§F, §Açık-Soru-#1) **geçersiz kılar**.
+> Geri kalan plan (hub cerrahisi, test matrisi) geçerlidir.
+
+### Kullanıcı kararları (2026-06-22)
+1. **Observer'ı manager desenini aynalayarak çöz** — `AgentConfig.Role="observer"` team
+   store'a yazılır (`setTeamObserver`, `setTeamManager` muadili); mod team store'dan
+   çözülür. Bu, **§F'in "team-persistence YOK / saf per-terminal sinyal" ve
+   §Açık-Soru-#1'in "CreateTerminal'a explicit `agentMode` param" kararlarını
+   GEÇERSİZ kılar.** Gerekçe: #29 zaten broadcast-skip'i **team-store rolüne** bağladı
+   (`broadcastRoleLookup` `AgentConfig.Role` okur) ve `composeAgentPrompt` `agentRole`'ü
+   `cfg.Role`'den okuyup zincire geçirir; rolü persist etmek bu test edilmiş altyapıyı
+   yeniden kullanır + reopen-as-observer'ı bedava verir + **`CreateTerminal`/Wails imzasını
+   değiştirmez.**
+2. **Observer `list_agents`'ta GÖRÜNÜR** (şeffaf) — §Açık-Soru-#4 varsayımı onaylandı.
+   Hub list_agents'a observer-filtresi eklenmez; UI'da `(gözlemci)` etiketi.
+3. **Observer'a otomatik PTY bildirimi YOK** (kullanıcı-güdümlü MVP) — §Açık-Soru-#3 /
+   §C "orchestrator'a kaydetme" kararı onaylandı.
+
+### Drift düzeltmeleri (gövdedeki/§E-§G'deki satır no & imzalar stale)
+- **`cli.ComposeStartupPrompt` GÜNCEL imza (startup.go:20):** `(basePrompt, globalPrompt,
+  teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName string,
+  isManager bool)` — #29 araya `roomSummary` ekledi. → **son parametre `isManager bool`
+  → `agentMode string`** (∈ {"","manager","observer"}). Paralel `isObserver` bool EKLENMEZ.
+- **`CreateTerminal` GÜNCEL imza (app.go:566):** `(teamID, agentName, workDir, cliType,
+  promptID string, useWorktree bool, slotIndex int)` — #12 trailing param kullandı,
+  **opts struct YOK.** Karar-1 sayesinde observer için **yeni param GEREKMEZ** (mod
+  team-store'dan çözülür; `resolveAgentMode` `resolveManagerIntent` gibi).
+- **`composeAgentPrompt` GÜNCEL imza (app.go:851):** `(teamID, agentName, promptID string,
+  isManager bool)` → **`isManager bool` → `agentMode string`.** Gövdede `agentRole`'ü
+  `cfg.Role`'den okuyor (app.go:872) ve `ComposeStartupPrompt`'a geçiriyor (app.go:912).
+- **#29 forward-wiring (app.go):** `isObserverRole` (1220), `broadcastRoleLookup` (1242,
+  `AgentConfig.Role` okur), `broadcastToSessions` observer-skip (1179) ZATEN VAR +
+  test edilmiş (`TestIsObserverRole`, `TestBroadcastToSessions_SkipsObservers`,
+  `TestBroadcastRoleLookup`). Bugün no-op çünkü hiçbir agent observer rolünde değil;
+  Karar-1 ile rol persist edilince **otomatik aktif olur.**
+- **`team.UpsertAgent` (store.go:193-218):** boş `Role`'ü KORUR, dolu `Role`'ü EZER →
+  `Role="observer"` persist için temiz yol; `CreateTerminal`'ın Role-atlayan upsert'i
+  (app.go:690) bozulmaz.
+- **`resolveManagerIntent` (app.go:524):** `resolveAgentMode(teamID, agentName, promptID)
+  (mode string, err error)`'e genelleştirilir; manager'ı `team.ManagerAgent`+prompt-tag,
+  observer'ı `AgentConfig.Role=="observer"`'dan çözer; XOR (ikisi birden → hata).
+- **Orchestrator izolasyonu:** İki broadcast yolu var ve İKİSİ de gerekli — (1) app.go
+  `broadcastToSessions` (user_prompt log + manuel broadcast) zaten role-skip eder; (2)
+  `orchestrator.ProcessMessage` broadcast (agent→all PTY bildirimi) role bilmez → observer'ı
+  orchestrator'a **kaydetmeyerek** izole et (Karar-3 / §C MVP). `RegisterAgent` çağrısı
+  app.go:724'te koşulsuz; observer dalında atlanır.
+
 ## Problem / Bağlam
 
 Kullanıcı, bir odanın gidişatını birlikte değerlendirebileceği, bir görevi vermeden önce hazırlık yapabileceği bir **dış göz** agent'ı istiyor. Bu agent odadaki tüm konuşmayı izleyebilmeli, ama odadaki diğer agent'lara **mesaj gönderememeli**. Sadece **kullanıcı** ile (kendi terminal panelinde) konuşur. Kullanıcı bu agent ile odanın durumunu tartışır, görev metni hazırlar; agent odanın "akıbeti" hakkında yorum yapar.
