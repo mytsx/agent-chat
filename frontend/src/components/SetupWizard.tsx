@@ -15,12 +15,14 @@ interface Props {
 export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const { availableCLIs, addTerminal } = useTerminals();
   const setTeamManager = useTeams((s) => s.setTeamManager);
+  const setTeamObserver = useTeams((s) => s.setTeamObserver);
   const prompts = usePrompts((s) => s.prompts);
   const [agentName, setAgentName] = useState("");
   const [selectedCLI, setSelectedCLI] = useState<CLIType>("shell");
   const [workDir, setWorkDir] = useState("");
   const [promptID, setPromptID] = useState("");
   const [setAsManager, setSetAsManager] = useState(false);
+  const [setAsObserver, setSetAsObserver] = useState(false);
   const [useWorktree, setUseWorktree] = useState(false);
   const [isGitRepoDir, setIsGitRepoDir] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -63,8 +65,13 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     setCreating(true);
     try {
       const name = agentName.trim() || `agent-${slotIndex + 1}`;
+      // Persist the role BEFORE creating the terminal: CreateTerminal's
+      // resolveAgentMode reads it back to compose the right startup prompt and
+      // skip worktree/orchestrator. Manager and observer are mutually exclusive.
       if (setAsManager) {
         await setTeamManager(teamID, name);
+      } else if (setAsObserver) {
+        await setTeamObserver(teamID, name);
       }
       const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex, useWorktree);
       onCreated(sessionID);
@@ -142,10 +149,32 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               <input
                 type="checkbox"
                 checked={setAsManager}
-                onChange={(e) => setSetAsManager(e.target.checked)}
+                onChange={(e) => {
+                  setSetAsManager(e.target.checked);
+                  if (e.target.checked) setSetAsObserver(false);
+                }}
               />
               <span>Set as manager</span>
             </label>
+          </div>
+
+          <div className="wizard-field">
+            <label className="wizard-checkbox-row">
+              <input
+                type="checkbox"
+                checked={setAsObserver}
+                onChange={(e) => {
+                  setSetAsObserver(e.target.checked);
+                  if (e.target.checked) setSetAsManager(false);
+                }}
+              />
+              <span>Set as observer (read-only)</span>
+            </label>
+            {setAsObserver && (
+              <span className="wizard-hint">
+                Gözlemci yalnızca odayı izler; mesaj gönderemez, sadece seninle konuşur
+              </span>
+            )}
           </div>
 
           {isGitRepoDir && (
@@ -155,12 +184,15 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
                   type="checkbox"
                   checked={useWorktree}
                   onChange={(e) => setUseWorktree(e.target.checked)}
-                  disabled={setAsManager}
+                  disabled={setAsManager || setAsObserver}
                 />
                 <span>Use Git Worktree</span>
               </label>
               {setAsManager && (
                 <span className="wizard-hint">Manager agent ana repoda çalışır</span>
+              )}
+              {setAsObserver && (
+                <span className="wizard-hint">Gözlemci agent ana repoda çalışır</span>
               )}
             </div>
           )}

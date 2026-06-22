@@ -7,6 +7,7 @@ import {
   UpdateTeam,
   DeleteTeam,
   SetTeamManager,
+  SetTeamObserver,
   SetCustomPrompt,
   SaveSession,
 } from "../../wailsjs/go/main/App";
@@ -30,6 +31,11 @@ interface TeamsState {
     agents: AgentConfig[]
   ) => Promise<void>;
   setTeamManager: (id: string, managerAgent: string) => Promise<void>;
+  // setTeamObserver marks an agent as the room's read-only observer (#17),
+  // mirroring setTeamManager. Persists AgentConfig.Role="observer" so the agent
+  // joins as observer (send_message blocked, read_all allowed) and is excluded
+  // from broadcasts. Mutually exclusive with manager (backend clears the other).
+  setTeamObserver: (id: string, agentName: string) => Promise<void>;
   // setCustomPrompt updates a room's charter (start-of-room context injected into
   // each new agent's startup prompt). Uses the dedicated backend endpoint rather
   // than updateTeam, which omits custom_prompt and would reset it on layout change.
@@ -86,6 +92,13 @@ export const useTeams = create<TeamsState>((set, get) => ({
 
   setTeamManager: async (id, managerAgent) => {
     const t = await SetTeamManager(id, managerAgent);
+    set((s) => ({
+      teams: s.teams.map((team) => (team.id === id ? t : team)),
+    }));
+  },
+
+  setTeamObserver: async (id, agentName) => {
+    const t = await SetTeamObserver(id, agentName);
     set((s) => ({
       teams: s.teams.map((team) => (team.id === id ? t : team)),
     }));
