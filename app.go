@@ -42,9 +42,14 @@ var mcpServerBin []byte
 
 // App struct
 type App struct {
-	ctx           context.Context
-	ptyManager    *ptymgr.Manager
-	hubClient     *hubclient.HubClient
+	ctx        context.Context
+	ptyManager *ptymgr.Manager
+	// hubClient is reassigned by monitorHub on hub-crash recovery (Store) while every
+	// Wails binding reads it (Load); an atomic.Pointer makes those accesses race-free
+	// for the single-writer/many-reader pattern (#56). Always read it once into a local
+	// (c := a.hubClient.Load(); if c == nil { ... }) — never call methods on the field
+	// directly, to avoid a nil-check-then-deref TOCTOU against a concurrent Store(nil).
+	hubClient     atomic.Pointer[hubclient.HubClient]
 	hubProcess    *os.Process
 	hubAuthToken  string
 	orchestrator  *orchestrator.Orchestrator
@@ -200,7 +205,7 @@ func (a *App) connectToHub() error {
 		return err
 	}
 
-	a.hubClient = client
+	a.hubClient.Store(client)
 	log.Printf("[STARTUP] Connected to hub")
 	return nil
 }
@@ -252,7 +257,8 @@ func (a *App) handleHubEvent(event types.Event) {
 
 // subscribeExistingTeams subscribes to hub events for all saved teams.
 func (a *App) subscribeExistingTeams() {
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return
 	}
 	teams := a.teamStore.List()
@@ -266,17 +272,18 @@ func (a *App) subscribeExistingTeams() {
 		a.syncHubManager(teamName, strings.TrimSpace(t.ManagerAgent))
 	}
 	if len(rooms) > 0 {
-		if err := a.hubClient.Subscribe(rooms); err != nil {
+		if err := client.Subscribe(rooms); err != nil {
 			log.Printf("[HUB] Subscribe failed: %v", err)
 		}
 	}
 }
 
 func (a *App) syncHubManager(room, managerAgent string) {
-	if a.hubClient == nil || strings.TrimSpace(room) == "" {
+	client := a.hubClient.Load()
+	if client == nil || strings.TrimSpace(room) == "" {
 		return
 	}
-	if err := a.hubClient.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
+	if err := client.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
 		log.Printf("[HUB] set_manager failed for room=%s manager=%s: %v", room, managerAgent, err)
 	}
 }
@@ -293,9 +300,12 @@ func (a *App) monitorHub() {
 		}
 		if state != nil && !state.Success() {
 			log.Printf("[HUB-MONITOR] Hub crashed (exit=%d), restarting...", state.ExitCode())
-			// Clean up old client
-			if a.hubClient != nil {
-				a.hubClient.Close()
+			// Clean up old client and clear the field: if startHub/connectToHub below
+			// fail and return, readers must see nil ("hub not connected") rather than a
+			// closed client. connectToHub stores the fresh client on success.
+			if client := a.hubClient.Load(); client != nil {
+				client.Close()
+				a.hubClient.Store(nil)
 			}
 			// Restart
 			time.Sleep(500 * time.Millisecond)
@@ -321,7 +331,7 @@ func (a *App) shutdown(ctx context.Context) {
 	// short budget so a wedged-but-alive hub can't stall quit for up to N×(RPC
 	// timeout): a healthy hub finishes in milliseconds (local disk writes); if the
 	// budget elapses we proceed rather than hang the UI.
-	if client := a.hubClient; client != nil {
+	if client := a.hubClient.Load(); client != nil {
 		saveDone := make(chan struct{})
 		go func() {
 			defer close(saveDone)
@@ -356,10 +366,10 @@ func (a *App) shutdown(ctx context.Context) {
 	// If Close doesn't finish in time, proceed to SIGTERM the hub anyway — killing
 	// the hub breaks the socket, which unblocks the stuck write and lets Close
 	// finish in the background.
-	if a.hubClient != nil {
+	if client := a.hubClient.Load(); client != nil {
 		closed := make(chan struct{})
 		go func() {
-			a.hubClient.Close()
+			client.Close()
 			close(closed)
 		}()
 		select {
@@ -574,8 +584,8 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	a.syncHubManager(teamName, managerAgent)
 
 	// Subscribe to room events
-	if a.hubClient != nil {
-		if err := a.hubClient.Subscribe([]string{teamName}); err != nil {
+	if client := a.hubClient.Load(); client != nil {
+		if err := client.Subscribe([]string{teamName}); err != nil {
 			log.Printf("[HUB] Subscribe failed for room=%s: %v", teamName, err)
 		}
 	}
@@ -1009,10 +1019,10 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 // instructions feed the session summary. Best-effort: it never blocks or fails
 // the actual delivery, and is skipped for non-agent (plain shell) terminals.
 func (a *App) logUserPrompt(sessionID, content string) {
-	// Capture the hub client before spawning: the goroutine must not read the
+	// Capture the hub client before spawning: the goroutine must not Load the
 	// reassignable a.hubClient field (monitorHub swaps it on hub-crash recovery),
-	// which would race that write.
-	client := a.hubClient
+	// which would read a possibly-stale pointer mid-flight.
+	client := a.hubClient.Load()
 	if client == nil {
 		return
 	}
@@ -1043,8 +1053,8 @@ func (a *App) logUserPrompt(sessionID, content string) {
 // user_prompt addressed to "all" (#29).
 func (a *App) logTeamBroadcast(teamID, content string) {
 	// Capture the hub client before spawning (see logUserPrompt): the goroutine
-	// must not read the reassignable a.hubClient field.
-	client := a.hubClient
+	// must not Load the reassignable a.hubClient field.
+	client := a.hubClient.Load()
 	if client == nil {
 		return
 	}
@@ -1319,8 +1329,8 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 	}
 
 	// Subscribe to hub events for this team
-	if a.hubClient != nil {
-		if err := a.hubClient.Subscribe([]string{name}); err != nil {
+	if client := a.hubClient.Load(); client != nil {
+		if err := client.Subscribe([]string{name}); err != nil {
 			log.Printf("[HUB] Subscribe failed for room=%s: %v", name, err)
 		}
 	}
@@ -1399,12 +1409,13 @@ func (a *App) SaveSession(teamID string) (SaveSessionResult, error) {
 	if err != nil {
 		return SaveSessionResult{}, err
 	}
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return SaveSessionResult{}, fmt.Errorf("hub bağlantısı yok")
 	}
 	// An empty team name means the default room (the hub's resolveRoom maps "" →
 	// default), so it is valid here — not an error.
-	count, saved, err := a.hubClient.SaveSession(t.Name)
+	count, saved, err := client.SaveSession(t.Name)
 	if err != nil {
 		return SaveSessionResult{}, err
 	}
@@ -1431,9 +1442,9 @@ func (a *App) GetRoomTranscript(room string) (string, error) {
 	// otherwise the transcript could miss it (#29). Bounded so a wedged hub can't
 	// hang the read.
 	a.drainPromptLogs(2 * time.Second)
-	// Capture the client once (avoid a TOCTOU between the nil-check and the call —
+	// Load the client once (avoid a TOCTOU between the nil-check and the call —
 	// a.hubClient is reassignable by monitorHub).
-	if client := a.hubClient; client != nil {
+	if client := a.hubClient.Load(); client != nil {
 		if _, _, err := client.SaveSession(room); err != nil {
 			log.Printf("[SUMMARY] transcript için snapshot alınamadı (%s): %v", room, err)
 		}
@@ -1557,8 +1568,8 @@ func (a *App) DeleteTeam(id string) error {
 	// roster the snapshot is meant to capture, so snapshotting here would record an
 	// already-emptied roster. An empty team name means the default room (the hub's
 	// resolveRoom maps "" → default), so it is archived too rather than skipped.
-	if getErr == nil && a.hubClient != nil {
-		if err := a.hubClient.ArchiveRoom(t.Name); err != nil {
+	if client := a.hubClient.Load(); getErr == nil && client != nil {
+		if err := client.ArchiveRoom(t.Name); err != nil {
 			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
 		}
 	}
@@ -1652,10 +1663,11 @@ func (a *App) SetGlobalPrompt(content string) error {
 
 // GetMessages returns all messages from a room
 func (a *App) GetMessages(room string) ([]types.Message, error) {
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return nil, fmt.Errorf("hub not connected")
 	}
-	msgs, err := a.hubClient.GetMessagesRaw(room)
+	msgs, err := client.GetMessagesRaw(room)
 	if err != nil {
 		log.Printf("[HUB] GetMessages error for room %s: %v", room, err)
 		return nil, err
@@ -1666,10 +1678,11 @@ func (a *App) GetMessages(room string) ([]types.Message, error) {
 // ListRooms returns structured summaries of all rooms (including orphan rooms
 // that no longer map to a team) for the desktop room browser.
 func (a *App) ListRooms() ([]types.RoomSummary, error) {
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return nil, fmt.Errorf("hub not connected")
 	}
-	rooms, err := a.hubClient.ListRoomsDetailed()
+	rooms, err := client.ListRoomsDetailed()
 	if err != nil {
 		log.Printf("[HUB] ListRooms error: %v", err)
 		return nil, err
@@ -1679,10 +1692,11 @@ func (a *App) ListRooms() ([]types.RoomSummary, error) {
 
 // GetAgents returns all agents from a room
 func (a *App) GetAgents(room string) (map[string]types.Agent, error) {
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return nil, fmt.Errorf("hub not connected")
 	}
-	agents, err := a.hubClient.GetAgentsRaw(room)
+	agents, err := client.GetAgentsRaw(room)
 	if err != nil {
 		log.Printf("[HUB] GetAgents error for room %s: %v", room, err)
 		return nil, err
@@ -1692,8 +1706,9 @@ func (a *App) GetAgents(room string) (map[string]types.Agent, error) {
 
 // WatchChatDir subscribes to a room (backward-compatible binding name).
 func (a *App) WatchChatDir(room string) error {
-	if a.hubClient == nil {
+	client := a.hubClient.Load()
+	if client == nil {
 		return fmt.Errorf("hub not connected")
 	}
-	return a.hubClient.Subscribe([]string{room})
+	return client.Subscribe([]string{room})
 }
