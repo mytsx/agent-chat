@@ -321,22 +321,23 @@ func (a *App) shutdown(ctx context.Context) {
 	// short budget so a wedged-but-alive hub can't stall quit for up to N×(RPC
 	// timeout): a healthy hub finishes in milliseconds (local disk writes); if the
 	// budget elapses we proceed rather than hang the UI.
-	if a.hubClient != nil {
+	if client := a.hubClient; client != nil {
 		saveDone := make(chan struct{})
 		go func() {
 			defer close(saveDone)
 			// Flush in-flight fire-and-forget prompt logs to the hub BEFORE snapshotting
 			// (and before Close cancels their RPC), so a prompt sent right before quit
 			// isn't lost from the saved session/summary (#29). Bounded by the outer
-			// select's budget below.
+			// select's budget below. Uses the captured client (not the reassignable
+			// a.hubClient field) inside the goroutine.
 			a.drainPromptLogs(2 * time.Second)
-			rooms, err := a.hubClient.ListRoomsDetailed()
+			rooms, err := client.ListRoomsDetailed()
 			if err != nil {
 				log.Printf("[SHUTDOWN] Oda listesi alınamadı, session kaydı atlanıyor: %v", err)
 				return
 			}
 			for _, r := range rooms {
-				if _, _, err := a.hubClient.SaveSession(r.Name); err != nil {
+				if _, _, err := client.SaveSession(r.Name); err != nil {
 					log.Printf("[SHUTDOWN] Session kaydedilemedi (%s): %v", r.Name, err)
 				}
 			}
@@ -1430,8 +1431,10 @@ func (a *App) GetRoomTranscript(room string) (string, error) {
 	// otherwise the transcript could miss it (#29). Bounded so a wedged hub can't
 	// hang the read.
 	a.drainPromptLogs(2 * time.Second)
-	if a.hubClient != nil {
-		if _, _, err := a.hubClient.SaveSession(room); err != nil {
+	// Capture the client once (avoid a TOCTOU between the nil-check and the call —
+	// a.hubClient is reassignable by monitorHub).
+	if client := a.hubClient; client != nil {
+		if _, _, err := client.SaveSession(room); err != nil {
 			log.Printf("[SUMMARY] transcript için snapshot alınamadı (%s): %v", room, err)
 		}
 	}
