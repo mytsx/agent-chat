@@ -1,0 +1,55 @@
+name: CI
+
+# PR'ları ve main'i gate'ler: frontend (tsc + vite build) ve Go (build/vet/test).
+# Daha önce CI yoktu; bağımlılık bump'ları elle test edilmek zorunda kalmıştı (#54).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Aynı ref için yeni push gelince devam eden koşuyu iptal et.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    # Release hedefiyle (macOS) aynı; Wails'in darwin cgo'su linux'ta ekstra
+    # bağımlılık ister, o yüzden macos-latest.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.3
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Frontend kur + build (tsc && vite build → frontend/dist)
+        # Repo package-lock.json'ı takip etmiyor (.gitignore) → npm ci değil
+        # npm install. setup-node'un npm cache'i de lockfile istediği için yok.
+        working-directory: frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: MCP server binary'sini derle (app.go //go:embed eder)
+        run: make mcp-server
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test ./...
