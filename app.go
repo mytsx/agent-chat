@@ -49,8 +49,15 @@ type App struct {
 	// for the single-writer/many-reader pattern (#56). Always read it once into a local
 	// (c := a.hubClient.Load(); if c == nil { ... }) — never call methods on the field
 	// directly, to avoid a nil-check-then-deref TOCTOU against a concurrent Store(nil).
-	hubClient     atomic.Pointer[hubclient.HubClient]
-	hubProcess    *os.Process
+	hubClient atomic.Pointer[hubclient.HubClient]
+	// hubProcess is written by startHub (startup + monitorHub restart) and read by
+	// monitorHub/shutdown across goroutines, so it is atomic for the same reason as
+	// hubClient. Load it once into a local before use.
+	hubProcess atomic.Pointer[os.Process]
+	// shuttingDown is set once at the top of shutdown(); monitorHub checks it so a
+	// SIGTERM-induced exit during quit isn't mistaken for a crash and restarted into
+	// an orphaned hub process (#60).
+	shuttingDown  atomic.Bool
 	hubAuthToken  string
 	orchestrator  *orchestrator.Orchestrator
 	promptStore   *prompt.Store
@@ -165,7 +172,7 @@ func (a *App) startHub() error {
 		return fmt.Errorf("hub start: %w", err)
 	}
 
-	a.hubProcess = cmd.Process
+	a.hubProcess.Store(cmd.Process)
 	log.Printf("[STARTUP] Hub process started: pid=%d", cmd.Process.Pid)
 
 	// Wait for hub.port file (max 5s)
@@ -288,45 +295,71 @@ func (a *App) syncHubManager(room, managerAgent string) {
 	}
 }
 
-// monitorHub watches the hub process and restarts if it crashes.
+// hubShouldRestart reports whether a hub-process exit warrants a restart. Only a
+// non-shutdown, unsuccessful exit qualifies: a shutdown in progress means the exit
+// was our own SIGTERM (restarting it would spawn an orphaned hub that outlives the
+// app, #60), and a nil state (Wait error) or a clean exit is not a crash.
+func hubShouldRestart(shuttingDown bool, state *os.ProcessState) bool {
+	if shuttingDown {
+		return false
+	}
+	return state != nil && !state.Success()
+}
+
+// monitorHub watches the current hub process and restarts it on crash. It re-arms
+// itself after a successful restart so every subsequent crash is also caught.
 func (a *App) monitorHub() {
-	if a.hubProcess == nil {
+	proc := a.hubProcess.Load()
+	if proc == nil {
 		return
 	}
-	go func() {
-		state, err := a.hubProcess.Wait()
-		if err != nil {
-			log.Printf("[HUB-MONITOR] Hub process wait error: %v", err)
-		}
-		if state != nil && !state.Success() {
-			log.Printf("[HUB-MONITOR] Hub crashed (exit=%d), restarting...", state.ExitCode())
-			// Clear the field first, then close the old client asynchronously. Store(nil)
-			// up front makes readers fast-fail ("hub not connected") immediately and means
-			// a return on startHub/connectToHub failure below leaves nil, not a dead
-			// client. Close runs in a goroutine because a wedged write can block it (it
-			// holds the client mutex during conn.WriteMessage) — the same hazard shutdown()
-			// bounds — and crash recovery must not stall on cleanup of the dead client.
-			if client := a.hubClient.Load(); client != nil {
-				a.hubClient.Store(nil)
-				go client.Close()
-			}
-			// Restart
-			time.Sleep(500 * time.Millisecond)
-			if err := a.startHub(); err != nil {
-				log.Printf("[HUB-MONITOR] Hub restart failed: %v", err)
-				return
-			}
-			if err := a.connectToHub(); err != nil {
-				log.Printf("[HUB-MONITOR] Hub reconnect failed: %v", err)
-				return
-			}
-			a.subscribeExistingTeams()
-		}
-	}()
+	go a.watchHubProcess(proc)
+}
+
+// watchHubProcess waits for one hub process to exit and, if that exit is a crash
+// (not our shutdown), restarts the hub and re-arms monitoring on the new process.
+func (a *App) watchHubProcess(proc *os.Process) {
+	state, err := proc.Wait()
+	if err != nil {
+		log.Printf("[HUB-MONITOR] Hub process wait error: %v", err)
+	}
+	if !hubShouldRestart(a.shuttingDown.Load(), state) {
+		return // graceful shutdown, clean exit, or unknown state — do not restart
+	}
+	log.Printf("[HUB-MONITOR] Hub crashed (exit=%d), restarting...", state.ExitCode())
+	// Clear the field first, then close the old client asynchronously. Store(nil) up
+	// front makes readers fast-fail ("hub not connected") immediately and means a
+	// return on startHub/connectToHub failure below leaves nil, not a dead client.
+	// Close runs in a goroutine because a wedged write can block it (it holds the
+	// client mutex during conn.WriteMessage) — the same hazard shutdown() bounds — and
+	// crash recovery must not stall on cleanup of the dead client.
+	if client := a.hubClient.Load(); client != nil {
+		a.hubClient.Store(nil)
+		go client.Close()
+	}
+	// Restart
+	time.Sleep(500 * time.Millisecond)
+	if a.shuttingDown.Load() {
+		return // shutdown began during the restart backoff — don't spawn an orphan
+	}
+	if err := a.startHub(); err != nil {
+		log.Printf("[HUB-MONITOR] Hub restart failed: %v", err)
+		return
+	}
+	if err := a.connectToHub(); err != nil {
+		log.Printf("[HUB-MONITOR] Hub reconnect failed: %v", err)
+		return
+	}
+	a.subscribeExistingTeams()
+	a.monitorHub() // re-arm: watch the freshly started process for the next crash
 }
 
 // shutdown is called when the app is closing
 func (a *App) shutdown(ctx context.Context) {
+	// Mark shutdown FIRST so monitorHub treats the hub's imminent SIGTERM exit as our
+	// own teardown, not a crash — otherwise it would restart the hub into an orphaned
+	// process that outlives the app and holds the port (#60).
+	a.shuttingDown.Store(true)
 	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
 	// quit captures the in-flight conversation (#28). Iterating the hub's room list
 	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
@@ -382,13 +415,16 @@ func (a *App) shutdown(ctx context.Context) {
 		}
 	}
 
-	// Stop hub process gracefully
-	if a.hubProcess != nil {
-		a.hubProcess.Signal(syscall.SIGTERM)
+	// Stop hub process gracefully. The Wait here races monitorHub's watcher Wait on the
+	// same process; concurrent os.Process.Wait is safe (one reaps the status, the other
+	// returns a harmless error) and the shuttingDown flag set above keeps the watcher
+	// from restarting after its Wait returns.
+	if proc := a.hubProcess.Load(); proc != nil {
+		proc.Signal(syscall.SIGTERM)
 		// Wait up to 3s for hub to persist and shut down
 		done := make(chan struct{})
 		go func() {
-			a.hubProcess.Wait()
+			proc.Wait()
 			close(done)
 		}()
 		select {
@@ -396,7 +432,7 @@ func (a *App) shutdown(ctx context.Context) {
 			log.Printf("[SHUTDOWN] Hub process exited gracefully")
 		case <-time.After(3 * time.Second):
 			log.Printf("[SHUTDOWN] Hub process did not exit in 3s, killing")
-			a.hubProcess.Kill()
+			proc.Kill()
 		}
 	}
 
