@@ -19,6 +19,10 @@ import (
 const (
 	defaultTimeout = 15 * time.Second
 	maxReconnect   = 10 * time.Second
+	// closeWriteTimeout bounds the websocket close-handshake write so Close() can't
+	// block indefinitely on a wedged connection — which would leak goroutines for
+	// callers that run Close asynchronously (monitorHub, shutdown).
+	closeWriteTimeout = 2 * time.Second
 )
 
 // HubClient is a WebSocket client that connects to the Hub server.
@@ -89,6 +93,11 @@ func (c *HubClient) Close() {
 	close(c.done)
 
 	if c.conn != nil {
+		// Bound the close-handshake write: WriteMessage carries no deadline of its own,
+		// so a wedged connection (full send buffer) could block Close indefinitely. The
+		// deadline makes it fail fast; conn.Close() below tears the socket down regardless
+		// of the handshake outcome.
+		_ = c.conn.SetWriteDeadline(time.Now().Add(closeWriteTimeout))
 		c.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		c.conn.Close()
