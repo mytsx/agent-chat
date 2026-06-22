@@ -111,15 +111,48 @@ func Write(dataDir, room, text string) (Doc, error) {
 
 // Latest returns the newest saved summary for the room. ok is false (with no
 // error) when the room has no summaries yet, or when dataDir is empty.
+//
+// It reads ONLY the newest readable file (not the whole directory): Latest is on
+// the hot path (every agent startup via composeAgentPrompt + read_summary), so it
+// scans filenames newest-first and reads the first one that opens — skipping an
+// unreadable newest file the same way List does (graceful degradation).
 func Latest(dataDir, room string) (Doc, bool, error) {
-	docs, err := List(dataDir, room)
+	if dataDir == "" {
+		return Doc{}, false, nil
+	}
+	dir, err := summaryDir(dataDir, room)
 	if err != nil {
 		return Doc{}, false, err
 	}
-	if len(docs) == 0 {
-		return Doc{}, false, nil
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Doc{}, false, nil
+		}
+		return Doc{}, false, fmt.Errorf("summary: read dir: %w", err)
 	}
-	return docs[0], true, nil
+
+	stems := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), summaryExt) {
+			continue
+		}
+		stems = append(stems, strings.TrimSuffix(e.Name(), summaryExt))
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(stems))) // newest first
+
+	for _, stem := range stems {
+		epoch, perr := strconv.ParseInt(stem, 10, 64)
+		if perr != nil {
+			continue // ignore foreign filenames
+		}
+		data, rerr := os.ReadFile(filepath.Join(dir, stem+summaryExt))
+		if rerr != nil {
+			continue // skip an unreadable file, fall back to the next-newest
+		}
+		return docFromEpoch(room, epoch, string(data)), true, nil
+	}
+	return Doc{}, false, nil
 }
 
 // List returns all saved summaries for the room, newest first. A missing room
