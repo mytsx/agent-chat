@@ -1571,9 +1571,11 @@ func (a *App) DeleteTeam(id string) error {
 	// roster the snapshot is meant to capture, so snapshotting here would record an
 	// already-emptied roster. An empty team name means the default room (the hub's
 	// resolveRoom maps "" → default), so it is archived too rather than skipped.
-	if client := a.hubClient.Load(); getErr == nil && client != nil {
-		if err := client.ArchiveRoom(t.Name); err != nil {
-			log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
+	if getErr == nil {
+		if client := a.hubClient.Load(); client != nil {
+			if err := client.ArchiveRoom(t.Name); err != nil {
+				log.Printf("[DELETE-TEAM] Oda arşivlenemedi (%s): %v", t.Name, err)
+			}
 		}
 	}
 
