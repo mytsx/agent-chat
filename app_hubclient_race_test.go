@@ -22,6 +22,14 @@ import (
 // the capture-to-local nil handling — safe only because each reader Loads the pointer
 // once into a local (no nil-check-then-deref TOCTOU against a concurrent Store(nil)).
 func TestHubClientConcurrentAccess(t *testing.T) {
+	// The readers below log an expected "not connected" error via the global logger
+	// for every non-nil-but-unconnected client they catch; silence it so this
+	// concurrency test doesn't flood `go test` output (thousands of timing-dependent
+	// lines). Restored on return; the package's tests run sequentially.
+	oldOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(oldOutput)
+
 	app := &App{}
 	logger := log.New(io.Discard, "", 0)
 	clientA := hubclient.New("ws://127.0.0.1:0/ws", logger)
