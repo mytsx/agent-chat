@@ -325,6 +325,11 @@ func (a *App) shutdown(ctx context.Context) {
 		saveDone := make(chan struct{})
 		go func() {
 			defer close(saveDone)
+			// Flush in-flight fire-and-forget prompt logs to the hub BEFORE snapshotting
+			// (and before Close cancels their RPC), so a prompt sent right before quit
+			// isn't lost from the saved session/summary (#29). Bounded by the outer
+			// select's budget below.
+			a.drainPromptLogs(2 * time.Second)
 			rooms, err := a.hubClient.ListRoomsDetailed()
 			if err != nil {
 				log.Printf("[SHUTDOWN] Oda listesi alınamadı, session kaydı atlanıyor: %v", err)
