@@ -48,6 +48,15 @@ func (h *Hub) flushArchive() {
 	if h.dataDir == "" {
 		return
 	}
+	// No writer running (unit/in-process hubs built with New but not Run): there is
+	// nothing draining archiveCh, so a barrier would just block until the timeout.
+	// Skip — there is no async backlog to flush.
+	h.mu.Lock()
+	started := h.archiveStarted
+	h.mu.Unlock()
+	if !started {
+		return
+	}
 	done := make(chan struct{})
 	select {
 	case h.archiveCh <- archiveJob{done: done}:

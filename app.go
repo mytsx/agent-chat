@@ -51,6 +51,9 @@ type App struct {
 	teamStore     *team.Store
 	dataDir       string
 	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
+	// promptLogWG tracks the fire-and-forget user_prompt logging goroutines so a
+	// transcript read can drain them first and not miss a just-delivered prompt (#29).
+	promptLogWG sync.WaitGroup
 }
 
 // NewApp creates a new App application struct
@@ -958,7 +961,7 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	roleOf := a.broadcastRoleLookup(teamID)
-	injected, errs := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
+	injected, errs, aiDelivered := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
 
 	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
 		teamID, injected, len(sessions), submit, len(errs))
@@ -981,20 +984,12 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	// #29: record the broadcast in the room transcript (as a user_prompt to "all")
-	// so it feeds the session summary — but ONLY on a full, submitted delivery to
-	// at least one AI agent. submit=false (the UI default) just leaves draft text
-	// the user may edit or never send; a partial failure (len(errs)>0) means some
-	// agents never got it; and a team of only plain shells has no room participant
-	// to address, so logging would put shell commands in the summary as if sent to
-	// agents. injected counts shells too, hence the explicit AI-target check.
-	hasAITarget := false
-	for _, s := range sessions {
-		if s.CLIType != string(cli.CLIShell) && !isObserverRole(roleOf(s.AgentName)) {
-			hasAITarget = true
-			break
-		}
-	}
-	if injected > 0 && submit && len(errs) == 0 && hasAITarget {
+	// so it feeds the session summary — but ONLY on a submitted delivery where every
+	// AI target received it (aiDelivered). submit=false (the UI default) just leaves
+	// draft text the user may edit or never send; aiDelivered is false when no AI
+	// participant exists (shell-only team) or any AI target failed, while a shell-
+	// only failure no longer suppresses logging a broadcast all agents received.
+	if submit && aiDelivered {
 		a.logTeamBroadcast(teamID, text)
 	}
 	return broadcastOutcomeError(injected, errs)
@@ -1020,8 +1015,11 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	}
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
+	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
 	room, agent := a.roomForTeam(sess.TeamID), sess.AgentName
+	a.promptLogWG.Add(1)
 	go func() {
+		defer a.promptLogWG.Done()
 		if err := a.hubClient.LogMessage(room, agent, content); err != nil {
 			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
 		}
@@ -1035,13 +1033,30 @@ func (a *App) logTeamBroadcast(teamID, content string) {
 		return
 	}
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
-	// broadcast that already reached every agent.
+	// broadcast that already reached every agent. Tracked by promptLogWG.
 	room := a.roomForTeam(teamID)
+	a.promptLogWG.Add(1)
 	go func() {
+		defer a.promptLogWG.Done()
 		if err := a.hubClient.LogMessage(room, "all", content); err != nil {
 			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
 		}
 	}()
+}
+
+// drainPromptLogs waits for in-flight prompt-log goroutines to reach the hub,
+// bounded by timeout so a stalled/wedged hub can't hang the caller (transcript
+// generation). Best-effort: on timeout it returns and the read proceeds.
+func (a *App) drainPromptLogs(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		a.promptLogWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
 }
 
 // roomForTeam resolves a team ID to its room name, falling back to the default
@@ -1079,7 +1094,7 @@ func broadcastToSessions(
 	submit bool,
 	roleOf func(agentName string) string,
 	inject func(sessionID, text string, submit bool) error,
-) (injected int, errs []string) {
+) (injected int, errs []string, aiDelivered bool) {
 	// Inject into every target concurrently: each session has its own PTY fd and
 	// write mutex, so parallel writes don't contend, and the slow paths (copilot's
 	// per-char sleeps, submit=true's 200ms settle) no longer serialize on the
@@ -1107,17 +1122,30 @@ func broadcastToSessions(
 	}
 	wg.Wait()
 
-	for _, o := range outcomes {
+	aiTotal, aiOK := 0, 0
+	for i, o := range outcomes {
 		if o.skipped {
 			continue
 		}
+		// A plain shell is not a room AI participant; its delivery success/failure
+		// must not drive whether the broadcast is logged for the summary (#29).
+		isAI := sessions[i].CLIType != string(cli.CLIShell)
 		if o.err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", o.agentName, o.err))
-			continue
+		} else {
+			injected++
 		}
-		injected++
+		if isAI {
+			aiTotal++
+			if o.err == nil {
+				aiOK++
+			}
+		}
 	}
-	return injected, errs
+	// aiDelivered: at least one AI target existed and every AI target received the
+	// broadcast (a shell-only failure no longer suppresses logging).
+	aiDelivered = aiTotal > 0 && aiOK == aiTotal
+	return injected, errs, aiDelivered
 }
 
 // isObserverRole reports whether a team role designates an observer agent, which
@@ -1367,6 +1395,11 @@ type RoomSummaryInfo struct {
 // summary prompt (#29). For a live room it first snapshots so the in-flight tail
 // is included; the snapshot call is best-effort.
 func (a *App) GetRoomTranscript(room string) (string, error) {
+	// Drain in-flight prompt-log goroutines first so a prompt the user sent moments
+	// ago (logged fire-and-forget) is already in the hub before we snapshot+read —
+	// otherwise the transcript could miss it (#29). Bounded so a wedged hub can't
+	// hang the read.
+	a.drainPromptLogs(2 * time.Second)
 	if a.hubClient != nil {
 		if _, _, err := a.hubClient.SaveSession(room); err != nil {
 			log.Printf("[SUMMARY] transcript için snapshot alınamadı (%s): %v", room, err)
@@ -1402,7 +1435,15 @@ func (a *App) RenderSummaryPrompt(room string) (string, error) {
 // verbatim.
 func renderSummaryPromptText(template, room, transcript string) string {
 	withVars := prompt.RenderPrompt(template, map[string]string{"ROOM": room})
-	rendered := strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
+	var rendered string
+	if strings.Contains(withVars, "{{TRANSCRIPT}}") {
+		rendered = strings.ReplaceAll(withVars, "{{TRANSCRIPT}}", transcript)
+	} else {
+		// The user-edited template lost its {{TRANSCRIPT}} placeholder (removal or
+		// typo): append the conversation so the neutral agent always gets it rather
+		// than summarizing nothing / hallucinating history.
+		rendered = withVars + "\n\n--- TRANSCRIPT ---\n" + transcript
+	}
 	// Sanitize the FINAL prompt: the user-editable template can carry control /
 	// bracketed-paste-escape runes that would otherwise reach the clipboard the
 	// user pastes into a neutral CLI. Idempotent for the already-clean transcript.

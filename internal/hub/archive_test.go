@@ -344,6 +344,11 @@ func TestEnqueueArchiveWritesViaWriter(t *testing.T) {
 func TestFlushArchiveWaitsForWrites(t *testing.T) {
 	dir := t.TempDir()
 	h := newArchiveHub(dir)
+	// This test starts the writer manually (no Run), so mark it started — otherwise
+	// flushArchive short-circuits as a no-writer hub.
+	h.mu.Lock()
+	h.archiveStarted = true
+	h.mu.Unlock()
 	go h.runArchiveWriter()
 	defer func() {
 		close(h.done)
