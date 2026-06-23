@@ -732,3 +732,13 @@ func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
 		t.Fatalf("CustomPrompt not rolled back in memory: got %q, want %q", got.CustomPrompt, "ilk misyon")
 	}
 }
+
+func TestCreate_RejectsDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Create("Alpha", "2x2", nil); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	if _, err := s.Create("Alpha", "2x2", nil); err == nil {
+		t.Fatalf("ikinci 'Alpha' Create hata döndürmeliydi")
+	}
+}

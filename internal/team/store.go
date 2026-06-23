@@ -142,6 +142,12 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for _, existing := range s.teams {
+		if existing.Name == name {
+			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
+		}
+	}
+
 	id := uuid.New().String()
 	// All teams share the same rooms base dir; team name is used as room name
 	chatDir := filepath.Join(filepath.Dir(s.filePath), "rooms")
