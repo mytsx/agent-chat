@@ -57,8 +57,7 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed 
 	// agent (#65 / Codex P2).
 	spawn := time.Unix(0, spawnedAtUnixNano)
 	cutoff := spawn.Add(-discoverSkew)
-	var best string
-	var bestDiff time.Duration
+	var cands []fileCandidate
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
@@ -75,17 +74,11 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed 
 		if claimed != nil && claimed(ev) {
 			continue // another terminal's watcher already locked this file (#65)
 		}
-		// Closest-to-spawn, not newest, so sibling same-cwd terminals each lock onto
-		// their own session (#65).
-		diff := info.ModTime().Sub(spawn)
-		if diff < 0 {
-			diff = -diff
-		}
-		if best == "" || diff < bestDiff {
-			best, bestDiff = ev, diff
-		}
+		cands = append(cands, fileCandidate{path: ev, mod: info.ModTime()})
 	}
-	return best, nil
+	// Nearest-to-spawn (post-spawn preferred), so sibling same-cwd terminals each
+	// lock onto their own session and a quick restart can't grab the old one (#65).
+	return pickNearestPostSpawn(cands, spawn), nil
 }
 
 // copilotWorkspaceCwd returns the cwd recorded in a session dir's workspace.yaml

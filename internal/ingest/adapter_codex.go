@@ -63,8 +63,10 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 	// can have its rollout created under tomorrow's dir (#65 / Codex P3). Among the
 	// newest-after-spawn rollouts, pick the one whose session_meta.cwd matches THIS
 	// terminal and isn't already locked by another watcher (#65 / Codex P2).
-	var best string
-	var bestDiff time.Duration
+	// Collect matching unclaimed candidates across the days, then pick the one
+	// nearest to (and preferably after) spawn — so sibling same-cwd terminals each
+	// lock onto their own rollout and a quick restart can't grab the old file (#65).
+	var cands []fileCandidate
 	for _, day := range []time.Time{spawn, spawn.Add(-24 * time.Hour), spawn.Add(24 * time.Hour)} {
 		dir := filepath.Join(base, day.Format("2006"), day.Format("01"), day.Format("02"))
 		entries, derr := os.ReadDir(dir)
@@ -89,18 +91,10 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 			if claimed != nil && claimed(p) {
 				continue // another terminal's watcher already locked this file (#65)
 			}
-			// Closest-to-spawn, not newest, so sibling same-cwd terminals each lock
-			// onto their own rollout (#65).
-			diff := info.ModTime().Sub(spawn)
-			if diff < 0 {
-				diff = -diff
-			}
-			if best == "" || diff < bestDiff {
-				best, bestDiff = p, diff
-			}
+			cands = append(cands, fileCandidate{path: p, mod: info.ModTime()})
 		}
 	}
-	return best, nil
+	return pickNearestPostSpawn(cands, spawn), nil
 }
 
 // codexFileCwd returns the cwd recorded in a rollout's first line

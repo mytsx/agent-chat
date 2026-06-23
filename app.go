@@ -921,11 +921,12 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	// #65: ingest the CLI's own session file so messages the user types DIRECTLY
-	// into the terminal are logged to the room transcript. Skip non-AI shells and
-	// observers (their terminal is a private drafting space, #17). workDir here is
-	// the final PTY cwd (the worktree dir if one was set up) — the CLI keys its
-	// session file by exactly this directory.
-	if ad := ingest.AdapterFor(cliType); ad != nil && !isObserver {
+	// into the terminal are logged to the room transcript. Non-AI shells are skipped;
+	// observers get a CLAIM-ONLY (muted) watcher below — it claims their file so a
+	// sibling same-cwd watcher can't ingest the observer's private prompts, but never
+	// emits them (#17). workDir here is the final PTY cwd (the worktree dir if one was
+	// set up) — the CLI keys its session file by exactly this directory.
+	if ad := ingest.AdapterFor(cliType); ad != nil {
 		room, agent := teamName, agentName
 		// Effective cwd: when the Workspace field is blank, pty.Manager.Create leaves
 		// cmd.Dir unset so the CLI runs in the app's working directory — the
@@ -956,10 +957,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 			}
 			return true
 		})
-		// Copilot's startup prompt is the -i launch arg (recorded as its first user
-		// message); record it so ingestion suppresses the CLI's copy. Other CLIs get
-		// the startup prompt via sendStartupPrompt, which records it there.
-		if copilotComposed != "" {
+		if isObserver {
+			// Claim-only: the watcher holds the observer's file claim (sibling
+			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
+			a.ingestMgr.Mute(sessionID)
+		} else if copilotComposed != "" {
+			// Copilot's startup prompt is the -i launch arg (recorded as its first user
+			// message); record it so ingestion suppresses the CLI's copy. Other CLIs get
+			// the startup prompt via sendStartupPrompt, which records it there.
 			a.ingestMgr.RecordInjection(sessionID, copilotComposed)
 		}
 	}
@@ -1580,8 +1585,11 @@ func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 
 // closeTerminalInternal closes the PTY and optionally cleans up the worktree.
 func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) error {
-	// Stop the session-file watcher (#65) before tearing the terminal down.
-	a.ingestMgr.StopSession(sessionID)
+	// NOTE: the session-file watcher is intentionally NOT stopped here. Stopping it
+	// before ptyManager.Close would make its final drain read the pre-flush file and
+	// miss a line the CLI flushes while exiting. Instead the watcher stops via its
+	// SessionDone (PTY-exit) path below, draining the file AFTER the process flushed
+	// (#65 / Codex round-4). finish() then releases its claim.
 
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
@@ -1806,13 +1814,14 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
 	// → "default"), so resolve here too. No-op when the agent isn't registered.
 	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
-	// Likewise stop ingesting that terminal: an observer's terminal is the user's
-	// PRIVATE drafting space (#17), so its directly-typed prompts must not keep
-	// flowing into the room transcript after an in-place promotion — the create-time
-	// observer skip only covers future spawns (#65).
+	// Likewise stop EMITTING that terminal's prompts: an observer's terminal is the
+	// user's PRIVATE drafting space (#17). Mute (not Stop) so the watcher keeps its
+	// file claim — otherwise a sibling same-cwd watcher could grab the now-unclaimed
+	// observer transcript and ingest its private messages (#65 P1). The create-time
+	// path mutes future observer spawns; this covers in-place promotion.
 	for _, s := range a.ptyManager.GetSessionsByTeam(id) {
 		if strings.EqualFold(strings.TrimSpace(s.AgentName), agentName) {
-			a.ingestMgr.StopSession(s.ID)
+			a.ingestMgr.Mute(s.ID)
 		}
 	}
 	return updated, nil

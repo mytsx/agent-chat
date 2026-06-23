@@ -3,6 +3,7 @@ package ingest
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -50,6 +51,10 @@ type session struct {
 	cancel chan struct{}
 	done   chan struct{} // closed when run() returns (after its final drain)
 	fp     *fingerprintStore
+	// muted, when set, makes the watcher still discover+CLAIM its file (so a sibling
+	// same-cwd watcher can't grab it) but DISCARD every message instead of emitting
+	// it — used for observer terminals, whose typed prompts are private (#17/#65).
+	muted atomic.Bool
 }
 
 // Manager owns one watcher per AI terminal, the per-terminal fingerprint stores,
@@ -102,12 +107,18 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 	defer ticker.Stop()
 	var path string
 	var cur Cursor
-	discoverAndPoll := func() {
-		// Skip (don't advance the cursor) while emits can't be delivered, so a
-		// prompt isn't parsed-and-dropped while the hub is unavailable (#65).
-		if ready != nil && !ready() {
-			return
+	// em discards every message when the session is muted (observer claim-only),
+	// otherwise delegates to the real emit (#17/#65).
+	em := func(content, ts string) bool {
+		if s.muted.Load() {
+			return true
 		}
+		return emit(content, ts)
+	}
+	discoverAndPoll := func() {
+		// Discover + claim FIRST, regardless of hub state: claiming this terminal's
+		// file (so a sibling same-cwd watcher can't grab it) doesn't need the hub, and
+		// a muted observer watcher must claim even while the hub is down (#65).
 		if path == "" {
 			p, err := ad.DiscoverFile(cwd, spawnedAtUnixNano, func(cp string) bool {
 				return m.isClaimedByOther(s.id, cp)
@@ -119,15 +130,20 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 			if p == "" {
 				return // not created yet — keep waiting
 			}
-			// Claim the file so a sibling terminal in the same cwd picks a different
-			// one. If another watcher claimed it between discovery and here, retry
-			// next tick (its claimed-check will now exclude p) (#65).
+			// If another watcher claimed it between discovery and here, retry next tick
+			// (its claimed-check will now exclude p) (#65).
 			if !m.tryClaim(s.id, p) {
 				return
 			}
 			path = p
 		}
-		cur = pollOnce(ad, path, cur, s.fp, emit)
+		// Gate only the poll/emit on hub readiness: don't advance the cursor (drop a
+		// prompt) while emits can't be delivered (#65). A muted watcher's em discards,
+		// so the gate just defers harmless no-op work.
+		if ready != nil && !ready() {
+			return
+		}
+		cur = pollOnce(ad, path, cur, s.fp, em)
 	}
 	// drain catches a prompt submitted just before stop, on an ALREADY-discovered
 	// file only — it must NOT discover/claim on the way out, or a late claim added
@@ -135,7 +151,7 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 	// same-cwd restart's watcher (#65).
 	drain := func() {
 		if path != "" && (ready == nil || ready()) {
-			pollOnce(ad, path, cur, s.fp, emit)
+			pollOnce(ad, path, cur, s.fp, em)
 		}
 	}
 	for {
@@ -198,6 +214,23 @@ func (m *Manager) RecordInjection(sessionID, text string) {
 	m.mu.Unlock()
 	if s != nil {
 		s.fp.Add(text)
+	}
+}
+
+// Mute switches a session's watcher to claim-only: it keeps holding its file
+// claim (so no sibling same-cwd watcher can ingest it) but discards every message
+// instead of emitting it. Used for observer terminals — at creation, or when a
+// running agent is promoted to observer in place (#17/#65). No-op for an unknown
+// session.
+func (m *Manager) Mute(sessionID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	s := m.sessions[sessionID]
+	m.mu.Unlock()
+	if s != nil {
+		s.muted.Store(true)
 	}
 }
 
