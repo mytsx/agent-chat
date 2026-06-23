@@ -1709,3 +1709,49 @@ html, body, #root {
 .import-row input { flex: 1; min-width: 0; }
 .import-add { align-self: flex-start; }
 .import-error { color: #c0392b; font-size: 12px; }
+
+/* Voice prompt (#16) — mic button + recording state */
+.terminal-btn-voice {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  opacity: 0.7;
+  user-select: none;
+}
+.terminal-btn-voice:hover {
+  opacity: 1;
+}
+.terminal-btn-voice.voice-recording {
+  color: #ff7b72;
+  animation: voice-pulse 1s ease-in-out infinite;
+}
+.terminal-btn-voice.voice-transcribing {
+  color: #d29922;
+  opacity: 1;
+}
+.terminal-btn-voice.voice-error {
+  color: #ff7b72;
+  opacity: 1;
+}
+@keyframes voice-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+.app-settings-btn {
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 50;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  opacity: 0.75;
+}
+.app-settings-btn:hover {
+  opacity: 1;
+}
