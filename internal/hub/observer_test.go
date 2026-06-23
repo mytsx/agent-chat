@@ -441,3 +441,19 @@ func TestHandleSendMessage_ToObserverRejectedAfterRevocation(t *testing.T) {
 		t.Fatalf("a direct message to a still-joined (de-configured) observer must be rejected")
 	}
 }
+
+// #17 (Codex P2): the recipient-block roster lookup must be case-insensitive like
+// the rest of observer identity (sameAgentName/isConfiguredObserver), or a direct
+// send to "watcher" would slip past an observer that joined as "Watcher".
+func TestRoomIsObserver_CaseInsensitive(t *testing.T) {
+	r := NewRoomState()
+	if _, _, err := r.Join("Watcher", "observer"); err != nil {
+		t.Fatalf("observer join: %v", err)
+	}
+	if !r.IsObserver("watcher") || !r.IsObserver("WATCHER") {
+		t.Error("IsObserver must match the observer name case-insensitively")
+	}
+	if r.IsObserver("someone-else") {
+		t.Error("a non-member must not match")
+	}
+}

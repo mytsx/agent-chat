@@ -1543,13 +1543,17 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 	// A rename changes the room: clear the OLD room's manager + observer hub state so
 	// it doesn't linger, then sync the new/updated room. Observer authorization lives
 	// only in hub memory, so an UpdateTeam that changes Agents/roles must re-sync it
-	// here too — otherwise the room keeps a stale allow-list (Codex P2).
-	if prev.Name != "" && prev.Name != updated.Name {
-		a.syncHubManager(prev.Name, "")
-		a.syncHubObservers(prev.Name, nil)
+	// here too — otherwise the room keeps a stale allow-list (Codex P2). Compare the
+	// RESOLVED room names (empty → "default"): a default-room team renamed to a named
+	// one must still have its old "default" state cleared (Codex P2).
+	prevRoom := roomNameOrDefault(prev.Name)
+	newRoom := roomNameOrDefault(updated.Name)
+	if prevRoom != newRoom {
+		a.syncHubManager(prevRoom, "")
+		a.syncHubObservers(prevRoom, nil)
 	}
-	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
-	a.syncHubObservers(updated.Name, observerNames(updated))
+	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubObservers(newRoom, observerNames(updated))
 
 	return updated, nil
 }
