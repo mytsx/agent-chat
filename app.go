@@ -1528,6 +1528,27 @@ func (a *App) CreateTeam(name, gridLayout string, agents []team.AgentConfig) (te
 	return t, nil
 }
 
+// DeleteRoom removes an orphan room (one that no team owns) from the hub. Team-backed
+// rooms must go through DeleteTeam instead; the default room cannot be deleted. The
+// hub re-checks subscribers as defense-in-depth, but the authoritative "is this orphan"
+// decision lives here because the hub does not know about teams.
+func (a *App) DeleteRoom(room string) error {
+	room = roomNameOrDefault(room)
+	if room == "default" {
+		return fmt.Errorf("varsayılan oda silinemez")
+	}
+	for _, t := range a.teamStore.List() {
+		if roomNameOrDefault(t.Name) == room {
+			return fmt.Errorf("'%s' bir takıma bağlı; önce takımı silin", room)
+		}
+	}
+	client := a.hubClient.Load()
+	if client == nil {
+		return fmt.Errorf("hub bağlı değil")
+	}
+	return client.DeleteRoom(room)
+}
+
 // UpdateTeam updates a team
 func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig) (team.Team, error) {
 	prev, err := a.teamStore.Get(id)
