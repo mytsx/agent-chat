@@ -1693,3 +1693,11 @@ html, body, #root {
 .room-historical { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .room-historical-label { font-size: 11px; opacity: 0.6; margin-right: 2px; }
 .room-agent-badge-historical { opacity: 0.7; border-style: dashed; }
+
+/* Room Browser v2 — orphan oda silme (#18) */
+.room-row { cursor: pointer; }
+.room-delete {
+  background: none; border: none; cursor: pointer; opacity: 0.5;
+  font-size: 13px; padding: 0 2px; margin-left: 4px;
+}
+.room-delete:hover { opacity: 1; }

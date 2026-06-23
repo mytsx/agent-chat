@@ -33,10 +33,12 @@ function RoomRow({
   room,
   isActiveTeam,
   onClick,
+  onDelete,
 }: {
   room: RoomSummary;
   isActiveTeam: boolean;
   onClick: () => void;
+  onDelete: () => void;
 }) {
   const agentNames = Object.keys(room.agents || {});
   const isEmpty = room.message_count === 0 && agentNames.length === 0;
@@ -46,13 +48,25 @@ function RoomRow({
       : `${room.message_count} messages`;
 
   return (
-    <button className="room-row" onClick={onClick}>
+    <div className="room-row" role="button" tabIndex={0} onClick={onClick}>
       <div className="room-row-top">
         <span className="room-row-name">
           {room.name}
           {room.is_default && <span className="room-tag">default</span>}
         </span>
         <span className="room-row-time">{relativeTime(room.last_activity)}</span>
+        {!isActiveTeam && !room.is_default && (
+          <button
+            className="room-delete"
+            title="Bu orphan odayı sil"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            🗑
+          </button>
+        )}
       </div>
       <div className="room-row-meta">
         <span className="room-row-count">{countLabel}</span>
@@ -90,7 +104,7 @@ function RoomRow({
           <span className="room-agent-empty">no agents (archived room)</span>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -176,6 +190,7 @@ export default function RoomBrowser() {
   const selectedRoom = useRooms((s) => s.selectedRoom);
   const loadRooms = useRooms((s) => s.loadRooms);
   const selectRoom = useRooms((s) => s.selectRoom);
+  const deleteRoom = useRooms((s) => s.deleteRoom);
   const teams = useTeams((s) => s.teams);
 
   useEffect(() => {
@@ -221,6 +236,17 @@ export default function RoomBrowser() {
               room={r}
               isActiveTeam={teamNames.has(r.name)}
               onClick={() => selectRoom(r.name)}
+              onDelete={() => {
+                if (
+                  window.confirm(
+                    `'${r.name}' odası silinsin mi? Mesaj geçmişi (state) kaldırılır; arşiv korunur.`,
+                  )
+                ) {
+                  deleteRoom(r.name).catch((e) =>
+                    window.alert(`Silme başarısız: ${e}`),
+                  );
+                }
+              }}
             />
           ))}
         </div>
