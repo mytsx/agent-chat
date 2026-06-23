@@ -54,9 +54,27 @@ func Now() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
 
+// timestampLayout is the canonical message-timestamp format: local time, no
+// timezone suffix, microsecond precision. The whole transcript sorts message
+// Timestamp strings lexicographically, so every source MUST use this exact layout
+// (and timezone) or messages interleave wrongly (#58/#65).
+const timestampLayout = "2006-01-02T15:04:05.000000"
+
 // Timestamp returns current time in ISO format.
 func Timestamp() string {
-	return time.Now().Format("2006-01-02T15:04:05.000000")
+	return time.Now().Format(timestampLayout)
+}
+
+// NormalizeTimestamp converts an external timestamp (e.g. a CLI session file's
+// RFC3339/UTC value like "2026-06-23T10:00:00.000Z") into the canonical
+// local-time timestampLayout so an ingested message sorts correctly against
+// hub-stamped messages (#65). An empty or unparseable input falls back to the
+// current time — never the raw string, which would break lexical ordering.
+func NormalizeTimestamp(s string) string {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Local().Format(timestampLayout)
+	}
+	return Timestamp()
 }
 
 // CleanupStaleAgents removes agents inactive for more than timeout seconds.

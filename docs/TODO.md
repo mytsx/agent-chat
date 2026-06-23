@@ -49,6 +49,8 @@ CLI session'larini yakalayip saklama ve terminal restart/resume destegi.
 1. **Go'ya port etme (onerilen):** Session kesif ve resume mantigini `internal/cli/` paketine Go ile entegre etme — dis bagimllik yok
 2. **Direkt kullanim:** `npx continues resume {id}` komutu — Node.js 22 bagimlilik getirir
 
+> **Not (#65, ayri is):** Ayni session-dosyasi kesif/parse altyapisi, kullanicinin terminale **dogrudan yazdigi** mesajlari oda transcript'ine/ozetine loglamak icin `internal/ingest` paketinde uygulandi (Claude/Copilot/Codex/Gemini adapter'lari + per-terminal watcher). Bu, resume (#40) ile session-dosyasi kesfini paylasir ama amaci farklidir: #65 OKUR ve loglar, #40 RESUME eder.
+
 ---
 
 Detayli yol haritasi icin bkz. [ROADMAP.md](./ROADMAP.md)

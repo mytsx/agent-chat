@@ -22,6 +22,7 @@ import (
 	"desktop/internal/git"
 	"desktop/internal/hub"
 	"desktop/internal/hubclient"
+	"desktop/internal/ingest"
 	"desktop/internal/orchestrator"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
@@ -58,9 +59,14 @@ type App struct {
 	// shuttingDown is set once at the top of shutdown(); monitorHub checks it so a
 	// SIGTERM-induced exit during quit isn't mistaken for a crash and restarted into
 	// an orphaned hub process (#60).
-	shuttingDown  atomic.Bool
-	hubAuthToken  string
-	orchestrator  *orchestrator.Orchestrator
+	shuttingDown atomic.Bool
+	hubAuthToken string
+	orchestrator *orchestrator.Orchestrator
+	// ingestMgr watches each AI terminal's CLI session file and logs the messages
+	// the user typed directly into the terminal as user_prompt (#65). nil-safe:
+	// hand-constructed test Apps leave it nil, and the Manager's methods no-op on a
+	// nil receiver.
+	ingestMgr     *ingest.Manager
 	promptStore   *prompt.Store
 	teamStore     *team.Store
 	dataDir       string
@@ -113,6 +119,10 @@ func (a *App) startup(ctx context.Context) {
 
 	// Initialize orchestrator
 	a.orchestrator = orchestrator.New(a.ptyManager)
+
+	// Initialize session-file ingestion (#65): logs messages the user types
+	// directly into an AI terminal by reading the CLI's own session file.
+	a.ingestMgr = ingest.New()
 	// UI fallback: when a notification can't be safely injected (the user kept
 	// typing past the deferral cap), surface it in the frontend instead of
 	// corrupting the user's input line.
@@ -447,6 +457,15 @@ func (a *App) shutdown(ctx context.Context) {
 	// Terminate any in-flight voice capture so a quit mid-recording doesn't orphan
 	// ffmpeg or leak its temp WAV (Codex P2).
 	a.stopActiveVoice()
+	// Close PTYs FIRST, while the hub is still up: killing each CLI lets it flush its
+	// final transcript line, and the still-running session-file watchers drain that
+	// via their SessionDone path and emit it to the hub — so a prompt typed right
+	// before quit lands in the snapshot taken below. THEN stop ingestion (a bounded
+	// wait for those final drains to deliver) (#65 / Codex round-5).
+	if a.ptyManager != nil {
+		a.ptyManager.CloseAll()
+	}
+	a.ingestMgr.StopAll()
 	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
 	// quit captures the in-flight conversation (#28). Iterating the hub's room list
 	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
@@ -522,11 +541,9 @@ func (a *App) shutdown(ctx context.Context) {
 			proc.Kill()
 		}
 	}
-
-	// Close PTY sessions
-	if a.ptyManager != nil {
-		a.ptyManager.CloseAll()
-	}
+	// NOTE: PTYs were already closed at the top of shutdown (before the snapshot) so
+	// the ingest watchers could drain each CLI's final flushed prompt into the hub
+	// before it was snapshotted (#65 / Codex round-5).
 }
 
 func (a *App) seedPrompts() {
@@ -810,12 +827,15 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// Get command for CLI type
 	cmdName, cmdArgs := cli.GetCommand(ct)
 
-	// For Copilot, use -i flag to pass startup prompt directly as argument
+	// For Copilot, use -i flag to pass startup prompt directly as argument.
+	// copilotComposed is hoisted so it can be fingerprinted for ingestion below
+	// (#65) — Copilot records the -i prompt as the first user message.
+	var copilotComposed string
 	if ct == cli.CLICopilot && agentName != "" {
-		composed := a.composeAgentPrompt(teamID, agentName, promptID, mode)
-		if composed != "" {
-			cmdArgs = append(cmdArgs, "-i", composed)
-			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(composed))
+		copilotComposed = a.composeAgentPrompt(teamID, agentName, promptID, mode)
+		if copilotComposed != "" {
+			cmdArgs = append(cmdArgs, "-i", copilotComposed)
+			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(copilotComposed))
 		}
 	}
 
@@ -824,6 +844,11 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		"AGENT_CHAT_ROOM=" + teamName,
 		"TERM=xterm-256color",
 	}
+
+	// Capture the ingestion spawn time BEFORE starting the CLI process, so the
+	// session file the CLI is about to create is strictly newer than this and
+	// discovery can't lock onto a prior session's file in the same cwd (#65).
+	ingestSpawnedAt := time.Now().UnixNano()
 
 	// Pin the room (teamName) on the session — the SAME value set as AGENT_CHAT_ROOM
 	// above — so logged prompts always target the room the agent's MCP session is
@@ -897,6 +922,55 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// isolation — the broadcast loop never sees the observer's session.
 	if agentName != "" && !isObserver {
 		a.orchestrator.RegisterAgent(teamName, agentName, sessionID)
+	}
+
+	// #65: ingest the CLI's own session file so messages the user types DIRECTLY
+	// into the terminal are logged to the room transcript. Non-AI shells are skipped;
+	// observers get a CLAIM-ONLY (muted) watcher below — it claims their file so a
+	// sibling same-cwd watcher can't ingest the observer's private prompts, but never
+	// emits them (#17). workDir here is the final PTY cwd (the worktree dir if one was
+	// set up) — the CLI keys its session file by exactly this directory.
+	if ad := ingest.AdapterFor(cliType); ad != nil {
+		room, agent := teamName, agentName
+		// Effective cwd: when the Workspace field is blank, pty.Manager.Create leaves
+		// cmd.Dir unset so the CLI runs in the app's working directory — the
+		// cwd-derived adapters (Claude slug / Gemini sha256) must look there, not under
+		// an empty path (#65 / Codex P2).
+		ingestCwd := workDir
+		if ingestCwd == "" {
+			if wd, werr := os.Getwd(); werr == nil {
+				ingestCwd = wd
+			}
+		}
+		// ready: only ingest while the hub is connected, so a prompt parsed while the
+		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
+		ready := func() bool { return a.hubClient.Load() != nil }
+		// exited closes when this terminal's CLI process dies (incl. an in-CLI /exit
+		// with no app-side close), so the watcher stops and frees its file claim (#65).
+		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, a.ptyManager.SessionDone(sessionID), func(content, ts string) bool {
+			client := a.hubClient.Load()
+			if client == nil {
+				return false // hub down — keep the cursor, retry next tick (#65)
+			}
+			// Convert the CLI file's RFC3339/UTC timestamp into the hub's canonical
+			// local layout so the ingested message sorts correctly in the
+			// lexically-ordered transcript (#65).
+			if err := client.LogMessage(room, agent, content, types.NormalizeTimestamp(ts)); err != nil {
+				log.Printf("[INGEST] mesaj loglanamadı (agent=%s): %v", agent, err)
+				return false // delivery failed — don't advance the cursor past this message
+			}
+			return true
+		})
+		if isObserver {
+			// Claim-only: the watcher holds the observer's file claim (sibling
+			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
+			a.ingestMgr.Mute(sessionID)
+		} else if copilotComposed != "" {
+			// Copilot's startup prompt is the -i launch arg (recorded as its first user
+			// message); record it so ingestion suppresses the CLI's copy. Other CLIs get
+			// the startup prompt via sendStartupPrompt, which records it there.
+			a.ingestMgr.RecordInjection(sessionID, copilotComposed)
+		}
 	}
 
 	// Send startup prompt in background
@@ -1123,6 +1197,9 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID,
 	if composed == "" {
 		return
 	}
+	// Record the startup prompt so ingestion (#65) suppresses the copy the CLI
+	// writes to its session file (it is our bootstrap, not the user's message).
+	a.ingestMgr.RecordInjection(sessionID, composed)
 
 	log.Printf("[STARTUP] Sending prompt to cli=%s agent=%s session=%s promptLen=%d",
 		cliType, agentName, ptymgr.ShortID(sessionID), len(composed))
@@ -1210,6 +1287,19 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	roleOf := a.broadcastRoleLookup(teamID)
+	// Record broadcast fingerprints BEFORE the fan-out (when submitting): a fast
+	// target's CLI can record the message and be polled by the 700ms watcher while
+	// a slower target is still being injected, so recording after the whole fan-out
+	// leaves a double-log window (logTeamBroadcast + ingestion). An unconsumed
+	// fingerprint (a target that fails injection) is harmless — it's dropped when
+	// the terminal closes (#65 / Codex P2).
+	if submit {
+		for _, s := range sessions {
+			if isAICLIType(s.CLIType) {
+				a.ingestMgr.RecordInjection(s.ID, text)
+			}
+		}
+	}
 	injected, errs, aiDelivered := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
 
 	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
@@ -1240,7 +1330,8 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	// only failure no longer suppresses logging a broadcast all agents received.
 	if submit && aiDelivered {
 		// Log to the room pinned on the broadcast's sessions, not the (mutable)
-		// current team name (#58).
+		// current team name (#58). Fingerprints were already recorded above (before
+		// the fan-out) so ingestion suppresses each CLI's recorded copy (#65).
 		a.logTeamBroadcast(pinnedRoomForSessions(sessions, a.roomForTeam(teamID)), text)
 	}
 	return broadcastOutcomeError(injected, errs)
@@ -1498,6 +1589,12 @@ func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 
 // closeTerminalInternal closes the PTY and optionally cleans up the worktree.
 func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) error {
+	// NOTE: the session-file watcher is intentionally NOT stopped here. Stopping it
+	// before ptyManager.Close would make its final drain read the pre-flush file and
+	// miss a line the CLI flushes while exiting. Instead the watcher stops via its
+	// SessionDone (PTY-exit) path below, draining the file AFTER the process flushed
+	// (#65 / Codex round-4). finish() then releases its claim.
+
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
 		return a.ptyManager.Close(sessionID)
@@ -1663,6 +1760,13 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
 	a.syncHubObservers(newRoom, observerNames(updated))
 
+	// A team edit can flip any agent's observer role; re-sync each live session's
+	// ingest mute state so a newly-observer agent stops emitting (and a de-observed
+	// one resumes), not just future spawns (#65 / Codex round-5).
+	for _, s := range a.ptyManager.GetSessionsByTeam(id) {
+		a.syncIngestMute(id, s.AgentName)
+	}
+
 	return updated, nil
 }
 
@@ -1692,6 +1796,11 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 	// re-sync the observer allow-list so the hub no longer authorizes the now-manager
 	// as an observer — otherwise it would stay read-only (send-blocked) on the hub (#17).
 	a.syncHubObservers(updated.Name, observerNames(updated))
+	// An agent promoted from observer to manager must resume ingestion (unmute its
+	// live watcher) — otherwise it would keep discarding its typed prompts (#65).
+	if managerAgent != "" {
+		a.syncIngestMute(id, managerAgent)
+	}
 	return updated, nil
 }
 
@@ -1721,7 +1830,31 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
 	// → "default"), so resolve here too. No-op when the agent isn't registered.
 	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
+	// Bring the live watcher's mute state in line with the new role: an observer's
+	// directly-typed prompts must be discarded (claim-only) — the watcher keeps its
+	// file claim (so a sibling same-cwd watcher can't grab the now-private transcript)
+	// but stops emitting (#17/#65 P1). The create-time path covers future spawns.
+	a.syncIngestMute(id, agentName)
 	return updated, nil
+}
+
+// syncIngestMute aligns the ingest watcher's mute state with an agent's CURRENT
+// persisted role for any LIVE session of that agent: an observer's prompts are
+// discarded (claim-only), a non-observer's are emitted. Called after any role
+// change (set/clear observer or manager, team edit) so a promotion to OR from
+// observer is reflected in the running watcher rather than leaving `muted` stale
+// (#65 / Codex round-5).
+func (a *App) syncIngestMute(teamID, agentName string) {
+	observer := a.isObserverAgent(teamID, agentName)
+	for _, s := range a.ptyManager.GetSessionsByTeam(teamID) {
+		if strings.EqualFold(strings.TrimSpace(s.AgentName), agentName) {
+			if observer {
+				a.ingestMgr.Mute(s.ID)
+			} else {
+				a.ingestMgr.Unmute(s.ID)
+			}
+		}
+	}
 }
 
 // SetCustomPrompt sets a team's room charter (start-of-room context / mission).
@@ -1972,6 +2105,12 @@ func (a *App) DeletePrompt(id string) error {
 // instructions feed the session summary.
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
+	// Record the fingerprint BEFORE the PTY write (as the startup and broadcast paths
+	// do): otherwise a fast CLI could append this prompt and an ingestion tick could
+	// poll it before RecordInjection runs, logging it as a directly-typed message
+	// while logUserPrompt logs it too. An unconsumed fingerprint if the write fails
+	// is harmless (#65 / Codex round-5 P3).
+	a.ingestMgr.RecordInjection(sessionID, rendered)
 	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
 		return err
 	}

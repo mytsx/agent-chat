@@ -569,6 +569,20 @@ func (m *Manager) GetSession(sessionID string) *PTYSession {
 	return m.sessions[sessionID]
 }
 
+// SessionDone returns a channel that is closed when the session's PTY process
+// exits (readLoop returns) — whether via the app's Close path or the user exiting
+// the CLI from inside the terminal. Returns nil for an unknown session (a nil
+// channel never fires in a select). Used by the ingest watcher so it stops when
+// its terminal's CLI dies on its own (#65).
+func (m *Manager) SessionDone(sessionID string) <-chan struct{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if s, ok := m.sessions[sessionID]; ok {
+		return s.done
+	}
+	return nil
+}
+
 // GetSessionsByTeam returns all sessions for a team
 func (m *Manager) GetSessionsByTeam(teamID string) []*PTYSession {
 	m.mu.RLock()
