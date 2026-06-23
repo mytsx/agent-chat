@@ -551,6 +551,41 @@ type RoomInfo struct {
 	Messages int
 }
 
+const (
+	joinMsgPrefix = "\U0001f7e2 "    // "🟢 " — join system message prefix
+	joinMsgInfix  = " odaya katıldı" // text between the agent name and optional role suffix
+)
+
+// deriveHistoricalAgents extracts the distinct, sorted set of agent names that have
+// joined the room at some point, parsed from join system-messages. Leave messages are
+// ignored: the result answers "which agent names were ever created here", which is what
+// archived (roster-empty) rooms need. The caller must hold r.mu (it reads r.messages).
+func deriveHistoricalAgents(messages []types.Message) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, m := range messages {
+		if m.Type != types.MsgTypeSystem {
+			continue
+		}
+		if !strings.HasPrefix(m.Content, joinMsgPrefix) {
+			continue
+		}
+		rest := m.Content[len(joinMsgPrefix):]
+		idx := strings.Index(rest, joinMsgInfix)
+		if idx <= 0 {
+			continue
+		}
+		name := rest[:idx]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Summary returns structured metadata about the room for the desktop room browser.
 // It does NOT run stale cleanup, so the persisted agent map is reported verbatim
 // (rooms whose agents went idle still show the names they were created with).
@@ -563,12 +598,19 @@ func (r *RoomState) Summary(name string, isDefault bool) types.RoomSummary {
 		lastActivity = r.messages[len(r.messages)-1].Timestamp
 	}
 
+	agents := r.copyAgentsLocked()
+	var historical []string
+	if len(agents) == 0 {
+		historical = deriveHistoricalAgents(r.messages)
+	}
+
 	return types.RoomSummary{
-		Name:         name,
-		MessageCount: len(r.messages),
-		Agents:       r.copyAgentsLocked(),
-		LastActivity: lastActivity,
-		IsDefault:    isDefault,
+		Name:             name,
+		MessageCount:     len(r.messages),
+		Agents:           agents,
+		HistoricalAgents: historical,
+		LastActivity:     lastActivity,
+		IsDefault:        isDefault,
 	}
 }
 
