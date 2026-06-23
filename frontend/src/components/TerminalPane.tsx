@@ -37,6 +37,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // previous one is still transcribing — two overlapping Whisper results would both
   // inject into the same PTY line and corrupt the prompt (Codex P2).
   const busyRef = useRef(false);
+  // startedRef: the backend StartVoiceCapture has resolved (activeRecorder installed).
+  // releasePendingRef: the user released before the start resolved, so the stop must
+  // be issued from the start's .then — otherwise StopVoiceCapture no-ops against a
+  // recorder that isn't installed yet and ffmpeg is left running (Codex P2).
+  const startedRef = useRef(false);
+  const releasePendingRef = useRef(false);
   const [recSecs, setRecSecs] = useState(0);
 
   useEffect(() => {
@@ -193,37 +199,60 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // Push-to-talk: hold to record, release to transcribe. onMouseLeave also stops
   // so a drag-off doesn't leave the mic recording. Backend enforces the single
   // active-recording lock; a rejected Start just shows an error state.
-  const startVoice = () => {
-    if (busyRef.current) return; // block while recording OR still transcribing
-    busyRef.current = true;
-    recordingRef.current = true;
-    setVoiceState("recording"); // optimistic — turn red instantly, don't wait for the event
-    setVoiceError("");
-    StartVoiceCapture(sessionID).catch((e) => {
-      recordingRef.current = false;
-      busyRef.current = false;
-      setVoiceState("error");
-      setVoiceError(String(e));
-    });
-  };
-  const stopVoice = () => {
-    if (!recordingRef.current) return; // ref, not voiceState — avoids the stale-closure skip
-    recordingRef.current = false;
-    // busyRef stays true through transcription; cleared on the backend's idle/error
-    // event, OR the then/catch below so a missed event can't wedge the pane in
-    // "transcribing" forever (Codex P2 — the listener may not be registered yet, or
-    // the idle event may be dropped).
+  // finishStop performs the actual stop+transcribe round-trip. Cleared busyRef on the
+  // backend's idle/error event, OR here (then/catch) so a missed event can't wedge the
+  // pane in "transcribing" forever (Codex P2). On success it refocuses the terminal so
+  // the dictated line can be edited/submitted immediately (Codex P2).
+  const finishStop = () => {
     setVoiceState("transcribing");
     StopVoiceCapture(sessionID)
       .then(() => {
         busyRef.current = false;
         setVoiceState((s) => (s === "transcribing" ? "idle" : s));
+        termRef.current?.focus();
       })
       .catch((e) => {
         busyRef.current = false;
         setVoiceState("error");
         setVoiceError(String(e));
       });
+  };
+  const startVoice = () => {
+    if (busyRef.current) return; // block while recording OR still transcribing
+    busyRef.current = true;
+    recordingRef.current = true;
+    startedRef.current = false;
+    releasePendingRef.current = false;
+    setVoiceState("recording"); // optimistic — turn red instantly, don't wait for the event
+    setVoiceError("");
+    StartVoiceCapture(sessionID)
+      .then(() => {
+        startedRef.current = true;
+        // If the user already released during this in-flight start, the deferred
+        // stop runs now that the backend is actually recording (Codex P2).
+        if (releasePendingRef.current) {
+          releasePendingRef.current = false;
+          finishStop();
+        }
+      })
+      .catch((e) => {
+        recordingRef.current = false;
+        busyRef.current = false;
+        releasePendingRef.current = false;
+        setVoiceState("error");
+        setVoiceError(String(e));
+      });
+  };
+  const stopVoice = () => {
+    if (!recordingRef.current) return; // ref, not voiceState — avoids the stale-closure skip
+    recordingRef.current = false;
+    if (!startedRef.current) {
+      // Start hasn't resolved yet — defer the stop so it isn't a no-op against a
+      // recorder the backend hasn't installed yet (Codex P2).
+      releasePendingRef.current = true;
+      return;
+    }
+    finishStop();
   };
 
   return (
@@ -240,7 +269,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
           <button
             type="button"
             className={"terminal-btn-voice voice-" + voiceState}
-            onMouseDown={startVoice}
+            onMouseDown={(e) => {
+              e.preventDefault(); // don't let the button steal focus from xterm (Codex P2)
+              startVoice();
+            }}
             onMouseUp={stopVoice}
             onMouseLeave={stopVoice}
             aria-label="Sesli prompt — bas-konuş"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	"desktop/internal/voice"
@@ -226,6 +227,57 @@ func TestStartVoiceCaptureRejectedWhileSessionTranscribing(t *testing.T) {
 	close(release)
 	<-done
 	// After A's transcription resolves, the same session can record again.
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Errorf("session A should record again once its transcription finished: %v", err)
+	}
+}
+
+// Regression for Codex P2: a second session transcribing concurrently must not
+// overwrite the first session's pending-transcription guard (the old single-slot
+// transcribingSession did exactly that).
+func TestTranscribingGuardIsPerSessionNotSingleSlot(t *testing.T) {
+	a := newVoiceTestApp()
+	var mu sync.Mutex
+	calls := 0
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		mu.Lock()
+		n := calls
+		calls++
+		mu.Unlock()
+		if n == 0 { // first transcription (session A) blocks
+			close(enteredA)
+			<-releaseA
+		}
+		return "merhaba", nil
+	}
+	a.voiceInject = func(sessionID, text string, submit bool) error { return nil }
+
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = a.StopVoiceCapture("A"); close(done) }()
+	<-enteredA // A is transcribing (tracked in the set)
+
+	// B records and fully transcribes (its transcribe returns immediately) WHILE A is
+	// still transcribing. With a single-slot guard, B's Stop would overwrite A's slot.
+	if err := a.StartVoiceCapture("B"); err != nil {
+		t.Fatalf("B should record while A transcribes: %v", err)
+	}
+	if err := a.StopVoiceCapture("B"); err != nil {
+		t.Fatalf("B stop: %v", err)
+	}
+
+	// A is STILL transcribing, so a remount-reset frontend trying to re-record A must
+	// remain blocked — proves B didn't clobber A's guard.
+	if err := a.StartVoiceCapture("A"); err == nil {
+		t.Error("session A must stay guarded while its transcription is pending, despite B finishing")
+	}
+
+	close(releaseA)
+	<-done
 	if err := a.StartVoiceCapture("A"); err != nil {
 		t.Errorf("session A should record again once its transcription finished: %v", err)
 	}

@@ -77,11 +77,13 @@ type App struct {
 	voiceMu            sync.Mutex
 	activeRecorder     voice.Recorder
 	activeVoiceSession string
-	// transcribingSession is the session whose audio is being uploaded/transcribed
-	// right now. It outlives activeRecorder (which clears once ffmpeg exits) so a
-	// second capture for the SAME session is rejected until its injection finishes —
-	// the authoritative guard, since the pane-local busyRef resets on remount (Codex P2).
-	transcribingSession string
+	// transcribingSessions is the SET of sessions whose audio is being uploaded/
+	// transcribed right now. A per-session map (not a single slot) so a second
+	// session transcribing concurrently can't overwrite the first's guard (Codex P2):
+	// each entry outlives its activeRecorder (cleared once ffmpeg exits) and blocks a
+	// repeat capture for that same session until injection finishes — authoritative,
+	// since the pane-local busyRef resets on remount.
+	transcribingSessions map[string]bool
 	// Injectable seams (orchestrator SendFunc pattern), defaulted in startup(),
 	// overridden in tests so the flow runs with no ffmpeg/network/Wails runtime.
 	newVoiceRecorder func() (voice.Recorder, error)
@@ -2057,7 +2059,7 @@ func (a *App) StartVoiceCapture(sessionID string) error {
 		log.Printf("[VOICE] StartVoiceCapture reddedildi (zaten kayıt var) session=%s", sessionID)
 		return fmt.Errorf("⚠️ Zaten kayıt sürüyor")
 	}
-	if a.transcribingSession == sessionID {
+	if a.transcribingSessions[sessionID] {
 		a.voiceMu.Unlock()
 		log.Printf("[VOICE] StartVoiceCapture reddedildi (bu panel hâlâ çevriliyor) session=%s", sessionID)
 		return fmt.Errorf("⚠️ Bu panelin önceki kaydı hâlâ çevriliyor")
@@ -2112,15 +2114,16 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if a.activeRecorder == rec {
 		a.activeRecorder = nil
 	}
-	a.transcribingSession = sessionID
+	if a.transcribingSessions == nil {
+		a.transcribingSessions = make(map[string]bool)
+	}
+	a.transcribingSessions[sessionID] = true
 	a.voiceMu.Unlock()
-	// Cleared on EVERY return path below so a failed/stuck transcription can't
+	// Removed on EVERY return path below so a failed/stuck transcription can't
 	// permanently block this session from recording again (Codex P2).
 	defer func() {
 		a.voiceMu.Lock()
-		if a.transcribingSession == sessionID {
-			a.transcribingSession = ""
-		}
+		delete(a.transcribingSessions, sessionID)
 		a.voiceMu.Unlock()
 	}()
 
