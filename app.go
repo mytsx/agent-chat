@@ -457,8 +457,14 @@ func (a *App) shutdown(ctx context.Context) {
 	// Terminate any in-flight voice capture so a quit mid-recording doesn't orphan
 	// ffmpeg or leak its temp WAV (Codex P2).
 	a.stopActiveVoice()
-	// Stop all session-file watchers (#65) so their poll goroutines don't outlive
-	// the app or race the hub teardown below.
+	// Close PTYs FIRST, while the hub is still up: killing each CLI lets it flush its
+	// final transcript line, and the still-running session-file watchers drain that
+	// via their SessionDone path and emit it to the hub — so a prompt typed right
+	// before quit lands in the snapshot taken below. THEN stop ingestion (a bounded
+	// wait for those final drains to deliver) (#65 / Codex round-5).
+	if a.ptyManager != nil {
+		a.ptyManager.CloseAll()
+	}
 	a.ingestMgr.StopAll()
 	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
 	// quit captures the in-flight conversation (#28). Iterating the hub's room list
@@ -535,11 +541,9 @@ func (a *App) shutdown(ctx context.Context) {
 			proc.Kill()
 		}
 	}
-
-	// Close PTY sessions
-	if a.ptyManager != nil {
-		a.ptyManager.CloseAll()
-	}
+	// NOTE: PTYs were already closed at the top of shutdown (before the snapshot) so
+	// the ingest watchers could drain each CLI's final flushed prompt into the hub
+	// before it was snapshotted (#65 / Codex round-5).
 }
 
 func (a *App) seedPrompts() {
@@ -1756,6 +1760,13 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
 	a.syncHubObservers(newRoom, observerNames(updated))
 
+	// A team edit can flip any agent's observer role; re-sync each live session's
+	// ingest mute state so a newly-observer agent stops emitting (and a de-observed
+	// one resumes), not just future spawns (#65 / Codex round-5).
+	for _, s := range a.ptyManager.GetSessionsByTeam(id) {
+		a.syncIngestMute(id, s.AgentName)
+	}
+
 	return updated, nil
 }
 
@@ -1785,6 +1796,11 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 	// re-sync the observer allow-list so the hub no longer authorizes the now-manager
 	// as an observer — otherwise it would stay read-only (send-blocked) on the hub (#17).
 	a.syncHubObservers(updated.Name, observerNames(updated))
+	// An agent promoted from observer to manager must resume ingestion (unmute its
+	// live watcher) — otherwise it would keep discarding its typed prompts (#65).
+	if managerAgent != "" {
+		a.syncIngestMute(id, managerAgent)
+	}
 	return updated, nil
 }
 
@@ -1814,17 +1830,31 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
 	// → "default"), so resolve here too. No-op when the agent isn't registered.
 	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
-	// Likewise stop EMITTING that terminal's prompts: an observer's terminal is the
-	// user's PRIVATE drafting space (#17). Mute (not Stop) so the watcher keeps its
-	// file claim — otherwise a sibling same-cwd watcher could grab the now-unclaimed
-	// observer transcript and ingest its private messages (#65 P1). The create-time
-	// path mutes future observer spawns; this covers in-place promotion.
-	for _, s := range a.ptyManager.GetSessionsByTeam(id) {
+	// Bring the live watcher's mute state in line with the new role: an observer's
+	// directly-typed prompts must be discarded (claim-only) — the watcher keeps its
+	// file claim (so a sibling same-cwd watcher can't grab the now-private transcript)
+	// but stops emitting (#17/#65 P1). The create-time path covers future spawns.
+	a.syncIngestMute(id, agentName)
+	return updated, nil
+}
+
+// syncIngestMute aligns the ingest watcher's mute state with an agent's CURRENT
+// persisted role for any LIVE session of that agent: an observer's prompts are
+// discarded (claim-only), a non-observer's are emitted. Called after any role
+// change (set/clear observer or manager, team edit) so a promotion to OR from
+// observer is reflected in the running watcher rather than leaving `muted` stale
+// (#65 / Codex round-5).
+func (a *App) syncIngestMute(teamID, agentName string) {
+	observer := a.isObserverAgent(teamID, agentName)
+	for _, s := range a.ptyManager.GetSessionsByTeam(teamID) {
 		if strings.EqualFold(strings.TrimSpace(s.AgentName), agentName) {
-			a.ingestMgr.Mute(s.ID)
+			if observer {
+				a.ingestMgr.Mute(s.ID)
+			} else {
+				a.ingestMgr.Unmute(s.ID)
+			}
 		}
 	}
-	return updated, nil
 }
 
 // SetCustomPrompt sets a team's room charter (start-of-room context / mission).
@@ -2075,14 +2105,15 @@ func (a *App) DeletePrompt(id string) error {
 // instructions feed the session summary.
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
+	// Record the fingerprint BEFORE the PTY write (as the startup and broadcast paths
+	// do): otherwise a fast CLI could append this prompt and an ingestion tick could
+	// poll it before RecordInjection runs, logging it as a directly-typed message
+	// while logUserPrompt logs it too. An unconsumed fingerprint if the write fails
+	// is harmless (#65 / Codex round-5 P3).
+	a.ingestMgr.RecordInjection(sessionID, rendered)
 	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
 		return err
 	}
-	// Record the fingerprint IMMEDIATELY after the write, before logUserPrompt does
-	// its (slower, goroutine-spawning) work — otherwise an ingestion tick landing in
-	// that gap would log the app-injected prompt as a directly-typed message and
-	// logUserPrompt would log it again (#65 / Codex P3).
-	a.ingestMgr.RecordInjection(sessionID, rendered)
 	a.logUserPrompt(sessionID, rendered)
 	return nil
 }

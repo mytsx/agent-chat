@@ -145,22 +145,18 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		}
 		cur = pollOnce(ad, path, cur, s.fp, em)
 	}
-	// drain catches a prompt submitted just before stop, on an ALREADY-discovered
-	// file only — it must NOT discover/claim on the way out, or a late claim added
-	// after StopSession released this session's claims would leak and block a
-	// same-cwd restart's watcher (#65).
-	drain := func() {
-		if path != "" && (ready == nil || ready()) {
-			pollOnce(ad, path, cur, s.fp, em)
-		}
-	}
 	for {
 		select {
 		case <-s.cancel:
-			drain()
+			// Final drain via the full discover+poll: a CLI that exits before the first
+			// tick (a quick prompt then immediate close) may have flushed its transcript
+			// on the way out, so the drain must DISCOVER the file too, not just poll an
+			// already-found one. The claim it may take is released right after by the
+			// deferred finish(), so there's no leak (#65 / Codex round-5).
+			discoverAndPoll()
 			return
 		case <-exited:
-			drain()
+			discoverAndPoll()
 			return
 		case <-ticker.C:
 			discoverAndPoll()
@@ -231,6 +227,21 @@ func (m *Manager) Mute(sessionID string) {
 	m.mu.Unlock()
 	if s != nil {
 		s.muted.Store(true)
+	}
+}
+
+// Unmute reverses Mute: the watcher resumes emitting messages. Used when an agent
+// is demoted from observer back to manager/worker while running (#17/#65). No-op
+// for an unknown session.
+func (m *Manager) Unmute(sessionID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	s := m.sessions[sessionID]
+	m.mu.Unlock()
+	if s != nil {
+		s.muted.Store(false)
 	}
 }
 

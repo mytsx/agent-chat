@@ -31,14 +31,16 @@ func TestPickNearestPostSpawn_EarliestPostSpawn(t *testing.T) {
 	}
 }
 
-func TestPickNearestPostSpawn_FallsBackToLatestPreSpawn(t *testing.T) {
+// Only pre-spawn candidates → return "" and WAIT for the real post-spawn file,
+// rather than permanently locking onto a stale/sibling file (#65 / Codex round-5).
+func TestPickNearestPostSpawn_IgnoresPreSpawnOnly(t *testing.T) {
 	spawn := time.Now()
 	cands := []fileCandidate{
 		{path: "older", mod: spawn.Add(-2 * time.Second)},
-		{path: "jitter", mod: spawn.Add(-5 * time.Millisecond)}, // closest pre-spawn
+		{path: "stale", mod: spawn.Add(-5 * time.Millisecond)},
 	}
-	if got := pickNearestPostSpawn(cands, spawn); got != "jitter" {
-		t.Fatalf("got %q, want jitter (latest pre-spawn when no post-spawn candidate)", got)
+	if got := pickNearestPostSpawn(cands, spawn); got != "" {
+		t.Fatalf("got %q, want empty (only pre-spawn candidates → wait for this terminal's own file)", got)
 	}
 }
 

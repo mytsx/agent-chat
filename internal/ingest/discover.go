@@ -19,32 +19,22 @@ type fileCandidate struct {
 	mod  time.Time
 }
 
-// pickNearestPostSpawn chooses this terminal's session file from candidates.
-// A file created at/after spawn always beats one before it, and among post-spawn
-// files the EARLIEST wins (the first file created after the spawn is this
-// terminal's own). A pre-spawn file (admitted only within discoverSkew, for clock
-// jitter) is a last resort, and among those the LATEST (closest to spawn) wins.
-// This prevents a quick restart from locking onto the just-closed session file,
-// whose mtime can fall a few ms before the new spawn (#65 / Codex round-4).
+// pickNearestPostSpawn chooses this terminal's session file from candidates: the
+// EARLIEST file created at/after spawn (the first file the freshly-spawned CLI
+// wrote is this terminal's own). Pre-spawn files are IGNORED — returning "" until
+// a post-spawn file appears is correct, because permanently locking onto a stale
+// pre-spawn fallback (a just-closed session or a sibling's older file) would read
+// the wrong transcript forever (#65 / Codex rounds 4-5). spawnedAt is captured
+// before the CLI starts, so its real file is always post-spawn.
 func pickNearestPostSpawn(cands []fileCandidate, spawn time.Time) string {
 	var best string
-	var bestPost bool
 	var bestMod time.Time
 	for _, c := range cands {
-		post := !c.mod.Before(spawn) // mtime >= spawn
-		switch {
-		case best == "":
-			best, bestPost, bestMod = c.path, post, c.mod
-		case post && !bestPost:
-			best, bestPost, bestMod = c.path, true, c.mod // a post-spawn file beats any pre-spawn one
-		case post && bestPost:
-			if c.mod.Before(bestMod) {
-				best, bestMod = c.path, c.mod // earliest post-spawn
-			}
-		case !post && !bestPost:
-			if c.mod.After(bestMod) {
-				best, bestMod = c.path, c.mod // latest pre-spawn (closest to spawn)
-			}
+		if c.mod.Before(spawn) {
+			continue // pre-spawn: never lock onto a stale/sibling fallback
+		}
+		if best == "" || c.mod.Before(bestMod) {
+			best, bestMod = c.path, c.mod // earliest post-spawn = this terminal's own file
 		}
 	}
 	return best

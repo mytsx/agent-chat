@@ -3,6 +3,8 @@ package ingest
 import (
 	"strings"
 	"sync"
+
+	"desktop/internal/sanitize"
 )
 
 // fingerprintStore remembers texts the app itself injected into a PTY (startup
@@ -50,11 +52,24 @@ func (f *fingerprintStore) Consume(text string) bool {
 	return false
 }
 
-// normalizeFingerprint canonicalizes text so an injection matches the CLI's
-// recorded copy despite reformatting: bracketed-paste markers are removed and all
-// runs of whitespace collapse to single spaces, trimmed.
+// normalizeFingerprint canonicalizes text so a self-injection matches the copy the
+// CLI records in its session file, despite the sanitization InjectText applies and
+// the CLI's reformatting. It removes bracketed-paste markers, strips the runes
+// InjectText also drops before writing to the PTY (invisible-format chars and
+// non-whitespace control bytes — so a fingerprint of the ORIGINAL text still
+// matches the CLI's SANITIZED copy, #65 / Codex round-5), and collapses all
+// whitespace runs to single spaces.
 func normalizeFingerprint(s string) string {
 	s = strings.ReplaceAll(s, "\x1b[200~", "")
 	s = strings.ReplaceAll(s, "\x1b[201~", "")
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r == ' ' {
+			return r // whitespace is kept here and collapsed by Fields below
+		}
+		if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
+			return -1
+		}
+		return r
+	}, s)
 	return strings.Join(strings.Fields(s), " ")
 }
