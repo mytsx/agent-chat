@@ -134,6 +134,12 @@ func TestHandleDeleteRoom(t *testing.T) {
 		}
 		h.persistDirtyRooms() // hub-state/orphan.json yaz
 
+		// Stale session signature: silmede temizlenmeli (aynı adla recreate'te ilk
+		// snapshot yanlışlıkla atlanmasın).
+		h.sessionMu.Lock()
+		h.sessionLastSig["orphan"] = "stale-sig"
+		h.sessionMu.Unlock()
+
 		statePath := filepath.Join(h.dataDir, "hub-state", "orphan.json")
 		if _, err := os.Stat(statePath); err != nil {
 			t.Fatalf("state dosyası önce var olmalı: %v", err)
@@ -163,6 +169,12 @@ func TestHandleDeleteRoom(t *testing.T) {
 		}
 		if _, err := os.Stat(archivePath); err != nil {
 			t.Fatalf("arşiv dosyası KORUNMALIYDI: %v", err)
+		}
+		h.sessionMu.Lock()
+		_, sigStillThere := h.sessionLastSig["orphan"]
+		h.sessionMu.Unlock()
+		if sigStillThere {
+			t.Fatalf("sessionLastSig silmede temizlenmeliydi")
 		}
 	})
 }

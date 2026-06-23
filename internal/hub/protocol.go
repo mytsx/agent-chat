@@ -1050,8 +1050,21 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 	delete(h.roomObservers, room)
 	h.mu.Unlock()
 
+	// Forget the room's last-snapshot signature so a later room reusing this name isn't
+	// wrongly skipped by the unchanged-check on its first session save (same reason
+	// clear_room resets it). resetSessionTracking takes its own sessionMu.
+	h.resetSessionTracking(room)
+
 	// Remove ONLY the live state file (+ stray temp). Archive + session snapshots stay.
-	stateFile := filepath.Join(h.dataDir, "hub-state", room+".json")
+	// Confine the path to hub-state with a cleaned-prefix containment check — defense in
+	// depth beyond the ValidateName above, and (matching sessionsDir) provably safe to
+	// static path-injection analysis since room is a user-influenced path segment.
+	stateDir := filepath.Join(h.dataDir, "hub-state")
+	stateFile := filepath.Join(stateDir, room+".json")
+	if !strings.HasPrefix(stateFile, stateDir+string(os.PathSeparator)) {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda yolu: %q", room))
+		return
+	}
 	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
 		h.logger.Printf("delete_room: state dosyası kaldırılamadı (%s): %v", room, err)
 	}
