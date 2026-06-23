@@ -6,6 +6,11 @@ import "@xterm/xterm/css/xterm.css";
 import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } from "../../wailsjs/go/main/App";
 import { CLIType, VoiceState } from "../lib/types";
 
+// fmtRecTime formats elapsed recording seconds as m:ss for the live timer pill.
+function fmtRecTime(s: number): string {
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
 interface Props {
   sessionID: string;
   agentName: string;
@@ -27,6 +32,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // render time, so a mouseup arriving before the "recording" event re-renders
   // would read "idle" and skip StopVoiceCapture, leaving ffmpeg recording forever.
   const recordingRef = useRef(false);
+  const [recSecs, setRecSecs] = useState(0);
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -167,6 +173,14 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     return () => { cancelled = true; cleanup(); };
   }, [sessionID]);
 
+  // Tick the recording timer once per second while the red pill is showing.
+  useEffect(() => {
+    if (voiceState !== "recording") return;
+    setRecSecs(0);
+    const id = setInterval(() => setRecSecs((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [voiceState]);
+
   // Push-to-talk: hold to record, release to transcribe. onMouseLeave also stops
   // so a drag-off doesn't leave the mic recording. Backend enforces the single
   // active-recording lock; a rejected Start just shows an error state.
@@ -208,6 +222,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
             onMouseDown={startVoice}
             onMouseUp={stopVoice}
             onMouseLeave={stopVoice}
+            aria-label="Sesli prompt — bas-konuş"
             title={
               voiceState === "recording"
                 ? "Kaydediliyor… bırakınca yazılır"
@@ -218,7 +233,35 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
                 : "Bas-konuş (sesli prompt)"
             }
           >
-            {voiceState === "transcribing" ? "⋯" : "🎤"}
+            {voiceState === "recording" ? (
+              <span className="voice-pill">
+                <span className="voice-wave" aria-hidden="true">
+                  <i /><i /><i /><i />
+                </span>
+                <span className="voice-timer">{fmtRecTime(recSecs)}</span>
+              </span>
+            ) : voiceState === "transcribing" ? (
+              <span className="voice-pill voice-pill-busy">
+                <span className="voice-spinner" aria-hidden="true" />
+              </span>
+            ) : (
+              <svg
+                className="voice-mic-icon"
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="9" y="2" width="6" height="12" rx="3" />
+                <path d="M5 11a7 7 0 0 0 14 0" />
+                <line x1="12" y1="18" x2="12" y2="22" />
+              </svg>
+            )}
           </button>
           {onRestart && (
             <button

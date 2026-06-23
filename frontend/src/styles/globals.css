@@ -1710,36 +1710,72 @@ html, body, #root {
 .import-add { align-self: flex-start; }
 .import-error { color: #c0392b; font-size: 12px; }
 
-/* Voice prompt (#16) — mic button + recording state */
+/* Voice prompt (#16) — hybrid mic button: compact SVG icon when idle, expands to a
+   red waveform+timer pill while recording, amber spinner pill while transcribing. */
 .terminal-btn-voice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 5px;
   background: transparent;
   border: none;
+  border-radius: 11px;
+  color: #8b949e;
   cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 2px 4px;
-  opacity: 0.7;
   user-select: none;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 .terminal-btn-voice:hover {
-  opacity: 1;
+  color: #c9d1d9;
+  background: rgba(177, 186, 196, 0.12);
 }
+.terminal-btn-voice.voice-error { color: #ff7b72; }
+.voice-mic-icon { display: block; }
+
+/* recording: the button itself becomes a red pill with live waveform + timer */
 .terminal-btn-voice.voice-recording {
-  color: #ff7b72;
-  animation: voice-pulse 1s ease-in-out infinite;
+  background: #da3633;
+  color: #fff;
+  padding: 0 9px;
 }
+.terminal-btn-voice.voice-recording:hover { background: #e5484d; }
+.voice-pill { display: inline-flex; align-items: center; gap: 6px; }
+.voice-wave { display: inline-flex; align-items: center; gap: 2px; height: 13px; }
+.voice-wave i {
+  width: 2.5px;
+  height: 13px;
+  background: currentColor;
+  border-radius: 2px;
+  transform-origin: center;
+  animation: voice-wave 0.9s ease-in-out infinite;
+}
+.voice-wave i:nth-child(2) { animation-delay: 0.15s; }
+.voice-wave i:nth-child(3) { animation-delay: 0.3s; }
+.voice-wave i:nth-child(4) { animation-delay: 0.45s; }
+.voice-timer { font-size: 11px; font-variant-numeric: tabular-nums; }
+@keyframes voice-wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
+/* transcribing: amber pill with a spinner */
 .terminal-btn-voice.voice-transcribing {
-  color: #d29922;
-  opacity: 1;
+  background: rgba(210, 153, 34, 0.18);
+  color: #e3b341;
+  padding: 0 7px;
 }
-.terminal-btn-voice.voice-error {
-  color: #ff7b72;
-  opacity: 1;
+.voice-pill-busy { display: inline-flex; align-items: center; }
+.voice-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: voice-spin 0.7s linear infinite;
 }
-@keyframes voice-pulse {
-  0%, 100% { opacity: 0.5; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.15); }
-}
+@keyframes voice-spin { to { transform: rotate(360deg); } }
 .app-settings-btn {
   position: fixed;
   top: 8px;
