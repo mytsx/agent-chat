@@ -19,9 +19,11 @@ interface Props {
   onToggleFocus?: () => void;
   onRemove?: () => void;
   onRestart?: () => void;
+  onResume?: () => void;
+  canResume?: boolean;
 }
 
-export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus, onRemove, onRestart }: Props) {
+export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus, onRemove, onRestart, onResume, canResume }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -316,6 +318,17 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               </svg>
             )}
           </button>
+          {onResume && (
+            <button
+              type="button"
+              className="terminal-btn-resume"
+              onClick={onResume}
+              disabled={!canResume}
+              title={canResume ? "Oturumdan devam et (--resume)" : "Devam edilebilir oturum hen\u00FCz yakalanmad\u0131"}
+            >
+              {"\u23EF"}
+            </button>
+          )}
           {onRestart && (
             <button
               type="button"
