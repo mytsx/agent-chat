@@ -19,12 +19,17 @@ import (
 
 // PTYSession represents a single pseudo-terminal session
 type PTYSession struct {
-	ID             string
-	Cmd            *exec.Cmd
-	PTY            *os.File
-	TeamID         string
-	AgentName      string
-	CLIType        string
+	ID        string
+	Cmd       *exec.Cmd
+	PTY       *os.File
+	TeamID    string
+	AgentName string
+	CLIType   string
+	// Room is the chat room name pinned at creation (the team name used for the
+	// session's AGENT_CHAT_ROOM env). Logging reads this instead of re-resolving
+	// the mutable Team.Name, so a team rename mid-life can't reroute a logged
+	// prompt to a room the agent's MCP session isn't in (#58).
+	Room           string
 	WorkDir        string // stored for restart
 	PromptID       string // stored for restart
 	SlotIndex      int    // grid slot the terminal occupies (stored for restart)
@@ -63,7 +68,7 @@ func NewManager(onOutput OutputHandler) *Manager {
 
 // Create creates a new PTY session and returns its ID.
 // If cmdName is empty, falls back to the user's login shell.
-func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdName string, cmdArgs []string, cliType string) (string, error) {
+func (m *Manager) Create(teamID, agentName, room, workDir string, env []string, cmdName string, cmdArgs []string, cliType string) (string, error) {
 	id := uuid.New().String()
 
 	// Fallback to login shell
@@ -107,6 +112,7 @@ func (m *Manager) Create(teamID, agentName, workDir string, env []string, cmdNam
 		TeamID:    teamID,
 		AgentName: agentName,
 		CLIType:   cliType,
+		Room:      room,
 		WorkDir:   workDir,
 		done:      make(chan struct{}),
 	}

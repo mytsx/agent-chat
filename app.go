@@ -825,7 +825,10 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		"TERM=xterm-256color",
 	}
 
-	sessionID, err := a.ptyManager.Create(teamID, agentName, workDir, env, cmdName, cmdArgs, cliType)
+	// Pin the room (teamName) on the session — the SAME value set as AGENT_CHAT_ROOM
+	// above — so logged prompts always target the room the agent's MCP session is
+	// actually in, even after a later team rename (#58).
+	sessionID, err := a.ptyManager.Create(teamID, agentName, teamName, workDir, env, cmdName, cmdArgs, cliType)
 	if err != nil {
 		// Rollback worktree only if we newly created it (not reused)
 		if wtNewlyCreated && wtDir != "" && origWorkDir != "" {
@@ -1236,7 +1239,9 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	// participant exists (shell-only team) or any AI target failed, while a shell-
 	// only failure no longer suppresses logging a broadcast all agents received.
 	if submit && aiDelivered {
-		a.logTeamBroadcast(teamID, text)
+		// Log to the room pinned on the broadcast's sessions, not the (mutable)
+		// current team name (#58).
+		a.logTeamBroadcast(pinnedRoomForSessions(sessions, a.roomForTeam(teamID)), text)
 	}
 	return broadcastOutcomeError(injected, errs)
 }
@@ -1272,19 +1277,24 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
 	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
-	room, agent := a.roomForTeam(sess.TeamID), sess.AgentName
+	room, agent := a.logRoomForSession(sess), sess.AgentName
+	// Stamp the delivery moment NOW, synchronously — the prompt was just written to
+	// the agent's PTY, so this precedes any reply the agent can produce. Letting the
+	// hub stamp on (delayed) RPC arrival could order the prompt AFTER that reply in
+	// the timestamp-sorted transcript (#58).
+	ts := types.Timestamp()
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, agent, content); err != nil {
+		if err := client.LogMessage(room, agent, content, ts); err != nil {
 			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
 		}
 	}()
 }
 
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
-// user_prompt addressed to "all" (#29).
-func (a *App) logTeamBroadcast(teamID, content string) {
+// user_prompt addressed to "all" (#29). room is the pre-resolved pinned room (#58).
+func (a *App) logTeamBroadcast(room, content string) {
 	// Capture the hub client before spawning (see logUserPrompt): the goroutine
 	// must not Load the reassignable a.hubClient field.
 	client := a.hubClient.Load()
@@ -1293,12 +1303,14 @@ func (a *App) logTeamBroadcast(teamID, content string) {
 	}
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
 	// broadcast that already reached every agent. Tracked by promptLogN.
-	room := a.roomForTeam(teamID)
+	// Stamp the delivery moment synchronously (see logUserPrompt) — the broadcast
+	// already reached every agent's PTY, so this precedes any reply (#58).
+	ts := types.Timestamp()
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, "all", content); err != nil {
-			log.Printf("[SUMMARY] broadcast loglanamadı (team=%s): %v", teamID, err)
+		if err := client.LogMessage(room, "all", content, ts); err != nil {
+			log.Printf("[SUMMARY] broadcast loglanamadı (room=%s): %v", room, err)
 		}
 	}()
 }
@@ -1329,6 +1341,30 @@ func (a *App) roomForTeam(teamID string) string {
 		}
 	}
 	return "default"
+}
+
+// logRoomForSession resolves the room a session's logged prompt should land in:
+// the room PINNED on the session at creation (the same value as its
+// AGENT_CHAT_ROOM), so a mid-life team rename can't reroute the log to a room the
+// agent's MCP session isn't in. Falls back to the team's current room only for
+// legacy sessions created before pinning (#58).
+func (a *App) logRoomForSession(sess *ptymgr.PTYSession) string {
+	if sess.Room != "" {
+		return sess.Room
+	}
+	return a.roomForTeam(sess.TeamID)
+}
+
+// pinnedRoomForSessions returns the room pinned on the broadcast's sessions (all
+// sessions of a team normally share it), falling back when none is pinned (legacy
+// sessions). So a team rename can't reroute a logged broadcast either (#58).
+func pinnedRoomForSessions(sessions []*ptymgr.PTYSession, fallback string) string {
+	for _, s := range sessions {
+		if s != nil && s.Room != "" {
+			return s.Room
+		}
+	}
+	return fallback
 }
 
 // broadcastOutcomeError reports a broadcast as failed only when EVERY target

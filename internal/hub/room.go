@@ -186,14 +186,23 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 // through the normal cap/archive path so it is snapshotted and archived like any
 // message. Callers MUST NOT re-inject it into agent terminals (it was already
 // delivered to the target agent's PTY); the orchestrator skips this type.
-func (r *RoomState) LogUserPrompt(from, to, content string) types.Message {
+//
+// ts is the delivery-moment timestamp produced app-side (when the prompt was
+// written to the agent's PTY). Stamping at delivery rather than at this RPC's
+// arrival keeps the prompt ordered before any agent reply in the
+// timestamp-sorted transcript, even when the fire-and-forget log goroutine is
+// delayed (#58). An empty ts falls back to the current time.
+func (r *RoomState) LogUserPrompt(from, to, content, ts string) types.Message {
+	if ts == "" {
+		ts = types.Timestamp()
+	}
 	r.mu.Lock()
 	msg := types.Message{
 		ID:        r.nextID(),
 		From:      from,
 		To:        to,
 		Content:   content,
-		Timestamp: types.Timestamp(),
+		Timestamp: ts,
 		Type:      types.MsgTypeUserPrompt,
 		Priority:  "normal",
 	}

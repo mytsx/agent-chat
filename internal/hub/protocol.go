@@ -811,8 +811,9 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 	}
 
 	var data struct {
-		To      string `json:"to"`
-		Content string `json:"content"`
+		To        string `json:"to"`
+		Content   string `json:"content"`
+		Timestamp string `json:"timestamp"`
 	}
 	data.To = "all"
 	if err := json.Unmarshal(req.Data, &data); err != nil {
@@ -842,7 +843,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 	}
 
 	roomState := h.getOrCreateRoom(room)
-	msg := roomState.LogUserPrompt(types.UserPromptFrom, data.To, content)
+	msg := roomState.LogUserPrompt(types.UserPromptFrom, data.To, content, data.Timestamp)
 
 	respData, _ := json.Marshal(map[string]any{"ok": true, "message_id": msg.ID})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
