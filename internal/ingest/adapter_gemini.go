@@ -27,6 +27,22 @@ type geminiFile struct {
 }
 
 func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
+	// Gate the (whole-file) re-read+parse on mtime: skip ticks where the monolithic
+	// JSON hasn't changed since the last parse (spec §3/§7; #65). cur.ModTime==0
+	// (first poll, or a forced re-parse after an emit failure reset the cursor)
+	// always parses.
+	info, serr := os.Stat(path)
+	if serr != nil {
+		if os.IsNotExist(serr) {
+			return nil, cur, nil
+		}
+		return nil, cur, serr
+	}
+	mt := info.ModTime().UnixNano()
+	if cur.ModTime != 0 && mt == cur.ModTime {
+		return nil, cur, nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -36,11 +52,14 @@ func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMess
 	}
 	var gf geminiFile
 	if json.Unmarshal(data, &gf) != nil {
-		// Partial write mid-append — skip this tick, keep the cursor.
+		// Partial write mid-append — skip this tick, keep the cursor (don't record
+		// the new mtime, so the next tick re-parses once the write completes).
 		return nil, cur, nil
 	}
 	// Collect ALL user messages (with their 1-based index as the commit cursor),
-	// then return only those past cur.Count.
+	// then return only those past cur.Count. Per-message After carries no ModTime,
+	// so an emit failure (which commits a per-message cursor) forces a re-parse on
+	// the next tick to retry — only a fully-successful poll records mt via final.
 	var all []ParsedMessage
 	for _, m := range gf.Messages {
 		if m.Type != "user" {
@@ -55,7 +74,7 @@ func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMess
 		}
 		all = append(all, ParsedMessage{Content: text, Timestamp: m.Timestamp, After: Cursor{Count: len(all) + 1}})
 	}
-	final := Cursor{Count: len(all)}
+	final := Cursor{Count: len(all), ModTime: mt}
 	if cur.Count >= len(all) {
 		return nil, final, nil
 	}

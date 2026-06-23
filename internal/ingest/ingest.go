@@ -12,10 +12,13 @@ type UserMessage struct {
 
 // Cursor records how far a session file has been ingested. JSONL adapters use
 // Offset (byte offset of the next unread line). The monolithic-JSON Gemini
-// adapter uses Count (number of messages already emitted). Zero value = start.
+// adapter uses Count (number of messages already emitted) plus ModTime (the file
+// mtime at the last parse, in unix-nanos) so it can skip re-reading+re-parsing
+// the whole file on ticks where it hasn't changed. Zero value = start.
 type Cursor struct {
-	Offset int64
-	Count  int
+	Offset  int64
+	Count   int
+	ModTime int64
 }
 
 // ParsedMessage is one extracted user message plus After — the cursor to commit
