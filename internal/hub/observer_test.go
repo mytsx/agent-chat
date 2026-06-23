@@ -415,3 +415,29 @@ func TestHandleSendMessage_BroadcastNotBlockedByObserver(t *testing.T) {
 		t.Fatalf("broadcast must not be blocked by a configured observer: %s", resp.Error)
 	}
 }
+
+// #17 (Codex P2): a direct message to a still-joined observer must stay rejected even
+// after the desktop revokes it from the allow-list — its roster entry still marks it
+// an observer, so the recipient guard catches it via the roster role.
+func TestHandleSendMessage_ToObserverRejectedAfterRevocation(t *testing.T) {
+	h, obs := newTestHubClient()
+	joinObserver(t, h, obs, "r1", "watcher") // watcher joins → roster role "observer"
+
+	alice := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(alice, types.Request{
+		ID: "join-alice", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "alice", "role": "developer"}),
+	})
+	_ = readResponse(t, alice, "join_room")
+
+	// Desktop revokes the observer from the allow-list, but watcher stays joined.
+	h.setConfiguredObservers("r1", nil)
+
+	h.handleRequest(alice, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "watcher", "content": "hey"}),
+	})
+	if resp := readResponse(t, alice, "send_message"); resp.Success {
+		t.Fatalf("a direct message to a still-joined (de-configured) observer must be rejected")
+	}
+}

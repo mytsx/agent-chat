@@ -498,3 +498,17 @@ func TestRestartWorkDir(t *testing.T) {
 		t.Errorf("normal agent reuses worktree: got %q, want /wt", got)
 	}
 }
+
+// #17 (Codex P2): an empty team name resolves to the "default" room, so hub sync
+// targets it instead of being skipped.
+func TestRoomNameOrDefault(t *testing.T) {
+	if got := roomNameOrDefault(""); got != "default" {
+		t.Errorf("empty → %q, want default", got)
+	}
+	if got := roomNameOrDefault("   "); got != "default" {
+		t.Errorf("whitespace → %q, want default", got)
+	}
+	if got := roomNameOrDefault("TeamA"); got != "TeamA" {
+		t.Errorf("named → %q, want TeamA", got)
+	}
+}

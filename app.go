@@ -289,11 +289,23 @@ func (a *App) subscribeExistingTeams() {
 	}
 }
 
+// roomNameOrDefault maps a team name to its hub room, resolving an empty name to the
+// default room — the same convention CreateTerminal uses. The hub sync helpers rely
+// on this so a default-room team (empty Name) still targets "default" instead of
+// being silently skipped, which would leave its manager/observer state stale (#17).
+func roomNameOrDefault(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "default"
+	}
+	return name
+}
+
 func (a *App) syncHubManager(room, managerAgent string) {
 	client := a.hubClient.Load()
-	if client == nil || strings.TrimSpace(room) == "" {
+	if client == nil {
 		return
 	}
+	room = roomNameOrDefault(room)
 	if err := client.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
 		log.Printf("[HUB] set_manager failed for room=%s manager=%s: %v", room, managerAgent, err)
 	}
@@ -317,9 +329,10 @@ func observerNames(t team.Team) []string {
 // is sent every time because the hub replaces (not merges) the set.
 func (a *App) syncHubObservers(room string, observers []string) {
 	client := a.hubClient.Load()
-	if client == nil || strings.TrimSpace(room) == "" {
+	if client == nil {
 		return
 	}
+	room = roomNameOrDefault(room)
 	if err := client.SetObservers(room, observers); err != nil {
 		log.Printf("[HUB] set_observers failed for room=%s count=%d: %v", room, len(observers), err)
 	}
@@ -1527,10 +1540,16 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 		return team.Team{}, err
 	}
 
+	// A rename changes the room: clear the OLD room's manager + observer hub state so
+	// it doesn't linger, then sync the new/updated room. Observer authorization lives
+	// only in hub memory, so an UpdateTeam that changes Agents/roles must re-sync it
+	// here too — otherwise the room keeps a stale allow-list (Codex P2).
 	if prev.Name != "" && prev.Name != updated.Name {
 		a.syncHubManager(prev.Name, "")
+		a.syncHubObservers(prev.Name, nil)
 	}
 	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubObservers(updated.Name, observerNames(updated))
 
 	return updated, nil
 }
@@ -1587,8 +1606,9 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// If the agent is already running (converted in place), unregister its live PTY
 	// session from the orchestrator so it stops receiving automatic broadcast/direct
 	// notifications — the create-time observer skip only covers future spawns (Codex
-	// P2). No-op when the agent isn't currently registered.
-	a.orchestrator.UnregisterAgent(updated.Name, agentName)
+	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
+	// → "default"), so resolve here too. No-op when the agent isn't registered.
+	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
 	return updated, nil
 }
 
@@ -1799,18 +1819,11 @@ func (a *App) DeleteTeam(id string) error {
 		return err
 	}
 	if getErr == nil {
-		// Resolve the room name the same way CreateTerminal does (empty → "default"),
-		// so deleting a default-room team also clears its hub state — otherwise the
-		// stale manager/observer authorization would linger under "default" (Codex P2).
-		room := t.Name
-		if room == "" {
-			room = "default"
-		}
-		a.syncHubManager(room, "")
-		// Clear the room's observer allow-list too: roomObservers lives in hub memory,
-		// so without this a later team reusing the same room name would inherit the
-		// deleted team's authorized observers (stale read-all access).
-		a.syncHubObservers(room, nil)
+		// Clear the deleted room's hub manager + observer state so a later team
+		// reusing the same room name doesn't inherit it. The sync helpers resolve an
+		// empty name to "default", so this also covers the default-room team (#17).
+		a.syncHubManager(t.Name, "")
+		a.syncHubObservers(t.Name, nil)
 	}
 	return nil
 }

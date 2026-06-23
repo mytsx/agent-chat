@@ -393,6 +393,17 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 	}
 }
 
+// IsObserver reports whether the named agent is currently in the room roster with
+// the observer role (#17). Used to reject a DIRECT message addressed to a live
+// observer even after the desktop revokes it from the allow-list — its roster entry
+// still marks it an observer until it leaves. Case-insensitive on the role.
+func (r *RoomState) IsObserver(agentName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	a, ok := r.agents[agentName]
+	return ok && strings.EqualFold(strings.TrimSpace(a.Role), roleObserver)
+}
+
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
