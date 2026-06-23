@@ -10,11 +10,13 @@ import (
 type fakeAdapter struct {
 	batches [][]ParsedMessage
 	calls   int
+	sessID  string
 }
 
 func (f *fakeAdapter) DiscoverFile(string, int64, func(string) bool) (string, error) {
 	return "fake", nil
 }
+func (f *fakeAdapter) SessionID(string) string { return f.sessID }
 func (f *fakeAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	i := f.calls
 	f.calls++

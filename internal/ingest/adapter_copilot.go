@@ -81,6 +81,15 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed 
 	return pickNearestPostSpawn(cands, spawn), nil
 }
 
+// SessionID extracts Copilot's session UUID from a discovered events.jsonl path
+// ({uuid}/events.jsonl → {uuid}), or "" for an empty path (#40).
+func (copilotAdapter) SessionID(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Dir(path))
+}
+
 // copilotWorkspaceCwd returns the cwd recorded in a session dir's workspace.yaml
 // (`cwd: <path>`), or "" if it can't be read. A minimal line parse avoids a YAML
 // dependency.

@@ -90,3 +90,21 @@ func (geminiAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed f
 	dir := filepath.Join(home, ".gemini", "tmp", hex.EncodeToString(sum[:]), "chats")
 	return nearestSessionFileAfter(dir, "session-*.json", spawnedAtUnixNano, claimed)
 }
+
+// SessionID extracts Gemini's session UUID from its monolithic JSON record's
+// top-level sessionId field (#40). The filename carries only an 8-hex prefix, so
+// the file must be read. Not wired to a resume command this round (Gemini
+// resume-by-id unverified) — capture-only.
+func (geminiAdapter) SessionID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var gf struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(data, &gf) != nil {
+		return ""
+	}
+	return gf.SessionID
+}
