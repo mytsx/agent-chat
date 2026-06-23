@@ -1,33 +1,69 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"testing"
 
 	"desktop/internal/voice"
 )
 
-type fakeRecorder struct{ wav []byte }
+type fakeRecorder struct {
+	wav     []byte
+	stopped bool
+}
 
 func (f *fakeRecorder) Start(ctx context.Context) error { return nil }
 func (f *fakeRecorder) Stop() ([]byte, error) {
+	f.stopped = true
 	if f.wav != nil {
 		return f.wav, nil
 	}
 	return loudWAV(), nil
 }
 
-// loudWAV / silentWAV build minimal 16-bit mono WAVs (44-byte header + samples) so
-// the no-speech energy gate can be exercised without real audio. loudWAV is well
-// above the silence threshold; silentWAV is all zeros.
-func loudWAV() []byte {
-	b := make([]byte, 44+2000)
-	for i := 44; i+1 < len(b); i += 2 {
-		b[i], b[i+1] = 0x40, 0x40 // 0x4040 = 16448, ≈ -6 dBFS
-	}
-	return b
+// blockingRecorder's Stop blocks until release is closed, signalling on entered —
+// used to prove the mic lock is held across the ffmpeg-finalize window (Codex P2 #4).
+type blockingRecorder struct {
+	entered chan struct{}
+	release chan struct{}
 }
-func silentWAV() []byte { return make([]byte, 44+2000) }
+
+func (b *blockingRecorder) Start(ctx context.Context) error { return nil }
+func (b *blockingRecorder) Stop() ([]byte, error) {
+	close(b.entered)
+	<-b.release
+	return loudWAV(), nil
+}
+
+// wavMain builds a valid 16-bit/16kHz mono WAV (real RIFF/WAVE/fmt/data chunks) so
+// the no-speech energy gate's chunk parser measures it correctly. loudWAV is well
+// above the silence threshold; silentWAV is all zeros.
+func wavMain(samples int, amp int16) []byte {
+	data := make([]byte, samples*2)
+	for i := 0; i < samples; i++ {
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(amp))
+	}
+	var b bytes.Buffer
+	b.WriteString("RIFF")
+	binary.Write(&b, binary.LittleEndian, uint32(4+24+8+len(data)))
+	b.WriteString("WAVE")
+	b.WriteString("fmt ")
+	binary.Write(&b, binary.LittleEndian, uint32(16))
+	binary.Write(&b, binary.LittleEndian, uint16(1))
+	binary.Write(&b, binary.LittleEndian, uint16(1))
+	binary.Write(&b, binary.LittleEndian, uint32(16000))
+	binary.Write(&b, binary.LittleEndian, uint32(32000))
+	binary.Write(&b, binary.LittleEndian, uint16(2))
+	binary.Write(&b, binary.LittleEndian, uint16(16))
+	b.WriteString("data")
+	binary.Write(&b, binary.LittleEndian, uint32(len(data)))
+	b.Write(data)
+	return b.Bytes()
+}
+func loudWAV() []byte   { return wavMain(2000, 8000) }
+func silentWAV() []byte { return wavMain(2000, 0) }
 
 // newVoiceTestApp wires all voice seams to stubs: no ffmpeg, no network, no Wails
 // runtime. ctx is Background so StopVoiceCapture's WithTimeout never derefs nil.
@@ -156,6 +192,51 @@ func TestStopVoiceCaptureHallucinationSkips(t *testing.T) {
 	}
 	if injectN != 0 {
 		t.Errorf("hallucination transcript must not inject; got %d", injectN)
+	}
+}
+
+func TestStopActiveVoiceStopsRecorder(t *testing.T) {
+	a := newVoiceTestApp()
+	fr := &fakeRecorder{}
+	a.newVoiceRecorder = func() (voice.Recorder, error) { return fr, nil }
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Fatal(err)
+	}
+	a.stopActiveVoice()
+	if !fr.stopped {
+		t.Error("stopActiveVoice must stop the active recorder (no orphaned ffmpeg)")
+	}
+	if a.activeRecorder != nil {
+		t.Error("activeRecorder must be cleared")
+	}
+	a.stopActiveVoice() // idempotent — must not panic when nothing is recording
+}
+
+func TestStopVoiceCaptureHoldsLockUntilFFmpegExits(t *testing.T) {
+	a := newVoiceTestApp()
+	br := &blockingRecorder{entered: make(chan struct{}), release: make(chan struct{})}
+	first := true
+	a.newVoiceRecorder = func() (voice.Recorder, error) {
+		if first {
+			first = false
+			return br, nil
+		}
+		return &fakeRecorder{}, nil
+	}
+	a.voiceInject = func(sessionID, text string, submit bool) error { return nil }
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = a.StopVoiceCapture("A"); close(done) }()
+	<-br.entered // ffmpeg (Stop) is now finalizing — mic still owned
+	if err := a.StartVoiceCapture("B"); err == nil {
+		t.Error("Start must be rejected while previous capture's ffmpeg is still finalizing")
+	}
+	close(br.release) // let Stop() return → lock released
+	<-done
+	if err := a.StartVoiceCapture("C"); err != nil {
+		t.Errorf("Start should succeed once ffmpeg has exited: %v", err)
 	}
 }
 

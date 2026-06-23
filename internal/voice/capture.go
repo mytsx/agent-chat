@@ -21,15 +21,39 @@ type Recorder interface {
 	Stop() ([]byte, error)
 }
 
-// FFmpegAvailable reports whether ffmpeg is on PATH.
+// commonFFmpegPaths are absolute locations probed when ffmpeg isn't on PATH. A
+// macOS app launched from Finder inherits launchd's minimal PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin), which omits Homebrew/MacPorts — so a LookPath
+// alone reports ffmpeg missing for normal packaged-app users (Codex P2).
+var commonFFmpegPaths = []string{
+	"/opt/homebrew/bin/ffmpeg", // Apple-silicon Homebrew
+	"/usr/local/bin/ffmpeg",    // Intel Homebrew
+	"/opt/local/bin/ffmpeg",    // MacPorts
+}
+
+// resolveFFmpeg returns an absolute path to an ffmpeg executable — PATH first, then
+// the common install locations — or "" if none is found.
+func resolveFFmpeg() string {
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		return p
+	}
+	for _, p := range commonFFmpegPaths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// FFmpegAvailable reports whether an ffmpeg executable can be located.
 func FFmpegAvailable() bool {
-	_, err := exec.LookPath("ffmpeg")
-	return err == nil
+	return resolveFFmpeg() != ""
 }
 
 // ffmpegArgs builds the avfoundation capture args: audio-only device
 // (":<index>" → empty video slot), mono 16 kHz signed-16 PCM WAV to outPath.
-// Pure so it can be unit-tested without spawning ffmpeg.
+// -map_metadata -1 drops ffmpeg's LIST/INFO chunk so the output is a clean
+// canonical WAV. Pure so it can be unit-tested without spawning ffmpeg.
 func ffmpegArgs(deviceSpec, outPath string) []string {
 	return []string{
 		"-f", "avfoundation",
@@ -37,11 +61,13 @@ func ffmpegArgs(deviceSpec, outPath string) []string {
 		"-ac", "1",
 		"-ar", "16000",
 		"-acodec", "pcm_s16le",
+		"-map_metadata", "-1",
 		"-y", outPath,
 	}
 }
 
 type ffmpegRecorder struct {
+	bin        string
 	deviceSpec string
 	outPath    string
 	cmd        *exec.Cmd
@@ -49,18 +75,20 @@ type ffmpegRecorder struct {
 }
 
 // NewFFmpegRecorder returns a Recorder writing to a unique temp WAV under dataDir.
-// Returns ErrFFmpegNotFound if ffmpeg is not installed. deviceSpec is the
-// avfoundation input (e.g. ":0").
+// Returns ErrFFmpegNotFound if ffmpeg cannot be located. deviceSpec is the
+// avfoundation input (e.g. ":0"). The resolved absolute ffmpeg path is captured so
+// a later Finder launch (minimal PATH) still spawns the same binary.
 func NewFFmpegRecorder(dataDir, deviceSpec string) (Recorder, error) {
-	if !FFmpegAvailable() {
+	bin := resolveFFmpeg()
+	if bin == "" {
 		return nil, ErrFFmpegNotFound
 	}
 	out := filepath.Join(dataDir, fmt.Sprintf("voice-%d.wav", time.Now().UnixNano()))
-	return &ffmpegRecorder{deviceSpec: deviceSpec, outPath: out}, nil
+	return &ffmpegRecorder{bin: bin, deviceSpec: deviceSpec, outPath: out}, nil
 }
 
 func (r *ffmpegRecorder) Start(ctx context.Context) error {
-	r.cmd = exec.Command("ffmpeg", ffmpegArgs(r.deviceSpec, r.outPath)...)
+	r.cmd = exec.Command(r.bin, ffmpegArgs(r.deviceSpec, r.outPath)...)
 	// Capture ffmpeg's stderr so a failed capture (mic permission denied, bad
 	// device index) surfaces a real message instead of vanishing — otherwise an
 	// empty/missing WAV only shows up later as an opaque read error.

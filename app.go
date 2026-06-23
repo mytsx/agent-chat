@@ -437,6 +437,9 @@ func (a *App) shutdown(ctx context.Context) {
 	// own teardown, not a crash — otherwise it would restart the hub into an orphaned
 	// process that outlives the app and holds the port (#60).
 	a.shuttingDown.Store(true)
+	// Terminate any in-flight voice capture so a quit mid-recording doesn't orphan
+	// ffmpeg or leak its temp WAV (Codex P2).
+	a.stopActiveVoice()
 	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
 	// quit captures the in-flight conversation (#28). Iterating the hub's room list
 	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
@@ -2021,6 +2024,23 @@ func (a *App) emitVoiceState(sessionID, state, message string) {
 	})
 }
 
+// stopActiveVoice terminates any in-flight microphone capture and clears the lock.
+// Called on shutdown so a quit mid-recording doesn't orphan the ffmpeg subprocess
+// (children aren't auto-killed when the Go process exits) or leak the temp WAV
+// (Codex P2). Safe to call when nothing is recording; the audio is discarded.
+func (a *App) stopActiveVoice() {
+	a.voiceMu.Lock()
+	rec := a.activeRecorder
+	a.activeRecorder = nil
+	a.activeVoiceSession = ""
+	a.voiceMu.Unlock()
+	if rec != nil {
+		if _, err := rec.Stop(); err != nil {
+			log.Printf("[VOICE] shutdown'da kayıt durdurma hatası: %v", err)
+		}
+	}
+}
+
 // StartVoiceCapture begins recording the microphone for a session (push-to-talk
 // down). Only one capture runs at a time (single mic): a second Start while one is
 // active returns an error the frontend surfaces. Emits voice:state events.
@@ -2068,11 +2088,22 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 		return nil
 	}
 	rec := a.activeRecorder
-	a.activeRecorder = nil
+	// Keep activeRecorder set (so a concurrent Start from another panel is rejected)
+	// but null the session id (so a double Stop for this session no-ops) while ffmpeg
+	// finalizes. Only once rec.Stop() returns has ffmpeg released the avfoundation
+	// device — clear the lock then, before the Whisper upload, so another panel can
+	// record while this transcript uploads without contending for the mic (Codex P2).
 	a.activeVoiceSession = ""
 	a.voiceMu.Unlock()
 
 	wav, err := rec.Stop()
+
+	a.voiceMu.Lock()
+	if a.activeRecorder == rec {
+		a.activeRecorder = nil
+	}
+	a.voiceMu.Unlock()
+
 	if err != nil {
 		log.Printf("[VOICE] kayıt durdurma/okuma hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", "⚠️ Kayıt okunamadı: "+err.Error())

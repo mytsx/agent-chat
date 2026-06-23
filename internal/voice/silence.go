@@ -7,15 +7,40 @@ import (
 	"unicode"
 )
 
-// rmsDBFS returns the RMS level of a 16-bit PCM mono WAV in dBFS (0 = full scale,
-// negative = quieter). It skips the 44-byte canonical header. Empty/too-short data
-// returns a very low level (treated as silence).
-func rmsDBFS(wav []byte) float64 {
-	const headerLen = 44
-	if len(wav) <= headerLen+1 {
-		return -120
+// pcmData returns the bytes of the WAV "data" chunk. It walks the RIFF chunk list
+// rather than assuming a fixed 44-byte header, because ffmpeg inserts a LIST/INFO
+// metadata chunk before "data" — measuring from byte 44 would feed that metadata
+// into the RMS and let a silent recording clear the gate (Codex P2). Returns nil for
+// anything that isn't a recognizable PCM WAV.
+func pcmData(wav []byte) []byte {
+	if len(wav) < 12 || string(wav[0:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
+		return nil
 	}
-	pcm := wav[headerLen:]
+	off := 12
+	for off+8 <= len(wav) {
+		id := string(wav[off : off+4])
+		size := int(binary.LittleEndian.Uint32(wav[off+4 : off+8]))
+		body := off + 8
+		if id == "data" {
+			end := body + size
+			if size < 0 || end > len(wav) {
+				end = len(wav) // tolerate a streamed/oversized declared size
+			}
+			return wav[body:end]
+		}
+		off = body + size
+		if size%2 == 1 {
+			off++ // chunks are word-aligned (padded to even length)
+		}
+	}
+	return nil
+}
+
+// rmsDBFS returns the RMS level of a 16-bit PCM mono WAV's data chunk in dBFS
+// (0 = full scale, negative = quieter). Empty/too-short/unparseable data returns a
+// very low level (treated as silence).
+func rmsDBFS(wav []byte) float64 {
+	pcm := pcmData(wav)
 	n := len(pcm) / 2
 	if n == 0 {
 		return -120

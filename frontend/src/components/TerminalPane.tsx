@@ -32,6 +32,11 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // render time, so a mouseup arriving before the "recording" event re-renders
   // would read "idle" and skip StopVoiceCapture, leaving ffmpeg recording forever.
   const recordingRef = useRef(false);
+  // busyRef stays true from the press until the backend resolves the capture
+  // (idle/error). startVoice gates on it so a second recording can't start while the
+  // previous one is still transcribing — two overlapping Whisper results would both
+  // inject into the same PTY line and corrupt the prompt (Codex P2).
+  const busyRef = useRef(false);
   const [recSecs, setRecSecs] = useState(0);
 
   useEffect(() => {
@@ -161,6 +166,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
       EventsOn(stateEv, (data: { state: VoiceState; message: string }) => {
         setVoiceState(data.state);
         setVoiceError(data.state === "error" ? data.message : "");
+        if (data.state === "idle" || data.state === "error") {
+          recordingRef.current = false;
+          busyRef.current = false; // capture resolved → allow the next recording
+        }
       });
       cleanup = () => {
         try { EventsOff(stateEv); } catch (e) {
@@ -185,12 +194,14 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // so a drag-off doesn't leave the mic recording. Backend enforces the single
   // active-recording lock; a rejected Start just shows an error state.
   const startVoice = () => {
-    if (recordingRef.current) return;
+    if (busyRef.current) return; // block while recording OR still transcribing
+    busyRef.current = true;
     recordingRef.current = true;
     setVoiceState("recording"); // optimistic — turn red instantly, don't wait for the event
     setVoiceError("");
     StartVoiceCapture(sessionID).catch((e) => {
       recordingRef.current = false;
+      busyRef.current = false;
       setVoiceState("error");
       setVoiceError(String(e));
     });
@@ -198,8 +209,11 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const stopVoice = () => {
     if (!recordingRef.current) return; // ref, not voiceState — avoids the stale-closure skip
     recordingRef.current = false;
+    // busyRef stays true through transcription; cleared on the backend's idle/error
+    // event (or the catch below) so the next recording is blocked until then.
     setVoiceState("transcribing");
     StopVoiceCapture(sessionID).catch((e) => {
+      busyRef.current = false;
       setVoiceState("error");
       setVoiceError(String(e));
     });
