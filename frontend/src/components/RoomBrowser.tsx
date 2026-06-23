@@ -4,6 +4,7 @@ import { useTeams } from "../store/useTeams";
 import { useMessages, useAgentsFor } from "../store/useMessages";
 import MessageFeed from "./MessageFeed";
 import RoomSummaryModal from "./RoomSummaryModal";
+import ImportRoomModal from "./ImportRoomModal";
 import { RoomSummary } from "../lib/types";
 
 // truncateToMessages in the hub — rooms at/above this cap show only the most
@@ -110,17 +111,22 @@ function RoomRow({
 
 function RoomDetail({
   room,
+  summary,
   isActiveTeam,
   onBack,
+  onImported,
 }: {
   room: string;
+  summary: RoomSummary | undefined;
   isActiveTeam: boolean;
   onBack: () => void;
+  onImported: () => void;
 }) {
   const loadMessages = useMessages((s) => s.loadMessages);
   const loadAgents = useMessages((s) => s.loadAgents);
   const agents = useAgentsFor(room);
   const [showSummary, setShowSummary] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   useEffect(() => {
     loadMessages(room);
@@ -157,6 +163,15 @@ function RoomDetail({
         >
           📝 Özet
         </button>
+        {!isActiveTeam && summary && (
+          <button
+            className="room-back"
+            title="Bu orphan odayı yeni takım olarak içe aktar"
+            onClick={() => setShowImport(true)}
+          >
+            ⬇️ Takıma Aktar
+          </button>
+        )}
       </div>
       <div className="room-detail-agents">
         {agentNames.length > 0 ? (
@@ -178,6 +193,17 @@ function RoomDetail({
 
       {showSummary && (
         <RoomSummaryModal room={room} onClose={() => setShowSummary(false)} />
+      )}
+
+      {showImport && summary && (
+        <ImportRoomModal
+          room={summary}
+          onClose={() => setShowImport(false)}
+          onImported={() => {
+            setShowImport(false);
+            onImported();
+          }}
+        />
       )}
     </div>
   );
@@ -203,8 +229,13 @@ export default function RoomBrowser() {
     return (
       <RoomDetail
         room={selectedRoom}
+        summary={rooms.find((r) => r.name === selectedRoom)}
         isActiveTeam={teamNames.has(selectedRoom)}
         onBack={() => selectRoom(null)}
+        onImported={() => {
+          selectRoom(null);
+          loadRooms();
+        }}
       />
     );
   }
