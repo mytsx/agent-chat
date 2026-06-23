@@ -746,3 +746,23 @@ func TestCreate_RejectsDuplicateName(t *testing.T) {
 		t.Fatalf("case-insensitive 'alpha' de reddedilmeliydi")
 	}
 }
+
+func TestUpdate_RejectsDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	a, err := s.Create("Alpha", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create Alpha: %v", err)
+	}
+	b, err := s.Create("Beta", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create Beta: %v", err)
+	}
+	// Beta'yı "alpha"ya yeniden adlandırma (Alpha ile case-insensitive çakışır) → reddedilmeli.
+	if _, err := s.Update(b.ID, "alpha", "2x2", nil); err == nil {
+		t.Fatalf("Beta'yı 'alpha'ya yeniden adlandırma reddedilmeliydi")
+	}
+	// Takımı kendi adıyla (case değişimi dahil) güncellemek izinli olmalı.
+	if _, err := s.Update(a.ID, "Alpha", "2x2", nil); err != nil {
+		t.Fatalf("takımı kendi adıyla güncelleme izinli olmalı: %v", err)
+	}
+}

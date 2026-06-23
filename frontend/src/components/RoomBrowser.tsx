@@ -55,7 +55,9 @@ function RoomRow({
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        // Only act when the row itself is focused — keydown bubbles, so without this
+        // the nested delete button's Enter/Space would also select the room.
+        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
           onClick();
         }

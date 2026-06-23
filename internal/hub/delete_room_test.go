@@ -64,6 +64,13 @@ func TestTombstone_PersistSkipsAndRecreateClears(t *testing.T) {
 		t.Fatalf("tombstoned oda persist edilmemeliydi (dosya var)")
 	}
 
+	// persistRoom'un KENDİ guard'ı da tombstoned odayı yazmamalı (TOCTOU race fix):
+	// doğrudan çağır, dosya oluşmamalı.
+	h.persistRoom("doomed", rs)
+	if _, err := os.Stat(filepath.Join(h.dataDir, "hub-state", "doomed.json")); !os.IsNotExist(err) {
+		t.Fatalf("persistRoom tombstoned odayı yazmamalı")
+	}
+
 	// Gerçek delete_room akışını taklit et: oda h.rooms'tan da kalkar. Sonra meşru
 	// recreation (getOrCreateRoom create-branch'i) tombstone'u temizlemeli.
 	h.mu.Lock()

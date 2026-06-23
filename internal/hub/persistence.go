@@ -93,13 +93,24 @@ func (h *Hub) persistDirtyRooms() {
 	}
 }
 
-// persistAll writes all rooms to disk (called on shutdown).
+// persistAll writes all rooms to disk (called on shutdown). It snapshots the room set
+// under the lock and releases it BEFORE calling persistRoom, because persistRoom now
+// takes h.mu.RLock itself — holding it here would be a recursive RLock (deadlock-prone
+// if a writer arrives between the two acquisitions).
 func (h *Hub) persistAll() {
+	type entry struct {
+		name string
+		room *RoomState
+	}
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
+	entries := make([]entry, 0, len(h.rooms))
 	for name, room := range h.rooms {
-		h.persistRoom(name, room)
+		entries = append(entries, entry{name, room})
+	}
+	h.mu.RUnlock()
+
+	for _, e := range entries {
+		h.persistRoom(e.name, e.room)
 	}
 }
 
@@ -117,6 +128,17 @@ func (h *Hub) persistRoom(name string, room *RoomState) {
 	// Atomic write: temp file + rename
 	tmpPath := filepath.Join(stateDir, name+".json.tmp")
 	finalPath := filepath.Join(stateDir, name+".json")
+
+	// Hold the read lock across the tombstone check AND the write/rename so a concurrent
+	// delete_room cannot interleave between the check and the rename to resurrect the
+	// file. delete_room sets the tombstone under h.mu.Lock and only os.Remove's the file
+	// AFTER that lock section — which is blocked until this RUnlock. So either we see the
+	// tombstone and skip, or our rename completes fully before delete's remove runs.
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.deletedRooms[name] {
+		return
+	}
 
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		h.logger.Printf("Failed to write temp file for room %s: %v", name, err)

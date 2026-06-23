@@ -184,6 +184,15 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Same filesystem-collision guard as Create, but excluding the team being renamed:
+	// a rename that case-insensitively matches a DIFFERENT team would map both to the
+	// same room file on macOS/Windows.
+	for _, t := range s.teams {
+		if t.ID != id && strings.EqualFold(t.Name, name) {
+			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
+		}
+	}
+
 	for i, t := range s.teams {
 		if t.ID == id {
 			s.teams[i].Name = name
