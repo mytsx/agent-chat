@@ -51,7 +51,7 @@ func New() *Manager {
 // discovers the file (retrying until it appears), then polls it on an interval.
 // A duplicate sessionID is ignored (idempotent). A nil adapter / empty id no-ops.
 func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, emit EmitFunc) {
-	if ad == nil || sessionID == "" || emit == nil {
+	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
 	m.mu.Lock()
@@ -95,6 +95,9 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 // RecordInjection notes that the app injected text into this terminal's PTY, so
 // the watcher suppresses the CLI's recorded copy. No-op for an unknown session.
 func (m *Manager) RecordInjection(sessionID, text string) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	s := m.sessions[sessionID]
 	m.mu.Unlock()
@@ -105,6 +108,9 @@ func (m *Manager) RecordInjection(sessionID, text string) {
 
 // StopSession stops and forgets a terminal's watcher.
 func (m *Manager) StopSession(sessionID string) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	s := m.sessions[sessionID]
 	delete(m.sessions, sessionID)
@@ -116,6 +122,9 @@ func (m *Manager) StopSession(sessionID string) {
 
 // StopAll stops every watcher (app shutdown).
 func (m *Manager) StopAll() {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	all := m.sessions
 	m.sessions = make(map[string]*session)
