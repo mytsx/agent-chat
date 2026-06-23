@@ -378,10 +378,11 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	// Observer agents (#17) are read-only. Reject send_message BEFORE the manager
 	// gateway below, so an observer's message is never even rerouted to the manager
 	// — and because this returns before GetActiveManagerAndTouch, it cannot refresh
-	// the active manager's heartbeat. Keyed on the join-bound identity c.agentName
-	// (the from==c.agentName check above already pins it), so the gate can't be
-	// bypassed with a forged `from`.
-	if roomState.IsObserver(c.agentName) {
+	// the active manager's heartbeat. Authorization is the DESKTOP allow-list
+	// (isConfiguredObserver), not the mutable room roster: that survives a clear_room
+	// (which empties the roster) so a still-connected observer stays send-blocked, and
+	// it can't be bypassed with a forged `from` (the from==c.agentName check pins it).
+	if h.isConfiguredObserver(room, c.agentName) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}
@@ -512,10 +513,11 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		}
 		activeManager := roomState.GetActiveManager()
 		isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
-		// Observer agents (#17) get read-only access to the full transcript. The role
-		// is exclusive at the room level (an agent joins as either "manager" or
-		// "observer"), so isManager and isObserver never overlap.
-		isObserver := roomState.IsObserver(c.agentName)
+		// Observer agents (#17) get read-only access to the full transcript. Authorize
+		// from the DESKTOP allow-list (isConfiguredObserver), not the room roster: this
+		// is revocable — removing an agent from the observer set via set_observers
+		// immediately drops its read-all access even while it stays connected.
+		isObserver := h.isConfiguredObserver(room, c.agentName)
 		if !isManager && !isObserver {
 			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya observer tüm mesajları okuyabilir")
 			return

@@ -6,42 +6,6 @@ import (
 	"desktop/internal/types"
 )
 
-func TestRoomIsObserver(t *testing.T) {
-	r := NewRoomState()
-	if _, _, err := r.Join("watcher", "observer"); err != nil {
-		t.Fatalf("observer join should succeed: %v", err)
-	}
-	if _, _, err := r.Join("dev", "developer"); err != nil {
-		t.Fatalf("developer join should succeed: %v", err)
-	}
-	if _, _, err := r.Join("boss", "manager"); err != nil {
-		t.Fatalf("manager join should succeed: %v", err)
-	}
-
-	if !r.IsObserver("watcher") {
-		t.Errorf("IsObserver(watcher) = false, want true")
-	}
-	if r.IsObserver("dev") {
-		t.Errorf("IsObserver(dev) = true, want false")
-	}
-	if r.IsObserver("boss") {
-		t.Errorf("IsObserver(boss) = true, want false")
-	}
-	if r.IsObserver("absent") {
-		t.Errorf("IsObserver(absent) = true, want false (not in roster)")
-	}
-}
-
-func TestRoomIsObserver_CaseInsensitive(t *testing.T) {
-	r := NewRoomState()
-	if _, _, err := r.Join("Watcher", "Observer"); err != nil {
-		t.Fatalf("observer join should succeed: %v", err)
-	}
-	if !r.IsObserver("Watcher") {
-		t.Errorf("IsObserver should match a mixed-case observer role")
-	}
-}
-
 func TestObserverJoin_DoesNotClaimManagerLock(t *testing.T) {
 	r := NewRoomState()
 	if _, _, err := r.Join("watcher", "observer"); err != nil {
@@ -49,6 +13,27 @@ func TestObserverJoin_DoesNotClaimManagerLock(t *testing.T) {
 	}
 	if got := r.GetActiveManager(); got != "" {
 		t.Fatalf("observer must not claim manager lock, got %q", got)
+	}
+}
+
+// #17 (Codex P2): like a manager, an observer's own join must NOT truncate a
+// capped room — otherwise the oldest messages are dropped before the observer's
+// first read_all_messages(limit=1000) can see them.
+func TestObserverJoin_DoesNotTruncate(t *testing.T) {
+	r := NewRoomState()
+	for i := 0; i < maxMessagesInRoom; i++ {
+		r.SendMessage("a", "all", "msg", false, "normal", SendOptions{})
+	}
+	if got := len(r.GetMessages()); got != maxMessagesInRoom {
+		t.Fatalf("setup: expected room filled to cap %d, got %d", maxMessagesInRoom, got)
+	}
+
+	if _, _, err := r.Join("watcher", "observer"); err != nil {
+		t.Fatalf("observer join: %v", err)
+	}
+
+	if got := len(r.GetMessages()); got <= truncateToMessages {
+		t.Fatalf("observer join truncated room to %d; must preserve full history like manager", got)
 	}
 }
 
@@ -66,8 +51,9 @@ func TestManagerAndObserverCoexist(t *testing.T) {
 	if got := r.GetActiveManager(); got != "boss" {
 		t.Fatalf("manager lock must be unaffected by observers, got %q", got)
 	}
-	if !r.IsObserver("watcher") || !r.IsObserver("watcher2") {
-		t.Fatalf("both observers should be recognized")
+	agents := r.GetAgents()
+	if agents["watcher"].Role != "observer" || agents["watcher2"].Role != "observer" {
+		t.Fatalf("both observers should be recorded in the roster with the observer role")
 	}
 }
 
@@ -305,9 +291,58 @@ func TestObserverReadAll_Over300sNoEvict(t *testing.T) {
 		t.Fatalf("observer poll should succeed: %s", resp.Error)
 	}
 
-	// A subsequent stale-cleanup must NOT evict the observer.
+	// A subsequent stale-cleanup must NOT evict the observer (it stays visible in
+	// list_agents). read_all authorization itself is the allow-list, not the roster.
 	rs.ListAgents("")
-	if !rs.IsObserver("watcher") {
+	if _, ok := rs.GetAgents()["watcher"]; !ok {
 		t.Fatalf("observer evicted after staleTimeout despite read_all heartbeat refresh")
+	}
+}
+
+// #17 (Codex P2): observer authorization is the desktop allow-list, not the room
+// roster, so a clear_room (which empties the roster) must NOT lift the send block on
+// a still-connected observer.
+func TestHandleSendMessage_ObserverBlockedAfterRosterClear(t *testing.T) {
+	h, obs := newTestHubClient()
+	joinObserver(t, h, obs, "r1", "watcher")
+
+	// Simulate clear_room: ClearArchived empties the roster (and messages).
+	h.getOrCreateRoom("r1").ClearArchived(1 << 30)
+
+	h.handleRequest(obs, types.Request{
+		ID:   "msg-after-clear",
+		Type: "send_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "watcher", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Fatalf("observer send must stay blocked after a roster clear")
+	}
+}
+
+// #17 (Codex P2): removing an agent from the observer allow-list must immediately
+// revoke its read-all access, even while it stays connected.
+func TestHandleGetAllMessages_ObserverRevokedWhenDeconfigured(t *testing.T) {
+	h, obs := newTestHubClient()
+	joinObserver(t, h, obs, "r1", "watcher")
+
+	getAll := types.Request{
+		ID:   "all",
+		Type: "get_all_messages",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"since_id": 0, "limit": 50}),
+	}
+	h.handleRequest(obs, getAll)
+	if resp := readResponse(t, obs, "get_all_messages"); !resp.Success {
+		t.Fatalf("configured observer should read_all: %s", resp.Error)
+	}
+
+	// Desktop removes the observer from the allow-list.
+	h.setConfiguredObservers("r1", nil)
+
+	h.handleRequest(obs, types.Request{ID: "all2", Type: "get_all_messages", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"since_id": 0, "limit": 50})})
+	if resp := readResponse(t, obs, "get_all_messages"); resp.Success {
+		t.Fatalf("read_all must be revoked once the observer is de-configured")
 	}
 }

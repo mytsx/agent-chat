@@ -88,6 +88,7 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 	}
 
 	isManager := strings.EqualFold(strings.TrimSpace(role), "manager")
+	isObserver := strings.EqualFold(strings.TrimSpace(role), roleObserver)
 	if isManager {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
 			r.mu.Unlock()
@@ -116,12 +117,13 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	// A MANAGER's own join must not truncate: it would drop history out from under
-	// the manager's first read_all_messages. Every other system message (a
-	// non-manager join, any leave) DOES go through the cap, so a flapping agent's
-	// connect/disconnect churn can't grow the room unbounded.
+	// A MANAGER's or OBSERVER's own join must not truncate: it would drop history out
+	// from under their first read_all_messages(limit=1000). Every other system message
+	// (a normal-agent join, any leave) DOES go through the cap, so a flapping agent's
+	// connect/disconnect churn can't grow the room unbounded. Managers are singular and
+	// observers are few (desktop-spawned), so their bypass can't be abused for growth.
 	var dropped []types.Message
-	if isManager {
+	if isManager || isObserver {
 		r.messages = append(r.messages, sysMsg)
 	} else {
 		dropped = r.appendMessageLocked(sysMsg)
@@ -389,17 +391,6 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 		r.agents[agentName] = agent
 		r.dirty = true
 	}
-}
-
-// IsObserver reports whether the named room agent joined with the observer role
-// (#17), compared case-insensitively after trimming. Used by handleSendMessage to
-// reject an observer's send_message and by handleGetAllMessages to grant it
-// read-only access to the full transcript. False if the agent is not in the roster.
-func (r *RoomState) IsObserver(agentName string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	a, ok := r.agents[agentName]
-	return ok && strings.EqualFold(strings.TrimSpace(a.Role), roleObserver)
 }
 
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {

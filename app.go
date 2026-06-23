@@ -1548,6 +1548,10 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 		return team.Team{}, err
 	}
 	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	// Promoting an agent to manager clears its observer role (manager XOR observer);
+	// re-sync the observer allow-list so the hub no longer authorizes the now-manager
+	// as an observer — otherwise it would stay read-only (send-blocked) on the hub (#17).
+	a.syncHubObservers(updated.Name, observerNames(updated))
 	return updated, nil
 }
 
