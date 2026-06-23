@@ -84,7 +84,7 @@ func New() *Manager {
 // exited is a channel that closes when the terminal's PTY process dies (e.g. the
 // user typed /exit inside the CLI) so the watcher stops even without an explicit
 // StopSession; nil means "no PTY-death signal" (#65).
-func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc) {
+func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string)) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
@@ -97,10 +97,10 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
-	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit)
+	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit, onSessionID)
 }
 
-func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc) {
+func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string)) {
 	defer close(s.done)  // registered first → runs LAST (after finish), so a StopAll
 	defer m.finish(s.id) //   waiter sees a fully cleaned-up session.
 	ticker := time.NewTicker(pollInterval)
@@ -136,6 +136,13 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 				return
 			}
 			path = p
+			// #40: surface the CLI's own session ID once, right after the file is
+			// discovered+claimed, so the app can store it for opt-in resume.
+			if onSessionID != nil {
+				if id := ad.SessionID(path); id != "" {
+					onSessionID(id)
+				}
+			}
 		}
 		// Gate only the poll/emit on hub readiness: don't advance the cursor (drop a
 		// prompt) while emits can't be delivered (#65). A muted watcher's em discards,

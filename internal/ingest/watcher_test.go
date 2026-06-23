@@ -3,6 +3,7 @@ package ingest
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeAdapter returns a preset batch of ParsedMessages once per ParseNewUserMessages
@@ -104,6 +105,30 @@ func TestPollOnce_EmitFailureKeepsCursorBeforeMessage(t *testing.T) {
 	}
 	if cur.Offset != 1 {
 		t.Fatalf("cursor = %d, want 1 (must stay before the un-delivered message for retry)", cur.Offset)
+	}
+}
+
+func TestStartSession_FiresOnSessionID(t *testing.T) {
+	m := New()
+	ad := &fakeAdapter{sessID: "fake-id"}
+	got := make(chan string, 1)
+	m.StartSession("s1", ad, "cwd", 0, nil, nil,
+		func(string, string) bool { return true },
+		func(id string) {
+			select {
+			case got <- id:
+			default:
+			}
+		})
+	defer m.StopSession("s1")
+
+	select {
+	case id := <-got:
+		if id != "fake-id" {
+			t.Fatalf("onSessionID = %q, want fake-id", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onSessionID not fired within 2s")
 	}
 }
 

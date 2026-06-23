@@ -960,6 +960,18 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 				return false // delivery failed — don't advance the cursor past this message
 			}
 			return true
+		}, func(id string) {
+			// #40: capture the CLI's session ID for opt-in resume. Only for CLIs
+			// whose native resume we support — others (Gemini/shell) never enable
+			// the "Devam Et" button.
+			if !cli.ResumeSupported(ct) {
+				return
+			}
+			a.ptyManager.SetCLISessionID(sessionID, id)
+			runtime.EventsEmit(a.ctx, "terminal:resume-available", map[string]string{
+				"sessionID":    sessionID,
+				"cliSessionID": id,
+			})
 		})
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
