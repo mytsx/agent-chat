@@ -616,12 +616,14 @@ func (a *App) resolveAgentMode(teamID, agentName, promptID string) (string, erro
 	return "", nil
 }
 
-// isIncompleteAgentConfig reports whether a persisted AgentConfig was never fully
-// created — it has no CLIType. SetTeamObserver pre-persists {Name, Role:observer}
-// before CreateTerminal supplies the rest; a failed create leaves such a phantom.
-// Every legitimately-created agent (including shells) has a non-empty CLIType.
-func isIncompleteAgentConfig(cfg team.AgentConfig) bool {
-	return strings.TrimSpace(cfg.CLIType) == ""
+// isObserverPhantom reports whether a persisted AgentConfig is a half-written
+// observer: SetTeamObserver pre-persists {Name, Role:observer} before CreateTerminal
+// supplies the CLIType, so a failed create leaves an observer with no CLIType. The
+// check is narrow ON PURPOSE — a blank CLIType alone is a legitimate login-shell
+// fallback (legacy/manually-configured teams), so only the observer-role+blank-CLI
+// combination identifies the phantom; legitimate shells (Role != observer) are kept.
+func isObserverPhantom(cfg team.AgentConfig) bool {
+	return isObserverRole(cfg.Role) && strings.TrimSpace(cfg.CLIType) == ""
 }
 
 // restartWorkDir decides which directory a restarted terminal runs in. A
@@ -937,13 +939,14 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 	results := make([]OpenTeamResult, 0, len(ordered))
 	for _, cfg := range ordered {
 		res := OpenTeamResult{AgentName: cfg.Name, CLIType: cfg.CLIType, SlotIndex: cfg.SlotIndex}
-		// Skip incomplete configs: SetTeamObserver pre-persists an AgentConfig with
-		// only Name+Role before CreateTerminal fills in CLIType/WorkDir. If that create
-		// failed, the team is left with a phantom (empty CLIType); reopening it would
-		// otherwise launch an unintended login shell in its slot (Codex P2).
-		if isIncompleteAgentConfig(cfg) {
-			res.Error = "eksik yapılandırma (CLI tipi yok) — atlandı"
-			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s eksik config (CLIType boş), atlandı", cfg.Name)
+		// Skip an observer phantom: SetTeamObserver pre-persists {Name, Role:observer}
+		// before CreateTerminal fills in the CLIType. If that create failed, reopening
+		// the phantom would launch an unintended login shell in its slot (Codex P2).
+		// Narrowed to the observer-role+blank-CLI case so legitimate blank-CLI shells
+		// (legacy/manual configs) still reopen.
+		if isObserverPhantom(cfg) {
+			res.Error = "yarım kalan observer config (CLI tipi yok) — atlandı"
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s observer phantom (CLIType boş), atlandı", cfg.Name)
 			results = append(results, res)
 			continue
 		}
@@ -1201,6 +1204,12 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	// a legacy/empty CLI type that falls through to the login shell — never does, so
 	// a prompt sent to it isn't room agent traffic and must not be logged (#29).
 	if !isAICLIType(sess.CLIType) {
+		return
+	}
+	// Observer sessions are the user's PRIVATE drafting/discussion space (#17). Their
+	// prompts must NOT enter the room transcript, or the private draft could be
+	// summarized and injected into worker agents — defeating the point of the role.
+	if a.isObserverAgent(sess.TeamID, sess.AgentName) {
 		return
 	}
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
@@ -1575,6 +1584,11 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// re-sync both so the hub's manager lock and observer authorization match.
 	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
 	a.syncHubObservers(updated.Name, observerNames(updated))
+	// If the agent is already running (converted in place), unregister its live PTY
+	// session from the orchestrator so it stops receiving automatic broadcast/direct
+	// notifications — the create-time observer skip only covers future spawns (Codex
+	// P2). No-op when the agent isn't currently registered.
+	a.orchestrator.UnregisterAgent(updated.Name, agentName)
 	return updated, nil
 }
 
@@ -1786,6 +1800,10 @@ func (a *App) DeleteTeam(id string) error {
 	}
 	if getErr == nil && t.Name != "" {
 		a.syncHubManager(t.Name, "")
+		// Also clear the room's observer allow-list (#17): roomObservers lives in
+		// hub memory, so without this a later team reusing the same room name would
+		// inherit the deleted team's authorized observers (stale read-all access).
+		a.syncHubObservers(t.Name, nil)
 	}
 	return nil
 }

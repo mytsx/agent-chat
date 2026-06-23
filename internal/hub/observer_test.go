@@ -346,3 +346,24 @@ func TestHandleGetAllMessages_ObserverRevokedWhenDeconfigured(t *testing.T) {
 		t.Fatalf("read_all must be revoked once the observer is de-configured")
 	}
 }
+
+// #17 (Codex P2): the send block is connection-bound (c.isObserver), so a still-
+// connected observer cannot start sending even after the desktop removes it from the
+// observer allow-list — it would have to reconnect (as a non-observer) to send.
+func TestHandleSendMessage_ObserverBlockedAfterDeconfig(t *testing.T) {
+	h, obs := newTestHubClient()
+	joinObserver(t, h, obs, "r1", "watcher") // sets c.isObserver at the gated join
+
+	// Desktop de-configures the observer (removes it from the allow-list).
+	h.setConfiguredObservers("r1", nil)
+
+	h.handleRequest(obs, types.Request{
+		ID:   "msg-after-deconfig",
+		Type: "send_message",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "watcher", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Fatalf("a connection that joined as observer must stay send-blocked after de-config")
+	}
+}

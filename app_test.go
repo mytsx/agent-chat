@@ -467,18 +467,18 @@ func TestResolveAgentMode_ExplicitObserverBeatsManagerPrompt(t *testing.T) {
 	}
 }
 
-// #17 (Codex P2): a half-created observer leaves a phantom AgentConfig with an
-// empty CLIType; OpenTeamFromConfig must skip such incomplete configs so it doesn't
-// launch an unintended login shell in the phantom's slot.
-func TestIsIncompleteAgentConfig(t *testing.T) {
-	if !isIncompleteAgentConfig(team.AgentConfig{Name: "x", Role: "observer", CLIType: ""}) {
-		t.Error("empty CLIType (phantom observer) must be treated as incomplete")
+// #17 (Codex P2): a half-created observer leaves a phantom AgentConfig (Role
+// observer + empty CLIType); OpenTeamFromConfig skips it. The check must be narrow:
+// a blank CLIType alone is a legitimate login-shell fallback that must be preserved.
+func TestIsObserverPhantom(t *testing.T) {
+	if !isObserverPhantom(team.AgentConfig{Name: "x", Role: "observer", CLIType: ""}) {
+		t.Error("observer with empty CLIType must be a phantom")
 	}
-	if isIncompleteAgentConfig(team.AgentConfig{Name: "x", CLIType: "claude"}) {
-		t.Error("a configured AI agent must not be incomplete")
+	if isObserverPhantom(team.AgentConfig{Name: "x", Role: "", CLIType: ""}) {
+		t.Error("a legacy blank-CLI shell (non-observer) must be preserved, not treated as a phantom")
 	}
-	if isIncompleteAgentConfig(team.AgentConfig{Name: "x", CLIType: "shell"}) {
-		t.Error("a shell agent is complete")
+	if isObserverPhantom(team.AgentConfig{Name: "x", Role: "observer", CLIType: "claude"}) {
+		t.Error("a fully-configured observer is not a phantom")
 	}
 }
 

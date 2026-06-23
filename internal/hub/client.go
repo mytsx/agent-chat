@@ -28,6 +28,11 @@ type Client struct {
 	desktopAuthed bool
 	agentName     string
 	joinedRoom    string
+	// isObserver is set once at a gated observer join (#17). It is connection-bound,
+	// so an observer can never send_message for the life of this connection even if
+	// the desktop later removes it from the allow-list or clear_room wipes the roster
+	// — it would have to reconnect (and not as an observer) to send.
+	isObserver bool
 }
 
 func newClient(hub *Hub, conn *websocket.Conn) *Client {

@@ -297,6 +297,12 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	c.rooms[room] = true
 	c.agentName = data.AgentName
 	c.joinedRoom = room
+	// Bind the observer role to the connection (#17): a gated observer join makes
+	// this connection permanently read-only, independent of later allow-list/roster
+	// changes.
+	if role == roleObserver {
+		c.isObserver = true
+	}
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
@@ -378,11 +384,16 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	// Observer agents (#17) are read-only. Reject send_message BEFORE the manager
 	// gateway below, so an observer's message is never even rerouted to the manager
 	// — and because this returns before GetActiveManagerAndTouch, it cannot refresh
-	// the active manager's heartbeat. Authorization is the DESKTOP allow-list
-	// (isConfiguredObserver), not the mutable room roster: that survives a clear_room
-	// (which empties the roster) so a still-connected observer stays send-blocked, and
-	// it can't be bypassed with a forged `from` (the from==c.agentName check pins it).
-	if h.isConfiguredObserver(room, c.agentName) {
+	// the active manager's heartbeat. Two independent signals block the send, so
+	// neither a roster clear nor an allow-list change can re-enable it:
+	//   - c.isObserver: connection-bound (set at the gated join) — a connection that
+	//     joined as observer can NEVER send, even after the desktop de-configures it
+	//     (it would have to reconnect as a non-observer);
+	//   - isConfiguredObserver: fail-safe for a configured observer that joined under
+	//     a different role.
+	// Both key on join-bound identity (c.agentName, pinned by the from== check), so a
+	// forged `from` can't bypass the gate.
+	if c.isObserver || h.isConfiguredObserver(room, c.agentName) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}
