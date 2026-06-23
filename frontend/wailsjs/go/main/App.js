@@ -70,6 +70,10 @@ export function GetTerminalSessions(arg1) {
   return window['go']['main']['App']['GetTerminalSessions'](arg1);
 }
 
+export function GetVoiceStatus() {
+  return window['go']['main']['App']['GetVoiceStatus']();
+}
+
 export function IsGitRepo(arg1) {
   return window['go']['main']['App']['IsGitRepo'](arg1);
 }
@@ -132,6 +136,18 @@ export function SetTeamManager(arg1, arg2) {
 
 export function SetTeamObserver(arg1, arg2) {
   return window['go']['main']['App']['SetTeamObserver'](arg1, arg2);
+}
+
+export function SetVoiceConfig(arg1) {
+  return window['go']['main']['App']['SetVoiceConfig'](arg1);
+}
+
+export function StartVoiceCapture(arg1) {
+  return window['go']['main']['App']['StartVoiceCapture'](arg1);
+}
+
+export function StopVoiceCapture(arg1) {
+  return window['go']['main']['App']['StopVoiceCapture'](arg1);
 }
 
 export function UpdatePrompt(arg1, arg2, arg3, arg4, arg5) {

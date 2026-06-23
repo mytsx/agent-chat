@@ -9,6 +9,7 @@ import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
 import Sidebar from "./components/Sidebar";
+import SettingsModal from "./components/SettingsModal";
 import "./styles/globals.css";
 
 class ErrorBoundary extends Component<
@@ -42,6 +43,7 @@ function AppContent() {
   const { addMessages, setAgents, loadMessages, loadAgents } = useMessages();
   const [ready, setReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
   // Notifications that couldn't be injected into a terminal because the user kept
@@ -179,6 +181,15 @@ function AppContent() {
 
   return (
     <div className="app">
+      <button
+        type="button"
+        className="app-settings-btn"
+        onClick={() => setShowSettings(true)}
+        title="Ayarlar (sesli prompt / API anahtarı)"
+      >
+        ⚙️
+      </button>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       {worktreeNotice && (
         <div className="worktree-notice">
           <span>

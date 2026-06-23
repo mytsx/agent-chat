@@ -120,3 +120,23 @@ export function gridCapacity(layout: string): number {
   const { cols, rows } = parseGrid(layout);
   return cols * rows;
 }
+
+// Voice / STT (#16)
+export type VoiceState = "idle" | "recording" | "transcribing" | "error";
+
+// Settings-panel view of voice config (mirrors main.VoiceStatus). Raw key never sent.
+export interface VoiceStatus {
+  hasKey: boolean;
+  keyHint: string;
+  ffmpegFound: boolean;
+}
+
+// voice:state:<sessionID> event payload (mirrors app.go emitVoiceState).
+export interface VoiceStateEvent {
+  state: VoiceState;
+  message: string;
+}
+
+// voice:transcript:<sessionID> event payload — the transcribed text (UI feedback
+// only; the text is already injected into the PTY by the backend).
+export type VoiceTranscriptEvent = string;

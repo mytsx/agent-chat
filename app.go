@@ -30,6 +30,7 @@ import (
 	"desktop/internal/team"
 	"desktop/internal/types"
 	"desktop/internal/validation"
+	"desktop/internal/voice"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -69,6 +70,26 @@ type App struct {
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
 	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
 	promptLogN atomic.Int64
+	// Voice/STT state (#16). voiceMu guards the single active microphone capture —
+	// only one panel records at a time (one mic). activeRecorder/activeVoiceSession
+	// are non-nil exactly while a capture is in flight; transcription runs after the
+	// recorder is detached, so panel B can record while panel A's audio uploads.
+	voiceMu            sync.Mutex
+	activeRecorder     voice.Recorder
+	activeVoiceSession string
+	// transcribingSessions is the SET of sessions whose audio is being uploaded/
+	// transcribed right now. A per-session map (not a single slot) so a second
+	// session transcribing concurrently can't overwrite the first's guard (Codex P2):
+	// each entry outlives its activeRecorder (cleared once ffmpeg exits) and blocks a
+	// repeat capture for that same session until injection finishes — authoritative,
+	// since the pane-local busyRef resets on remount.
+	transcribingSessions map[string]bool
+	// Injectable seams (orchestrator SendFunc pattern), defaulted in startup(),
+	// overridden in tests so the flow runs with no ffmpeg/network/Wails runtime.
+	newVoiceRecorder func() (voice.Recorder, error)
+	voiceTranscribe  func(ctx context.Context, wav []byte) (string, error)
+	voiceInject      func(sessionID, text string, submit bool) error
+	voiceEmit        func(event string, payload interface{})
 }
 
 // NewApp creates a new App application struct
@@ -102,6 +123,26 @@ func (a *App) startup(ctx context.Context) {
 			"prompt":    prompt,
 		})
 	})
+
+	// Voice seam defaults (#16). Tests replace these; production uses ffmpeg +
+	// Whisper + the real PTY injection and Wails event bus.
+	a.newVoiceRecorder = func() (voice.Recorder, error) {
+		return voice.NewFFmpegRecorder(a.dataDir, ":0")
+	}
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		cfg, err := voice.LoadConfig(a.dataDir)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(cfg.OpenAIAPIKey) == "" {
+			return "", fmt.Errorf("⚠️ OpenAI API anahtarı yok — Ayarlar'dan girin")
+		}
+		return voice.NewWhisperClient(cfg.OpenAIAPIKey).Transcribe(ctx, wav)
+	}
+	a.voiceInject = a.ptyManager.InjectText
+	a.voiceEmit = func(event string, payload interface{}) {
+		runtime.EventsEmit(a.ctx, event, payload)
+	}
 
 	// Initialize stores
 	a.promptStore, _ = prompt.NewStore(a.dataDir)
@@ -403,6 +444,9 @@ func (a *App) shutdown(ctx context.Context) {
 	// own teardown, not a crash — otherwise it would restart the hub into an orphaned
 	// process that outlives the app and holds the port (#60).
 	a.shuttingDown.Store(true)
+	// Terminate any in-flight voice capture so a quit mid-recording doesn't orphan
+	// ffmpeg or leak its temp WAV (Codex P2).
+	a.stopActiveVoice()
 	// Snapshot every live hub room as a session BEFORE closing the hub client, so a
 	// quit captures the in-flight conversation (#28). Iterating the hub's room list
 	// (not just teamStore) covers orphaned / default / MCP rooms that have no team.
@@ -1977,4 +2021,186 @@ func (a *App) WatchChatDir(room string) error {
 		return fmt.Errorf("hub not connected")
 	}
 	return client.Subscribe([]string{room})
+}
+
+// emitVoiceState pushes a voice:state:<sessionID> event for the panel's mic UI.
+func (a *App) emitVoiceState(sessionID, state, message string) {
+	a.voiceEmit("voice:state:"+sessionID, map[string]string{
+		"state":   state,
+		"message": message,
+	})
+}
+
+// stopActiveVoice terminates any in-flight microphone capture and clears the lock.
+// Called on shutdown so a quit mid-recording doesn't orphan the ffmpeg subprocess
+// (children aren't auto-killed when the Go process exits) or leak the temp WAV
+// (Codex P2). Safe to call when nothing is recording; the audio is discarded.
+func (a *App) stopActiveVoice() {
+	a.voiceMu.Lock()
+	rec := a.activeRecorder
+	a.activeRecorder = nil
+	a.activeVoiceSession = ""
+	a.voiceMu.Unlock()
+	if rec != nil {
+		if _, err := rec.Stop(); err != nil {
+			log.Printf("[VOICE] shutdown'da kayıt durdurma hatası: %v", err)
+		}
+	}
+}
+
+// StartVoiceCapture begins recording the microphone for a session (push-to-talk
+// down). Only one capture runs at a time (single mic): a second Start while one is
+// active returns an error the frontend surfaces. Emits voice:state events.
+func (a *App) StartVoiceCapture(sessionID string) error {
+	log.Printf("[VOICE] StartVoiceCapture session=%s", sessionID)
+	a.voiceMu.Lock()
+	if a.activeRecorder != nil {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StartVoiceCapture reddedildi (zaten kayıt var) session=%s", sessionID)
+		return fmt.Errorf("⚠️ Zaten kayıt sürüyor")
+	}
+	if a.transcribingSessions[sessionID] {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StartVoiceCapture reddedildi (bu panel hâlâ çevriliyor) session=%s", sessionID)
+		return fmt.Errorf("⚠️ Bu panelin önceki kaydı hâlâ çevriliyor")
+	}
+	rec, err := a.newVoiceRecorder()
+	if err != nil {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] recorder oluşturulamadı session=%s err=%v", sessionID, err)
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	if err := rec.Start(a.ctx); err != nil {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] recorder Start hatası session=%s err=%v", sessionID, err)
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	a.activeRecorder = rec
+	a.activeVoiceSession = sessionID
+	a.voiceMu.Unlock()
+	log.Printf("[VOICE] kayıt başladı session=%s", sessionID)
+	a.emitVoiceState(sessionID, "recording", "")
+	return nil
+}
+
+// StopVoiceCapture ends recording for a session (push-to-talk up), transcribes the
+// audio, and injects the transcript into that session's PTY input line WITHOUT
+// submitting (autosubmit off — the user reviews and presses Enter). A Stop for a
+// session that isn't the active recording one is a silent no-op. The recorder is
+// detached under the lock and released before the network call, so another panel
+// may start recording while this transcript uploads.
+func (a *App) StopVoiceCapture(sessionID string) error {
+	log.Printf("[VOICE] StopVoiceCapture session=%s", sessionID)
+	a.voiceMu.Lock()
+	if a.activeRecorder == nil || a.activeVoiceSession != sessionID {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StopVoiceCapture no-op (aktif kayıt yok ya da farklı session) session=%s active=%s", sessionID, a.activeVoiceSession)
+		return nil
+	}
+	rec := a.activeRecorder
+	// Keep activeRecorder set (so a concurrent Start from another panel is rejected)
+	// but null the session id (so a double Stop for this session no-ops) while ffmpeg
+	// finalizes. Only once rec.Stop() returns has ffmpeg released the avfoundation
+	// device — clear the lock then, before the Whisper upload, so another panel can
+	// record while this transcript uploads without contending for the mic (Codex P2).
+	a.activeVoiceSession = ""
+	a.voiceMu.Unlock()
+
+	wav, err := rec.Stop()
+
+	a.voiceMu.Lock()
+	if a.activeRecorder == rec {
+		a.activeRecorder = nil
+	}
+	if a.transcribingSessions == nil {
+		a.transcribingSessions = make(map[string]bool)
+	}
+	a.transcribingSessions[sessionID] = true
+	a.voiceMu.Unlock()
+	// Removed on EVERY return path below so a failed/stuck transcription can't
+	// permanently block this session from recording again (Codex P2).
+	defer func() {
+		a.voiceMu.Lock()
+		delete(a.transcribingSessions, sessionID)
+		a.voiceMu.Unlock()
+	}()
+
+	if err != nil {
+		log.Printf("[VOICE] kayıt durdurma/okuma hatası session=%s err=%v", sessionID, err)
+		a.emitVoiceState(sessionID, "error", "⚠️ Kayıt okunamadı: "+err.Error())
+		return err
+	}
+	log.Printf("[VOICE] kayıt durdu session=%s wavBytes=%d", sessionID, len(wav))
+
+	// No-speech gate: Whisper hallucinates subtitle artifacts (e.g. "Altyazı M.K.")
+	// on silent audio, so a capture with no real speech must never be sent or
+	// injected. Skip before the API call to also save the request.
+	if silent, db := voice.IsLikelySilent(wav); silent {
+		log.Printf("[VOICE] sessiz kayıt, transkripsiyon atlandı session=%s dBFS=%.1f", sessionID, db)
+		a.emitVoiceState(sessionID, "idle", "")
+		return nil
+	}
+
+	a.emitVoiceState(sessionID, "transcribing", "")
+	base := a.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 30*time.Second)
+	defer cancel()
+	text, err := a.voiceTranscribe(ctx, wav)
+	if err != nil {
+		log.Printf("[VOICE] transkripsiyon hatası session=%s err=%v", sessionID, err)
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	log.Printf("[VOICE] transkript session=%s len=%d", sessionID, len(text))
+	// Drop empty results and known no-speech hallucinations that slipped past the
+	// energy gate (quiet ambient that Whisper still "heard" as a subtitle credit).
+	if strings.TrimSpace(text) == "" || voice.IsHallucination(text) {
+		log.Printf("[VOICE] boş/halüsinasyon transkript atlandı session=%s text=%q", sessionID, text)
+		a.emitVoiceState(sessionID, "idle", "")
+		return nil
+	}
+	if err := a.voiceInject(sessionID, text, false); err != nil {
+		a.emitVoiceState(sessionID, "error", "⚠️ Enjeksiyon hatası: "+err.Error())
+		return err
+	}
+	a.voiceEmit("voice:transcript:"+sessionID, text)
+	a.emitVoiceState(sessionID, "idle", "")
+	return nil
+}
+
+// VoiceStatus is the Settings-panel view of voice config. The real API key never
+// crosses to the frontend — only whether one is set, a short hint (last 4 chars),
+// and whether ffmpeg is available.
+type VoiceStatus struct {
+	HasKey      bool   `json:"hasKey"`
+	KeyHint     string `json:"keyHint"`
+	FFmpegFound bool   `json:"ffmpegFound"`
+}
+
+// GetVoiceStatus reports voice config state for the Settings panel (no raw key).
+func (a *App) GetVoiceStatus() (VoiceStatus, error) {
+	cfg, err := voice.LoadConfig(a.dataDir)
+	if err != nil {
+		return VoiceStatus{}, err
+	}
+	key := strings.TrimSpace(cfg.OpenAIAPIKey)
+	st := VoiceStatus{HasKey: key != "", FFmpegFound: voice.FFmpegAvailable()}
+	if r := []rune(key); len(r) > 0 {
+		last := r
+		if len(r) > 4 {
+			last = r[len(r)-4:]
+		}
+		st.KeyHint = "…" + string(last)
+	}
+	return st, nil
+}
+
+// SetVoiceConfig persists the OpenAI API key (set-only). An empty string clears it.
+func (a *App) SetVoiceConfig(apiKey string) error {
+	return voice.SaveConfig(a.dataDir, voice.Config{OpenAIAPIKey: strings.TrimSpace(apiKey)})
 }

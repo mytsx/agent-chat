@@ -1709,3 +1709,85 @@ html, body, #root {
 .import-row input { flex: 1; min-width: 0; }
 .import-add { align-self: flex-start; }
 .import-error { color: #c0392b; font-size: 12px; }
+
+/* Voice prompt (#16) — hybrid mic button: compact SVG icon when idle, expands to a
+   red waveform+timer pill while recording, amber spinner pill while transcribing. */
+.terminal-btn-voice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 5px;
+  background: transparent;
+  border: none;
+  border-radius: 11px;
+  color: #8b949e;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.terminal-btn-voice:hover {
+  color: #c9d1d9;
+  background: rgba(177, 186, 196, 0.12);
+}
+.terminal-btn-voice.voice-error { color: #ff7b72; }
+.voice-mic-icon { display: block; }
+
+/* recording: the button itself becomes a red pill with live waveform + timer */
+.terminal-btn-voice.voice-recording {
+  background: #da3633;
+  color: #fff;
+  padding: 0 9px;
+}
+.terminal-btn-voice.voice-recording:hover { background: #e5484d; }
+.voice-pill { display: inline-flex; align-items: center; gap: 6px; }
+.voice-wave { display: inline-flex; align-items: center; gap: 2px; height: 13px; }
+.voice-wave i {
+  width: 2.5px;
+  height: 13px;
+  background: currentColor;
+  border-radius: 2px;
+  transform-origin: center;
+  animation: voice-wave 0.9s ease-in-out infinite;
+}
+.voice-wave i:nth-child(2) { animation-delay: 0.15s; }
+.voice-wave i:nth-child(3) { animation-delay: 0.3s; }
+.voice-wave i:nth-child(4) { animation-delay: 0.45s; }
+.voice-timer { font-size: 11px; font-variant-numeric: tabular-nums; }
+@keyframes voice-wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
+/* transcribing: amber pill with a spinner */
+.terminal-btn-voice.voice-transcribing {
+  background: rgba(210, 153, 34, 0.18);
+  color: #e3b341;
+  padding: 0 7px;
+}
+.voice-pill-busy { display: inline-flex; align-items: center; }
+.voice-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: voice-spin 0.7s linear infinite;
+}
+@keyframes voice-spin { to { transform: rotate(360deg); } }
+.app-settings-btn {
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 50;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  opacity: 0.75;
+}
+.app-settings-btn:hover {
+  opacity: 1;
+}
