@@ -69,5 +69,5 @@ func (claudeAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed f
 		return "", err
 	}
 	dir := filepath.Join(home, ".claude", "projects", claudeSlug(cwd))
-	return newestJSONLAfter(dir, "*.jsonl", spawnedAtUnixNano, claimed)
+	return nearestSessionFileAfter(dir, "*.jsonl", spawnedAtUnixNano, claimed)
 }

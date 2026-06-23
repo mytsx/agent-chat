@@ -88,5 +88,5 @@ func (geminiAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed f
 	}
 	sum := sha256.Sum256([]byte(cwd))
 	dir := filepath.Join(home, ".gemini", "tmp", hex.EncodeToString(sum[:]), "chats")
-	return newestJSONLAfter(dir, "session-*.json", spawnedAtUnixNano, claimed)
+	return nearestSessionFileAfter(dir, "session-*.json", spawnedAtUnixNano, claimed)
 }

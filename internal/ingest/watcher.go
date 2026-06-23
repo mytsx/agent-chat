@@ -76,7 +76,10 @@ func New() *Manager {
 // connected). When it returns false the tick is skipped WITHOUT advancing the
 // cursor, so a prompt parsed while the hub is down is retried once it returns
 // rather than silently dropped (#65). A nil ready means always-ready.
-func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
+// exited is a channel that closes when the terminal's PTY process dies (e.g. the
+// user typed /exit inside the CLI) so the watcher stops even without an explicit
+// StopSession; nil means "no PTY-death signal" (#65).
+func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
@@ -89,16 +92,17 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
-	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, emit)
+	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit)
 }
 
-func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
-	defer close(s.done)
+func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc) {
+	defer close(s.done)  // registered first → runs LAST (after finish), so a StopAll
+	defer m.finish(s.id) //   waiter sees a fully cleaned-up session.
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	var path string
 	var cur Cursor
-	poll := func() {
+	discoverAndPoll := func() {
 		// Skip (don't advance the cursor) while emits can't be delivered, so a
 		// prompt isn't parsed-and-dropped while the hub is unavailable (#65).
 		if ready != nil && !ready() {
@@ -125,17 +129,37 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		}
 		cur = pollOnce(ad, path, cur, s.fp, emit)
 	}
+	// drain catches a prompt submitted just before stop, on an ALREADY-discovered
+	// file only — it must NOT discover/claim on the way out, or a late claim added
+	// after StopSession released this session's claims would leak and block a
+	// same-cwd restart's watcher (#65).
+	drain := func() {
+		if path != "" && (ready == nil || ready()) {
+			pollOnce(ad, path, cur, s.fp, emit)
+		}
+	}
 	for {
 		select {
 		case <-s.cancel:
-			// Final drain: a prompt the user submitted just before close/restart may
-			// have been appended since the last tick — catch it before stopping (#65).
-			poll()
+			drain()
+			return
+		case <-exited:
+			drain()
 			return
 		case <-ticker.C:
-			poll()
+			discoverAndPoll()
 		}
 	}
+}
+
+// finish removes a session and releases its file claim. Idempotent — runs from
+// run()'s defer (covers a PTY-death exit with no StopSession) and is safe if
+// StopSession already removed the session.
+func (m *Manager) finish(sessionID string) {
+	m.mu.Lock()
+	delete(m.sessions, sessionID)
+	m.releaseClaims(sessionID)
+	m.mu.Unlock()
 }
 
 func (m *Manager) tryClaim(sessionID, path string) bool {

@@ -155,6 +155,35 @@ func TestClaudeDiscover_PicksNewestAfterSpawn(t *testing.T) {
 	}
 }
 
+// With two session files both created after spawn (a sibling same-cwd terminal),
+// discovery picks the one CLOSEST to this spawn — not simply the newest — so each
+// terminal locks onto its own file (#65 / Codex P2).
+func TestClaudeDiscover_PicksNearestToSpawnNotNewest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := "/tmp/myrepo"
+	dir := filepath.Join(home, ".claude", "projects", claudeSlug(cwd))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mine := writeFile(t, dir, "mine.jsonl", "{}\n")
+	sibling := writeFile(t, dir, "sibling.jsonl", "{}\n")
+	spawn := time.Now()
+	// mine created ~0.3s after this spawn; sibling (a later terminal) ~1.5s after.
+	near := spawn.Add(300 * time.Millisecond)
+	far := spawn.Add(1500 * time.Millisecond)
+	os.Chtimes(mine, near, near)
+	os.Chtimes(sibling, far, far)
+
+	got, err := claudeAdapter{}.DiscoverFile(cwd, spawn.UnixNano(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != mine {
+		t.Fatalf("DiscoverFile = %q, want %q (nearest to spawn, not the newer sibling)", got, mine)
+	}
+}
+
 func TestClaudeDiscover_MissingDirReturnsEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

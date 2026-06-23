@@ -940,7 +940,9 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// ready: only ingest while the hub is connected, so a prompt parsed while the
 		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
 		ready := func() bool { return a.hubClient.Load() != nil }
-		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, func(content, ts string) bool {
+		// exited closes when this terminal's CLI process dies (incl. an in-CLI /exit
+		// with no app-side close), so the watcher stops and frees its file claim (#65).
+		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, a.ptyManager.SessionDone(sessionID), func(content, ts string) bool {
 			client := a.hubClient.Load()
 			if client == nil {
 				return false // hub down — keep the cursor, retry next tick (#65)
@@ -2067,10 +2069,12 @@ func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string
 	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
 		return err
 	}
-	a.logUserPrompt(sessionID, rendered)
-	// logUserPrompt logs this immediately; record it so ingestion (#65) suppresses
-	// the duplicate the CLI writes to its session file.
+	// Record the fingerprint IMMEDIATELY after the write, before logUserPrompt does
+	// its (slower, goroutine-spawning) work — otherwise an ingestion tick landing in
+	// that gap would log the app-injected prompt as a directly-typed message and
+	// logUserPrompt would log it again (#65 / Codex P3).
 	a.ingestMgr.RecordInjection(sessionID, rendered)
+	a.logUserPrompt(sessionID, rendered)
 	return nil
 }
 
