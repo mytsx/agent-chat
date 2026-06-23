@@ -18,6 +18,8 @@ export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,a
 
 export function DeletePrompt(arg1:string):Promise<void>;
 
+export function DeleteRoom(arg1:string):Promise<void>;
+
 export function DeleteTeam(arg1:string):Promise<void>;
 
 export function DetectCLIs():Promise<Array<cli.CLIInfo>>;
