@@ -31,7 +31,12 @@ type Hub struct {
 	// with role "observer" is rejected unless the agent is in this set, mirroring the
 	// manager gate — so a self-asserted observer can't gain read-all transcript access.
 	roomObservers map[string]map[string]bool
-	defaultRoom   string
+	// deletedRooms tombstones rooms removed via delete_room. The periodic persist loop
+	// skips tombstoned names so an in-flight write cannot resurrect a just-deleted state
+	// file; getOrCreateRoom clears the tombstone when a same-named room is legitimately
+	// (re)created. Guarded by h.mu.
+	deletedRooms map[string]bool
+	defaultRoom  string
 	// desktopAuthToken is a shared secret set by the desktop app when spawning the hub.
 	// It is required to identify as client_type=desktop.
 	desktopAuthToken string
@@ -92,6 +97,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		subs:             make(map[string]map[*Client]bool),
 		roomManager:      make(map[string]string),
 		roomObservers:    make(map[string]map[string]bool),
+		deletedRooms:     make(map[string]bool),
 		defaultRoom:      defaultRoom,
 		desktopAuthToken: desktopAuthToken,
 		register:         make(chan *Client),
@@ -298,6 +304,7 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	if r, ok := h.rooms[room]; ok {
 		return r
 	}
+	delete(h.deletedRooms, room) // legitimate (re)creation lifts any tombstone
 	r := NewRoomState()
 	r.SetArchiveFn(h.archiveFnFor(room))
 	h.rooms[room] = r

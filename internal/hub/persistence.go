@@ -83,8 +83,9 @@ func (h *Hub) persistDirtyRooms() {
 	for _, name := range roomNames {
 		h.mu.RLock()
 		room, ok := h.rooms[name]
+		deleted := h.deletedRooms[name]
 		h.mu.RUnlock()
-		if !ok || !room.IsDirty() {
+		if !ok || deleted || !room.IsDirty() {
 			continue
 		}
 
