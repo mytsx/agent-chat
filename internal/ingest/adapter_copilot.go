@@ -1,11 +1,11 @@
 package ingest
 
 import (
-	"bufio"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // copilotAdapter ingests GitHub Copilot CLI's JSONL transcript:
@@ -23,27 +23,9 @@ type copilotLine struct {
 }
 
 func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, cur, nil
-		}
-		return nil, cur, err
-	}
-	defer f.Close()
-	if _, err := f.Seek(cur.Offset, io.SeekStart); err != nil {
-		return nil, cur, err
-	}
+	lines, next, err := readCompleteJSONLines(path, cur.Offset)
 	var out []UserMessage
-	consumed := cur.Offset
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		consumed += int64(len(line)) + 1
-		if len(line) == 0 {
-			continue
-		}
+	for _, line := range lines {
 		var cl copilotLine
 		if json.Unmarshal(line, &cl) != nil {
 			continue
@@ -53,10 +35,7 @@ func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessa
 		}
 		out = append(out, UserMessage{Content: cl.Data.Content, Timestamp: cl.Timestamp})
 	}
-	if err := sc.Err(); err != nil {
-		return out, Cursor{Offset: consumed}, err
-	}
-	return out, Cursor{Offset: consumed}, nil
+	return out, Cursor{Offset: next}, err
 }
 
 func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
@@ -72,24 +51,45 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string,
 		}
 		return "", err
 	}
-	// Each session is a {uuid}/ dir; pick the newest events.jsonl at/after spawn.
+	// Each session is a {uuid}/ dir (NOT cwd-derived); pick the newest events.jsonl
+	// at/after spawn whose workspace.yaml cwd matches THIS terminal — otherwise a
+	// concurrent Copilot session in another dir could be ingested under the wrong
+	// agent (#65 / Codex P2).
+	cutoff := time.Unix(0, spawnedAtUnixNano).Add(-discoverSkew)
 	var best string
-	var bestMod int64
+	var bestMod time.Time
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
 		}
-		p, derr := newestJSONLAfter(filepath.Join(base, d.Name()), "events.jsonl", spawnedAtUnixNano)
-		if derr != nil || p == "" {
+		dir := filepath.Join(base, d.Name())
+		if copilotWorkspaceCwd(dir) != cwd {
 			continue
 		}
-		info, serr := os.Stat(p)
-		if serr != nil {
+		info, serr := os.Stat(filepath.Join(dir, "events.jsonl"))
+		if serr != nil || info.ModTime().Before(cutoff) {
 			continue
 		}
-		if best == "" || info.ModTime().UnixNano() > bestMod {
-			best, bestMod = p, info.ModTime().UnixNano()
+		if best == "" || info.ModTime().After(bestMod) {
+			best, bestMod = filepath.Join(dir, "events.jsonl"), info.ModTime()
 		}
 	}
 	return best, nil
+}
+
+// copilotWorkspaceCwd returns the cwd recorded in a session dir's workspace.yaml
+// (`cwd: <path>`), or "" if it can't be read. A minimal line parse avoids a YAML
+// dependency.
+func copilotWorkspaceCwd(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "workspace.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(data), "\n") {
+		ln = strings.TrimSpace(ln)
+		if rest, ok := strings.CutPrefix(ln, "cwd:"); ok {
+			return strings.Trim(strings.TrimSpace(rest), `"'`)
+		}
+	}
+	return ""
 }

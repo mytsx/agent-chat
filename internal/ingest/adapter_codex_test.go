@@ -1,6 +1,38 @@
 package ingest
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Among same-day rollouts, discovery must pick the one whose session_meta.cwd
+// matches THIS terminal — a concurrent Codex session in another cwd, even if
+// newer, must be ignored (#65 / Codex P2).
+func TestCodexDiscover_MatchesByCwd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	spawn := time.Now()
+	day := filepath.Join(home, ".codex", "sessions", spawn.Format("2006"), spawn.Format("01"), spawn.Format("02"))
+	if err := os.MkdirAll(day, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metaMine := `{"timestamp":"t","type":"session_meta","payload":{"cwd":"/work/mine","cli_version":"0.142.0"}}` + "\n"
+	metaOther := `{"timestamp":"t","type":"session_meta","payload":{"cwd":"/work/other"}}` + "\n"
+	mine := writeFile(t, day, "rollout-mine.jsonl", metaMine)
+	other := writeFile(t, day, "rollout-other.jsonl", metaOther)
+	os.Chtimes(mine, spawn.Add(time.Second), spawn.Add(time.Second))
+	os.Chtimes(other, spawn.Add(time.Hour), spawn.Add(time.Hour)) // newer but wrong cwd
+
+	got, err := codexAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != mine {
+		t.Fatalf("DiscoverFile = %q, want %q (matching cwd, not the newer wrong-cwd file)", got, mine)
+	}
+}
 
 func TestCodexParse_NewFormatUsesEventMsgOnly(t *testing.T) {
 	dir := t.TempDir()

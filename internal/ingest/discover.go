@@ -6,9 +6,12 @@ import (
 	"time"
 )
 
-// discoverSkew tolerates a small clock gap between the recorded spawn time and
-// the session file's mtime (the CLI may create the file a moment before/after).
-const discoverSkew = 5 * time.Second
+// discoverSkew tolerates a small clock/filesystem-granularity gap between the
+// recorded spawn time and the session file's mtime. Kept small because spawnedAt
+// is captured BEFORE the CLI process starts, so the new file's mtime is at/after
+// it — a large skew would risk locking onto a prior session's file in the same
+// cwd on a quick restart (#65 / Codex P2).
+const discoverSkew = 2 * time.Second
 
 // newestJSONLAfter returns the most-recently-modified file in dir matching glob
 // whose modtime is at/after spawn (minus a small skew), or "" if none. A missing

@@ -3,7 +3,6 @@ package ingest
 import (
 	"bufio"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,27 +28,9 @@ type codexLine struct {
 }
 
 func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, cur, nil
-		}
-		return nil, cur, err
-	}
-	defer f.Close()
-	if _, err := f.Seek(cur.Offset, io.SeekStart); err != nil {
-		return nil, cur, err
-	}
+	lines, next, err := readCompleteJSONLines(path, cur.Offset)
 	var out []UserMessage
-	consumed := cur.Offset
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		consumed += int64(len(line)) + 1
-		if len(line) == 0 {
-			continue
-		}
+	for _, line := range lines {
 		var cl codexLine
 		if json.Unmarshal(line, &cl) != nil {
 			continue
@@ -64,10 +45,7 @@ func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage
 			}
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return out, Cursor{Offset: consumed}, err
-	}
-	return out, Cursor{Offset: consumed}, nil
+	return out, Cursor{Offset: next}, err
 }
 
 func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
@@ -77,22 +55,56 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, e
 	}
 	base := filepath.Join(home, ".codex", "sessions")
 	spawn := time.Unix(0, spawnedAtUnixNano)
-	// Check the spawn day and the previous day (around-midnight spawns).
+	cutoff := spawn.Add(-discoverSkew)
+	// Check the spawn day and the previous day (around-midnight spawns). Among the
+	// newest-after-spawn rollouts, pick the one whose session_meta.cwd matches THIS
+	// terminal's cwd — otherwise a concurrent Codex session in another dir, written
+	// just after spawn, could be ingested under the wrong agent (#65 / Codex P2).
 	var best string
-	var bestMod int64
+	var bestMod time.Time
 	for _, day := range []time.Time{spawn, spawn.Add(-24 * time.Hour)} {
 		dir := filepath.Join(base, day.Format("2006"), day.Format("01"), day.Format("02"))
-		p, derr := newestJSONLAfter(dir, "rollout-*.jsonl", spawnedAtUnixNano)
-		if derr != nil || p == "" {
+		entries, derr := os.ReadDir(dir)
+		if derr != nil {
 			continue
 		}
-		info, serr := os.Stat(p)
-		if serr != nil {
-			continue
-		}
-		if best == "" || info.ModTime().UnixNano() > bestMod {
-			best, bestMod = p, info.ModTime().UnixNano()
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if ok, _ := filepath.Match("rollout-*.jsonl", e.Name()); !ok {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			if codexFileCwd(p) != cwd {
+				continue
+			}
+			if best == "" || info.ModTime().After(bestMod) {
+				best, bestMod = p, info.ModTime()
+			}
 		}
 	}
 	return best, nil
+}
+
+// codexFileCwd returns the cwd recorded in a rollout's first line
+// (session_meta.payload.cwd), or "" if it can't be read.
+func codexFileCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	line, _ := bufio.NewReader(f).ReadBytes('\n')
+	var meta struct {
+		Payload struct {
+			Cwd string `json:"cwd"`
+		} `json:"payload"`
+	}
+	_ = json.Unmarshal(line, &meta)
+	return meta.Payload.Cwd
 }

@@ -50,7 +50,12 @@ func New() *Manager {
 // StartSession begins watching the CLI session file for a terminal. The watcher
 // discovers the file (retrying until it appears), then polls it on an interval.
 // A duplicate sessionID is ignored (idempotent). A nil adapter / empty id no-ops.
-func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, emit EmitFunc) {
+//
+// ready reports whether emits can be delivered right now (e.g. the hub is
+// connected). When it returns false the tick is skipped WITHOUT advancing the
+// cursor, so a prompt parsed while the hub is down is retried once it returns
+// rather than silently dropped (#65 / Codex P2). A nil ready means always-ready.
+func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
@@ -63,31 +68,42 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
-	go m.run(s, ad, cwd, spawnedAtUnixNano, emit)
+	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, emit)
 }
 
-func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, emit EmitFunc) {
+func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	var path string
 	var cur Cursor
+	poll := func() {
+		// Skip (don't advance the cursor) while emits can't be delivered, so a
+		// prompt isn't parsed-and-dropped while the hub is unavailable (#65).
+		if ready != nil && !ready() {
+			return
+		}
+		if path == "" {
+			p, err := ad.DiscoverFile(cwd, spawnedAtUnixNano)
+			if err != nil {
+				log.Printf("[INGEST] discover error: %v", err)
+				return
+			}
+			if p == "" {
+				return // not created yet — keep waiting
+			}
+			path = p
+		}
+		cur = pollOnce(ad, path, cur, s.fp, emit)
+	}
 	for {
 		select {
 		case <-s.cancel:
+			// Final drain: a prompt the user submitted just before close/restart may
+			// have been appended since the last tick — catch it before stopping (#65).
+			poll()
 			return
 		case <-ticker.C:
-			if path == "" {
-				p, err := ad.DiscoverFile(cwd, spawnedAtUnixNano)
-				if err != nil {
-					log.Printf("[INGEST] discover error: %v", err)
-					continue
-				}
-				if p == "" {
-					continue // not created yet — keep waiting
-				}
-				path = p
-			}
-			cur = pollOnce(ad, path, cur, s.fp, emit)
+			poll()
 		}
 	}
 }

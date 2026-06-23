@@ -84,6 +84,38 @@ func TestClaudeParse_SkipsCorruptLine(t *testing.T) {
 	}
 }
 
+// A poll landing while the CLI has written only PART of the final JSON line
+// must NOT advance the cursor past those partial bytes — otherwise when the line
+// completes the next poll seeks into the middle of it and the message is lost
+// forever (#65 / Codex P2). The partial line is re-read intact once finished.
+func TestClaudeParse_DoesNotLosePartialFinalLine(t *testing.T) {
+	dir := t.TempDir()
+	full := `{"type":"user","timestamp":"t1","message":{"role":"user","content":"tam satır"}}` + "\n"
+	partial := `{"type":"user","timestamp":"t2","message":{"role":"user","content":"yarım` // no close, no newline
+	p := writeFile(t, dir, "s.jsonl", full+partial)
+
+	msgs, cur, err := claudeAdapter{}.ParseNewUserMessages(p, Cursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "tam satır" {
+		t.Fatalf("first poll: got %+v, want only the complete line", msgs)
+	}
+
+	// The partial line now completes (CLI finished writing it).
+	rest := ` tamamlandı"}}` + "\n"
+	if err := os.WriteFile(p, []byte(full+partial+rest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	msgs2, _, err := claudeAdapter{}.ParseNewUserMessages(p, cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs2) != 1 || msgs2[0].Content != "yarım tamamlandı" {
+		t.Fatalf("second poll: got %+v, want the completed line (must not be lost)", msgs2)
+	}
+}
+
 func TestClaudeSlug(t *testing.T) {
 	cases := map[string]string{
 		"/Users/yerli/Developer/MAPEG/YtkService": "-Users-yerli-Developer-MAPEG-YtkService",

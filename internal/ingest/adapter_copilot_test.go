@@ -26,7 +26,7 @@ func TestCopilotParse_ExtractsRawUserContent(t *testing.T) {
 	}
 }
 
-func TestCopilotDiscover_PicksNewestEventsFileAfterSpawn(t *testing.T) {
+func TestCopilotDiscover_PicksNewestMatchingCwd(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	base := filepath.Join(home, ".copilot", "session-state")
@@ -34,17 +34,47 @@ func TestCopilotDiscover_PicksNewestEventsFileAfterSpawn(t *testing.T) {
 	d2 := filepath.Join(base, "uuid-new")
 	os.MkdirAll(d1, 0755)
 	os.MkdirAll(d2, 0755)
+	const cwd = "/work/repo"
+	writeFile(t, d1, "workspace.yaml", "cwd: "+cwd+"\ngit_root: "+cwd+"\n")
+	writeFile(t, d2, "workspace.yaml", "cwd: \""+cwd+"\"\n")
 	f1 := writeFile(t, d1, "events.jsonl", "{}\n")
 	f2 := writeFile(t, d2, "events.jsonl", "{}\n")
 	spawn := time.Now()
 	os.Chtimes(f1, spawn.Add(-time.Hour), spawn.Add(-time.Hour))
 	os.Chtimes(f2, spawn.Add(time.Second), spawn.Add(time.Second))
 
-	got, err := copilotAdapter{}.DiscoverFile("/anything", spawn.UnixNano())
+	got, err := copilotAdapter{}.DiscoverFile(cwd, spawn.UnixNano())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != f2 {
-		t.Fatalf("DiscoverFile = %q, want %q", got, f2)
+		t.Fatalf("DiscoverFile = %q, want %q (newest with matching cwd)", got, f2)
+	}
+}
+
+// A concurrent Copilot session in a DIFFERENT cwd, even if newer, must not be
+// chosen for this terminal — workspace.yaml cwd disambiguates (#65 / Codex P2).
+func TestCopilotDiscover_IgnoresOtherCwd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	base := filepath.Join(home, ".copilot", "session-state")
+	mine := filepath.Join(base, "uuid-mine")
+	other := filepath.Join(base, "uuid-other")
+	os.MkdirAll(mine, 0755)
+	os.MkdirAll(other, 0755)
+	writeFile(t, mine, "workspace.yaml", "cwd: /work/mine\n")
+	writeFile(t, other, "workspace.yaml", "cwd: /work/other\n")
+	fmine := writeFile(t, mine, "events.jsonl", "{}\n")
+	fother := writeFile(t, other, "events.jsonl", "{}\n")
+	spawn := time.Now()
+	os.Chtimes(fmine, spawn.Add(time.Second), spawn.Add(time.Second))
+	os.Chtimes(fother, spawn.Add(time.Hour), spawn.Add(time.Hour)) // newer but wrong cwd
+
+	got, err := copilotAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != fmine {
+		t.Fatalf("DiscoverFile = %q, want %q (must ignore the newer wrong-cwd session)", got, fmine)
 	}
 }

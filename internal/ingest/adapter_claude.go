@@ -1,9 +1,7 @@
 package ingest
 
 import (
-	"bufio"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,32 +24,12 @@ type claudeLine struct {
 }
 
 func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, cur, nil
-		}
-		return nil, cur, err
-	}
-	defer f.Close()
-
-	if _, err := f.Seek(cur.Offset, io.SeekStart); err != nil {
-		return nil, cur, err
-	}
-
+	lines, next, err := readCompleteJSONLines(path, cur.Offset)
 	var out []UserMessage
-	consumed := cur.Offset
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		consumed += int64(len(line)) + 1 // +1 for the newline the scanner stripped
-		if len(line) == 0 {
-			continue
-		}
+	for _, line := range lines {
 		var cl claudeLine
 		if json.Unmarshal(line, &cl) != nil {
-			continue // skip a corrupt/partial line, keep the rest
+			continue // skip a corrupt line, keep the rest
 		}
 		if cl.Type != "user" {
 			continue
@@ -67,10 +45,7 @@ func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessag
 		}
 		out = append(out, UserMessage{Content: content, Timestamp: cl.Timestamp})
 	}
-	if err := sc.Err(); err != nil {
-		return out, Cursor{Offset: consumed}, err
-	}
-	return out, Cursor{Offset: consumed}, nil
+	return out, Cursor{Offset: next}, err
 }
 
 // claudeSlug turns a cwd into Claude's project folder name: every non-alphanumeric

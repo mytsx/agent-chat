@@ -841,6 +841,11 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		"TERM=xterm-256color",
 	}
 
+	// Capture the ingestion spawn time BEFORE starting the CLI process, so the
+	// session file the CLI is about to create is strictly newer than this and
+	// discovery can't lock onto a prior session's file in the same cwd (#65).
+	ingestSpawnedAt := time.Now().UnixNano()
+
 	// Pin the room (teamName) on the session — the SAME value set as AGENT_CHAT_ROOM
 	// above — so logged prompts always target the room the agent's MCP session is
 	// actually in, even after a later team rename (#58).
@@ -922,7 +927,20 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// session file by exactly this directory.
 	if ad := ingest.AdapterFor(cliType); ad != nil && !isObserver {
 		room, agent := teamName, agentName
-		a.ingestMgr.StartSession(sessionID, ad, workDir, time.Now().UnixNano(), func(content, ts string) {
+		// Effective cwd: when the Workspace field is blank, pty.Manager.Create leaves
+		// cmd.Dir unset so the CLI runs in the app's working directory — the
+		// cwd-derived adapters (Claude slug / Gemini sha256) must look there, not under
+		// an empty path (#65 / Codex P2).
+		ingestCwd := workDir
+		if ingestCwd == "" {
+			if wd, werr := os.Getwd(); werr == nil {
+				ingestCwd = wd
+			}
+		}
+		// ready: only ingest while the hub is connected, so a prompt parsed while the
+		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
+		ready := func() bool { return a.hubClient.Load() != nil }
+		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, func(content, ts string) {
 			if client := a.hubClient.Load(); client != nil {
 				// Convert the CLI file's RFC3339/UTC timestamp into the hub's canonical
 				// local layout so the ingested message sorts correctly in the
@@ -1254,6 +1272,19 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	}
 
 	roleOf := a.broadcastRoleLookup(teamID)
+	// Record broadcast fingerprints BEFORE the fan-out (when submitting): a fast
+	// target's CLI can record the message and be polled by the 700ms watcher while
+	// a slower target is still being injected, so recording after the whole fan-out
+	// leaves a double-log window (logTeamBroadcast + ingestion). An unconsumed
+	// fingerprint (a target that fails injection) is harmless — it's dropped when
+	// the terminal closes (#65 / Codex P2).
+	if submit {
+		for _, s := range sessions {
+			if isAICLIType(s.CLIType) {
+				a.ingestMgr.RecordInjection(s.ID, text)
+			}
+		}
+	}
 	injected, errs, aiDelivered := broadcastToSessions(sessions, text, submit, roleOf, a.ptyManager.InjectText)
 
 	log.Printf("[BROADCAST] team=%s injected=%d/%d submit=%v errors=%d",
@@ -1284,15 +1315,9 @@ func (a *App) BroadcastToTeam(teamID, text string, submit bool) error {
 	// only failure no longer suppresses logging a broadcast all agents received.
 	if submit && aiDelivered {
 		// Log to the room pinned on the broadcast's sessions, not the (mutable)
-		// current team name (#58).
+		// current team name (#58). Fingerprints were already recorded above (before
+		// the fan-out) so ingestion suppresses each CLI's recorded copy (#65).
 		a.logTeamBroadcast(pinnedRoomForSessions(sessions, a.roomForTeam(teamID)), text)
-		// logTeamBroadcast logs it once; record it per AI session so ingestion (#65)
-		// suppresses the duplicate each CLI writes to its session file.
-		for _, s := range sessions {
-			if isAICLIType(s.CLIType) {
-				a.ingestMgr.RecordInjection(s.ID, text)
-			}
-		}
 	}
 	return broadcastOutcomeError(injected, errs)
 }
