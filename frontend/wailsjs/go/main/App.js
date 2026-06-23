@@ -26,6 +26,10 @@ export function DeletePrompt(arg1) {
   return window['go']['main']['App']['DeletePrompt'](arg1);
 }
 
+export function DeleteRoom(arg1) {
+  return window['go']['main']['App']['DeleteRoom'](arg1);
+}
+
 export function DeleteTeam(arg1) {
   return window['go']['main']['App']['DeleteTeam'](arg1);
 }

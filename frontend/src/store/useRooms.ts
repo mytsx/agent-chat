@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { RoomSummary } from "../lib/types";
-import { ListRooms } from "../../wailsjs/go/main/App";
+import { ListRooms, DeleteRoom } from "../../wailsjs/go/main/App";
 
 interface RoomsState {
   rooms: RoomSummary[];
@@ -10,6 +10,7 @@ interface RoomsState {
 
   loadRooms: () => Promise<void>;
   selectRoom: (name: string | null) => void;
+  deleteRoom: (name: string) => Promise<void>;
 }
 
 export const useRooms = create<RoomsState>((set) => ({
@@ -32,4 +33,12 @@ export const useRooms = create<RoomsState>((set) => ({
   },
 
   selectRoom: (name) => set({ selectedRoom: name }),
+
+  deleteRoom: async (name) => {
+    await DeleteRoom(name);
+    set((s) => ({
+      rooms: s.rooms.filter((r) => r.name !== name),
+      selectedRoom: s.selectedRoom === name ? null : s.selectedRoom,
+    }));
+  },
 }));

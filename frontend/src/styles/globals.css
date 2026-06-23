@@ -1688,3 +1688,24 @@ html, body, #root {
   gap: 4px;
   padding: 6px 0;
 }
+
+/* Room Browser v2 — geçmişte bulunmuş agent rozetleri (#18) */
+.room-historical { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.room-historical-label { font-size: 11px; opacity: 0.6; margin-right: 2px; }
+.room-agent-badge-historical { opacity: 0.7; border-style: dashed; }
+
+/* Room Browser v2 — orphan oda silme (#18) */
+.room-row { cursor: pointer; }
+.room-delete {
+  background: none; border: none; cursor: pointer; opacity: 0.5;
+  font-size: 13px; padding: 0 2px; margin-left: 4px;
+}
+.room-delete:hover { opacity: 1; }
+
+/* Room Browser v2 — orphan→takım import diyaloğu (#18) */
+.import-modal { min-width: 360px; max-width: 90vw; }
+.import-rows { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.import-row { display: flex; gap: 6px; align-items: center; }
+.import-row input { flex: 1; min-width: 0; }
+.import-add { align-self: flex-start; }
+.import-error { color: #c0392b; font-size: 12px; }

@@ -238,6 +238,7 @@ export namespace types {
 	    name: string;
 	    message_count: number;
 	    agents: Record<string, Agent>;
+	    historical_agents: string[];
 	    last_activity: string;
 	    is_default: boolean;
 	
@@ -250,6 +251,7 @@ export namespace types {
 	        this.name = source["name"];
 	        this.message_count = source["message_count"];
 	        this.agents = this.convertValues(source["agents"], Agent, true);
+	        this.historical_agents = source["historical_agents"];
 	        this.last_activity = source["last_activity"];
 	        this.is_default = source["is_default"];
 	    }

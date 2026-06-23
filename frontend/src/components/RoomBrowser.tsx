@@ -4,6 +4,7 @@ import { useTeams } from "../store/useTeams";
 import { useMessages, useAgentsFor } from "../store/useMessages";
 import MessageFeed from "./MessageFeed";
 import RoomSummaryModal from "./RoomSummaryModal";
+import ImportRoomModal from "./ImportRoomModal";
 import { RoomSummary } from "../lib/types";
 
 // truncateToMessages in the hub — rooms at/above this cap show only the most
@@ -33,10 +34,12 @@ function RoomRow({
   room,
   isActiveTeam,
   onClick,
+  onDelete,
 }: {
   room: RoomSummary;
   isActiveTeam: boolean;
   onClick: () => void;
+  onDelete: () => void;
 }) {
   const agentNames = Object.keys(room.agents || {});
   const isEmpty = room.message_count === 0 && agentNames.length === 0;
@@ -46,13 +49,38 @@ function RoomRow({
       : `${room.message_count} messages`;
 
   return (
-    <button className="room-row" onClick={onClick}>
+    <div
+      className="room-row"
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        // Only act when the row itself is focused — keydown bubbles, so without this
+        // the nested delete button's Enter/Space would also select the room.
+        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+    >
       <div className="room-row-top">
         <span className="room-row-name">
           {room.name}
           {room.is_default && <span className="room-tag">default</span>}
         </span>
         <span className="room-row-time">{relativeTime(room.last_activity)}</span>
+        {!isActiveTeam && !room.is_default && (
+          <button
+            className="room-delete"
+            title="Bu orphan odayı sil"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+          >
+            🗑
+          </button>
+        )}
       </div>
       <div className="room-row-meta">
         <span className="room-row-count">{countLabel}</span>
@@ -77,27 +105,41 @@ function RoomRow({
               {n}
             </span>
           ))
+        ) : room.historical_agents?.length > 0 ? (
+          <span className="room-historical">
+            <span className="room-historical-label">geçmişte bulunmuş:</span>
+            {room.historical_agents.map((n) => (
+              <span key={n} className="room-agent-badge room-agent-badge-historical">
+                {n}
+              </span>
+            ))}
+          </span>
         ) : (
           <span className="room-agent-empty">no agents (archived room)</span>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 
 function RoomDetail({
   room,
+  summary,
   isActiveTeam,
   onBack,
+  onImported,
 }: {
   room: string;
+  summary: RoomSummary | undefined;
   isActiveTeam: boolean;
   onBack: () => void;
+  onImported: () => void;
 }) {
   const loadMessages = useMessages((s) => s.loadMessages);
   const loadAgents = useMessages((s) => s.loadAgents);
   const agents = useAgentsFor(room);
   const [showSummary, setShowSummary] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   useEffect(() => {
     loadMessages(room);
@@ -134,6 +176,15 @@ function RoomDetail({
         >
           📝 Özet
         </button>
+        {!isActiveTeam && summary && (
+          <button
+            className="room-back"
+            title="Bu orphan odayı yeni takım olarak içe aktar"
+            onClick={() => setShowImport(true)}
+          >
+            ⬇️ Takıma Aktar
+          </button>
+        )}
       </div>
       <div className="room-detail-agents">
         {agentNames.length > 0 ? (
@@ -156,6 +207,17 @@ function RoomDetail({
       {showSummary && (
         <RoomSummaryModal room={room} onClose={() => setShowSummary(false)} />
       )}
+
+      {showImport && summary && (
+        <ImportRoomModal
+          room={summary}
+          onClose={() => setShowImport(false)}
+          onImported={() => {
+            setShowImport(false);
+            onImported();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -167,6 +229,7 @@ export default function RoomBrowser() {
   const selectedRoom = useRooms((s) => s.selectedRoom);
   const loadRooms = useRooms((s) => s.loadRooms);
   const selectRoom = useRooms((s) => s.selectRoom);
+  const deleteRoom = useRooms((s) => s.deleteRoom);
   const teams = useTeams((s) => s.teams);
 
   useEffect(() => {
@@ -179,8 +242,13 @@ export default function RoomBrowser() {
     return (
       <RoomDetail
         room={selectedRoom}
+        summary={rooms.find((r) => r.name === selectedRoom)}
         isActiveTeam={teamNames.has(selectedRoom)}
         onBack={() => selectRoom(null)}
+        onImported={() => {
+          selectRoom(null);
+          loadRooms();
+        }}
       />
     );
   }
@@ -212,6 +280,17 @@ export default function RoomBrowser() {
               room={r}
               isActiveTeam={teamNames.has(r.name)}
               onClick={() => selectRoom(r.name)}
+              onDelete={() => {
+                if (
+                  window.confirm(
+                    `'${r.name}' odası silinsin mi? Mesaj geçmişi (state) kaldırılır; arşiv korunur.`,
+                  )
+                ) {
+                  deleteRoom(r.name).catch((e) =>
+                    window.alert(`Silme başarısız: ${e}`),
+                  );
+                }
+              }}
             />
           ))}
         </div>

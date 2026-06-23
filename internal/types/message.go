@@ -13,9 +13,13 @@ type Agent struct {
 type RoomSummary struct {
 	Name         string           `json:"name"`
 	MessageCount int              `json:"message_count"`
-	Agents       map[string]Agent `json:"agents"`        // persisted agent names + roles (no cleanup)
-	LastActivity string           `json:"last_activity"` // last message timestamp (ISO), "" if empty
-	IsDefault    bool             `json:"is_default"`
+	Agents       map[string]Agent `json:"agents"` // persisted agent names + roles (no cleanup)
+	// HistoricalAgents lists distinct agent names derived from join system-messages,
+	// populated only when the persisted roster (Agents) is empty (archived rooms whose
+	// agents were stale-cleaned). These are PAST participants, not current members.
+	HistoricalAgents []string `json:"historical_agents"`
+	LastActivity     string   `json:"last_activity"` // last message timestamp (ISO), "" if empty
+	IsDefault        bool     `json:"is_default"`
 }
 
 // Message Type values. system/broadcast/direct are produced by agent traffic;

@@ -288,6 +288,18 @@ func (c *HubClient) SetObservers(room string, observers []string) error {
 	return nil
 }
 
+// DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
+func (c *HubClient) DeleteRoom(room string) error {
+	resp, err := c.Send(types.Request{Type: "delete_room", Room: room})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("delete_room failed: %s", resp.Error)
+	}
+	return nil
+}
+
 // JoinRoom joins a room.
 func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{

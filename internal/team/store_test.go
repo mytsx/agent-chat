@@ -732,3 +732,37 @@ func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
 		t.Fatalf("CustomPrompt not rolled back in memory: got %q, want %q", got.CustomPrompt, "ilk misyon")
 	}
 }
+
+func TestCreate_RejectsDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Create("Alpha", "2x2", nil); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	if _, err := s.Create("Alpha", "2x2", nil); err == nil {
+		t.Fatalf("ikinci 'Alpha' Create hata döndürmeliydi")
+	}
+	// Case-insensitive FS (macOS/Windows): "alpha" ve "Alpha" aynı dosyaya yazar → reddedilmeli.
+	if _, err := s.Create("alpha", "2x2", nil); err == nil {
+		t.Fatalf("case-insensitive 'alpha' de reddedilmeliydi")
+	}
+}
+
+func TestUpdate_RejectsDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	a, err := s.Create("Alpha", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create Alpha: %v", err)
+	}
+	b, err := s.Create("Beta", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create Beta: %v", err)
+	}
+	// Beta'yı "alpha"ya yeniden adlandırma (Alpha ile case-insensitive çakışır) → reddedilmeli.
+	if _, err := s.Update(b.ID, "alpha", "2x2", nil); err == nil {
+		t.Fatalf("Beta'yı 'alpha'ya yeniden adlandırma reddedilmeliydi")
+	}
+	// Takımı kendi adıyla (case değişimi dahil) güncellemek izinli olmalı.
+	if _, err := s.Update(a.ID, "Alpha", "2x2", nil); err != nil {
+		t.Fatalf("takımı kendi adıyla güncelleme izinli olmalı: %v", err)
+	}
+}
