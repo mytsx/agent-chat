@@ -6,6 +6,7 @@ import {
   CreateTerminal,
   CloseTerminal,
   RestartTerminal,
+  ResumeTerminal,
   ResizeTerminal,
   WriteToTerminal,
   BroadcastToTeam,
@@ -44,6 +45,8 @@ interface TerminalsState {
     rows: number
   ) => Promise<void>;
   restartTerminal: (teamID: string, sessionID: string) => Promise<string>;
+  resumeTerminal: (teamID: string, sessionID: string) => Promise<string>;
+  setCLISessionID: (sessionID: string, cliSessionID: string) => void;
   getTeamSessions: (teamID: string) => TerminalSession[];
 }
 
@@ -221,6 +224,44 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     }));
 
     return newSessionID;
+  },
+
+  resumeTerminal: async (teamID, sessionID) => {
+    const teamSessions = get().sessions[teamID] ?? [];
+    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
+    if (!oldSession) {
+      console.error(`[resumeTerminal] session ${sessionID} not found in team ${teamID}`);
+      throw new Error("Session not found");
+    }
+
+    const newSessionID = await ResumeTerminal(sessionID);
+
+    // Replace old session with new one, preserving slotIndex; clear cliSessionID
+    // since the resumed session hasn't captured a new id yet.
+    set((s) => ({
+      sessions: {
+        ...s.sessions,
+        [teamID]: (s.sessions[teamID] ?? []).map((t) =>
+          t.sessionID === sessionID
+            ? { ...t, sessionID: newSessionID, cliSessionID: undefined }
+            : t
+        ),
+      },
+    }));
+
+    return newSessionID;
+  },
+
+  setCLISessionID: (sessionID, cliSessionID) => {
+    set((state) => {
+      const next: Record<string, TerminalSession[]> = {};
+      for (const [tid, list] of Object.entries(state.sessions)) {
+        next[tid] = list.map((s) =>
+          s.sessionID === sessionID ? { ...s, cliSessionID } : s
+        );
+      }
+      return { sessions: next };
+    });
   },
 
   getTeamSessions: (teamID) => {
