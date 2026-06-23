@@ -79,6 +79,22 @@ export namespace main {
 	        this.count = source["count"];
 	    }
 	}
+	export class VoiceStatus {
+	    hasKey: boolean;
+	    keyHint: string;
+	    ffmpegFound: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new VoiceStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hasKey = source["hasKey"];
+	        this.keyHint = source["keyHint"];
+	        this.ffmpegFound = source["ffmpegFound"];
+	    }
+	}
 
 }
 

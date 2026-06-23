@@ -40,6 +40,8 @@ export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
 
+export function GetVoiceStatus():Promise<main.VoiceStatus>;
+
 export function IsGitRepo(arg1:string):Promise<boolean>;
 
 export function ListPrompts():Promise<Array<prompt.Prompt>>;
@@ -71,6 +73,12 @@ export function SetGlobalPrompt(arg1:string):Promise<void>;
 export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;
 
 export function SetTeamObserver(arg1:string,arg2:string):Promise<team.Team>;
+
+export function SetVoiceConfig(arg1:string):Promise<void>;
+
+export function StartVoiceCapture(arg1:string):Promise<void>;
+
+export function StopVoiceCapture(arg1:string):Promise<void>;
 
 export function UpdatePrompt(arg1:string,arg2:string,arg3:string,arg4:string,arg5:Array<string>):Promise<prompt.Prompt>;
 
