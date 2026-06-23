@@ -924,7 +924,10 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		room, agent := teamName, agentName
 		a.ingestMgr.StartSession(sessionID, ad, workDir, time.Now().UnixNano(), func(content, ts string) {
 			if client := a.hubClient.Load(); client != nil {
-				if err := client.LogMessage(room, agent, content, ts); err != nil {
+				// Convert the CLI file's RFC3339/UTC timestamp into the hub's canonical
+				// local layout so the ingested message sorts correctly in the
+				// lexically-ordered transcript (#65).
+				if err := client.LogMessage(room, agent, content, types.NormalizeTimestamp(ts)); err != nil {
 					log.Printf("[INGEST] mesaj loglanamadı (agent=%s): %v", agent, err)
 				}
 			}
