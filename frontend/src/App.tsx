@@ -4,7 +4,6 @@ import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
 import { useTerminals } from "./store/useTerminals";
 import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
-// useTerminals imported by PromptLibrary for target picker
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
