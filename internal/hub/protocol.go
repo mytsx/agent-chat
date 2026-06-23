@@ -4,6 +4,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"desktop/internal/summary"
@@ -54,6 +56,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleGetAgents(c, req)
 	case "get_messages_raw":
 		h.handleGetMessagesRaw(c, req)
+	case "delete_room":
+		h.handleDeleteRoom(c, req)
 	default:
 		c.sendError(req.ID, req.Type, fmt.Sprintf("unknown request type: %s", req.Type))
 	}
@@ -1006,5 +1010,47 @@ func (h *Hub) handleListRoomsDetailed(c *Client, req types.Request) {
 	h.mu.RUnlock()
 
 	respData, _ := json.Marshal(map[string]any{"rooms": summaries})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
+// handleDeleteRoom removes an orphan room's live state + persisted state file. Only the
+// authorized desktop may call it; the default room and any subscribed/live room are
+// refused (the authoritative orphan check — "no team owns this name" — lives in app.go,
+// where teams are known). The append-only archive (hub-state/archive/{room}.jsonl) and
+// session snapshots (hub-state/sessions/{room}/) are PRESERVED — only the live snapshot
+// goes. A tombstone keeps the persist loop from resurrecting the file.
+func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi oda silebilir")
+		return
+	}
+	room := h.resolveRoom(req.Room)
+	if room == h.defaultRoom {
+		c.sendError(req.ID, req.Type, "varsayılan oda silinemez")
+		return
+	}
+
+	h.mu.Lock()
+	if len(h.subs[room]) > 0 {
+		h.mu.Unlock()
+		c.sendError(req.ID, req.Type, fmt.Sprintf("'%s' odası aktif (aboneleri var); silinemez", room))
+		return
+	}
+	h.deletedRooms[room] = true
+	delete(h.rooms, room)
+	delete(h.subs, room)
+	delete(h.roomManager, room)
+	delete(h.roomObservers, room)
+	h.mu.Unlock()
+
+	// Remove ONLY the live state file (+ stray temp). Archive + session snapshots stay.
+	stateFile := filepath.Join(h.dataDir, "hub-state", room+".json")
+	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
+		h.logger.Printf("delete_room: state dosyası kaldırılamadı (%s): %v", room, err)
+	}
+	os.Remove(stateFile + ".tmp")
+
+	text := fmt.Sprintf("\U0001f5d1️ '%s' odası silindi.", room)
+	respData, _ := json.Marshal(map[string]string{"text": text})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
