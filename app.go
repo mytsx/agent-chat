@@ -2080,6 +2080,15 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	}
 	log.Printf("[VOICE] kayıt durdu session=%s wavBytes=%d", sessionID, len(wav))
 
+	// No-speech gate: Whisper hallucinates subtitle artifacts (e.g. "Altyazı M.K.")
+	// on silent audio, so a capture with no real speech must never be sent or
+	// injected. Skip before the API call to also save the request.
+	if silent, db := voice.IsLikelySilent(wav); silent {
+		log.Printf("[VOICE] sessiz kayıt, transkripsiyon atlandı session=%s dBFS=%.1f", sessionID, db)
+		a.emitVoiceState(sessionID, "idle", "")
+		return nil
+	}
+
 	a.emitVoiceState(sessionID, "transcribing", "")
 	base := a.ctx
 	if base == nil {
@@ -2094,7 +2103,10 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 		return err
 	}
 	log.Printf("[VOICE] transkript session=%s len=%d", sessionID, len(text))
-	if strings.TrimSpace(text) == "" {
+	// Drop empty results and known no-speech hallucinations that slipped past the
+	// energy gate (quiet ambient that Whisper still "heard" as a subtitle credit).
+	if strings.TrimSpace(text) == "" || voice.IsHallucination(text) {
+		log.Printf("[VOICE] boş/halüsinasyon transkript atlandı session=%s text=%q", sessionID, text)
 		a.emitVoiceState(sessionID, "idle", "")
 		return nil
 	}

@@ -7,10 +7,27 @@ import (
 	"desktop/internal/voice"
 )
 
-type fakeRecorder struct{ started, stopped bool }
+type fakeRecorder struct{ wav []byte }
 
-func (f *fakeRecorder) Start(ctx context.Context) error { f.started = true; return nil }
-func (f *fakeRecorder) Stop() ([]byte, error)           { f.stopped = true; return []byte("RIFFfake"), nil }
+func (f *fakeRecorder) Start(ctx context.Context) error { return nil }
+func (f *fakeRecorder) Stop() ([]byte, error) {
+	if f.wav != nil {
+		return f.wav, nil
+	}
+	return loudWAV(), nil
+}
+
+// loudWAV / silentWAV build minimal 16-bit mono WAVs (44-byte header + samples) so
+// the no-speech energy gate can be exercised without real audio. loudWAV is well
+// above the silence threshold; silentWAV is all zeros.
+func loudWAV() []byte {
+	b := make([]byte, 44+2000)
+	for i := 44; i+1 < len(b); i += 2 {
+		b[i], b[i+1] = 0x40, 0x40 // 0x4040 = 16448, ≈ -6 dBFS
+	}
+	return b
+}
+func silentWAV() []byte { return make([]byte, 44+2000) }
 
 // newVoiceTestApp wires all voice seams to stubs: no ffmpeg, no network, no Wails
 // runtime. ctx is Background so StopVoiceCapture's WithTimeout never derefs nil.
@@ -97,6 +114,48 @@ func TestStopVoiceCaptureEmptyTranscriptDoesNotInject(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("empty transcript must not inject; got %d", n)
+	}
+}
+
+func TestStopVoiceCaptureSilentSkipsTranscribe(t *testing.T) {
+	a := newVoiceTestApp()
+	a.newVoiceRecorder = func() (voice.Recorder, error) { return &fakeRecorder{wav: silentWAV()}, nil }
+	transcribed := false
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		transcribed = true
+		return "uydurma metin", nil
+	}
+	var injectN int
+	a.voiceInject = func(sessionID, text string, submit bool) error { injectN++; return nil }
+	if err := a.StartVoiceCapture("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StopVoiceCapture("s"); err != nil {
+		t.Fatal(err)
+	}
+	if transcribed {
+		t.Error("silent capture must NOT be sent to transcription")
+	}
+	if injectN != 0 {
+		t.Errorf("silent capture must not inject; got %d", injectN)
+	}
+}
+
+func TestStopVoiceCaptureHallucinationSkips(t *testing.T) {
+	a := newVoiceTestApp() // loud wav by default → passes the energy gate
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		return "Altyazı M.K.", nil
+	}
+	var injectN int
+	a.voiceInject = func(sessionID, text string, submit bool) error { injectN++; return nil }
+	if err := a.StartVoiceCapture("s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StopVoiceCapture("s"); err != nil {
+		t.Fatal(err)
+	}
+	if injectN != 0 {
+		t.Errorf("hallucination transcript must not inject; got %d", injectN)
 	}
 }
 
