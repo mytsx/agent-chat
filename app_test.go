@@ -343,6 +343,54 @@ func TestBroadcastOutcomeError(t *testing.T) {
 	}
 }
 
+// --- #58: room pinned at PTY creation (no mutable Team.Name re-read on log) ---
+
+// logRoomForSession uses the room PINNED on the session at creation, so a team
+// rename mid-life can't reroute a logged prompt to a different room than the
+// agent's MCP session (fixed at spawn via AGENT_CHAT_ROOM) actually uses (#58).
+func TestLogRoomForSession_PrefersPinnedRoom(t *testing.T) {
+	a := &App{}
+	sess := &ptymgr.PTYSession{TeamID: "t1", AgentName: "alice", Room: "pinned-room"}
+	if got := a.logRoomForSession(sess); got != "pinned-room" {
+		t.Fatalf("logRoomForSession = %q, want pinned-room (must not re-read Team.Name)", got)
+	}
+}
+
+// A legacy session created before room-pinning (empty Room) falls back to the
+// team's current room name, preserving prior behavior.
+func TestLogRoomForSession_FallsBackToTeamRoom(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, err := store.Create("TeamA", "2x2", []team.AgentConfig{{Name: "alice", CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	a := &App{teamStore: store}
+	sess := &ptymgr.PTYSession{TeamID: tm.ID, AgentName: "alice", Room: ""}
+	if got := a.logRoomForSession(sess); got != "TeamA" {
+		t.Fatalf("logRoomForSession = %q, want TeamA (fallback when unpinned)", got)
+	}
+}
+
+func TestPinnedRoomForSessions_PrefersPinned(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{
+		{ID: "a", Room: "room-x"},
+		{ID: "b", Room: "room-x"},
+	}
+	if got := pinnedRoomForSessions(sessions, "fallback"); got != "room-x" {
+		t.Fatalf("pinnedRoomForSessions = %q, want room-x", got)
+	}
+}
+
+func TestPinnedRoomForSessions_FallbackWhenNonePinned(t *testing.T) {
+	sessions := []*ptymgr.PTYSession{{ID: "a", Room: ""}}
+	if got := pinnedRoomForSessions(sessions, "fallback"); got != "fallback" {
+		t.Fatalf("pinnedRoomForSessions = %q, want fallback (no session pinned a room)", got)
+	}
+}
+
 // --- #17 observer: app-layer mode resolution + prompt composition ---
 
 func TestResolveAgentMode(t *testing.T) {

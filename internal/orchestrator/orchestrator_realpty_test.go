@@ -14,7 +14,7 @@ import (
 // BLOCK until the injection (including the trailing CR) completes.
 func TestTryInject_HoldsWriteMutexAcrossSettle(t *testing.T) {
 	m := ptymgr.NewManager(func(string, []byte) {})
-	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
+	id, err := m.Create("", "agent", "", "", nil, "cat", nil, "")
 	if err != nil {
 		t.Skipf("cannot start cat PTY: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestTryInject_HoldsWriteMutexAcrossSettle(t *testing.T) {
 // notification as delivered (review GR1).
 func TestTryInject_ReturnsFalseOnWriteError(t *testing.T) {
 	m := ptymgr.NewManager(func(string, []byte) {})
-	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
+	id, err := m.Create("", "agent", "", "", nil, "cat", nil, "")
 	if err != nil {
 		t.Skipf("cannot start cat PTY: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestTryInject_ReturnsFalseOnWriteError(t *testing.T) {
 // re-arming a retry timer forever.
 func TestFlushPending_WriteFailureRoutesToUINotLoop(t *testing.T) {
 	m := ptymgr.NewManager(func(string, []byte) {})
-	id, err := m.Create("", "agent", "", nil, "cat", nil, "")
+	id, err := m.Create("", "agent", "", "", nil, "cat", nil, "")
 	if err != nil {
 		t.Skipf("cannot start cat PTY: %v", err)
 	}

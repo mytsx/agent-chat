@@ -16,7 +16,7 @@ func TestUserPromptFilteredFromAgentReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SendMessage("bob", "alice", "merhaba", true, "normal", SendOptions{})
-	r.LogUserPrompt(types.UserPromptFrom, "alice", "şu görevi yap")
+	r.LogUserPrompt(types.UserPromptFrom, "alice", "şu görevi yap", "")
 
 	// read_messages("alice") — no user_prompt, but the normal message stays.
 	msgs, _ := r.ReadMessages("alice", 0, 0, false)
@@ -65,7 +65,7 @@ func TestGetLastMessageIDSkipsUserPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	visible, _ := r.SendMessage("bob", "alice", "m1", true, "normal", SendOptions{})
-	r.LogUserPrompt(types.UserPromptFrom, "alice", "hidden") // last raw message, filtered from reads
+	r.LogUserPrompt(types.UserPromptFrom, "alice", "hidden", "") // last raw message, filtered from reads
 
 	got := r.GetLastMessageID("alice")
 	if got != visible.ID {

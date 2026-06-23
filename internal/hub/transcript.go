@@ -46,22 +46,27 @@ func ReadFullTranscript(dataDir, room string, sinceID, limit int) ([]types.Messa
 		return nil, err
 	}
 
-	// Dedup keyed by (ID, Timestamp), NOT ID alone: clear_room resets a room's IDs
-	// back to 1, so the archive (pre-clear) and a later snapshot (post-clear) can
-	// hold the SAME id for DISTINCT messages — keying on ID alone would silently
-	// drop history. A genuine duplicate (same message in both the retained tail and
-	// the archive) shares id AND timestamp, so it still collapses to one. Snapshots
-	// are applied last so they win on a true-duplicate tie.
+	// Dedup keyed by (ID, Timestamp, From, Content), NOT ID alone: clear_room resets
+	// a room's IDs back to 1, so the archive (pre-clear) and a later snapshot
+	// (post-clear) can hold the SAME id for DISTINCT messages — keying on ID alone
+	// would silently drop history. (ID, Timestamp) alone is still vulnerable when a
+	// reused id also lands in the same formatted microsecond as a pre-clear message,
+	// so From+Content are folded in to tell those apart. A genuine duplicate (the
+	// same message in both the retained tail and the archive) is byte-identical, so
+	// it shares all four fields and still collapses to one. Snapshots are applied
+	// last so they win on a true-duplicate tie (#58).
 	type key struct {
-		id int
-		ts string
+		id      int
+		ts      string
+		from    string
+		content string
 	}
 	byKey := make(map[key]types.Message, len(archived)+len(snapped))
 	for _, m := range archived {
-		byKey[key{m.ID, m.Timestamp}] = m
+		byKey[key{m.ID, m.Timestamp, m.From, m.Content}] = m
 	}
 	for _, m := range snapped {
-		byKey[key{m.ID, m.Timestamp}] = m
+		byKey[key{m.ID, m.Timestamp, m.From, m.Content}] = m
 	}
 
 	merged := make([]types.Message, 0, len(byKey))

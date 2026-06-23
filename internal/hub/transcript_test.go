@@ -187,6 +187,33 @@ func TestReadFullTranscriptSurvivesClearIDReset(t *testing.T) {
 	}
 }
 
+// Two DISTINCT messages can share the same id AND the same formatted-microsecond
+// timestamp after a clear_room (ID reset) when both happen to fall in the same
+// microsecond — a (id, ts)-only dedup key would silently conflate them and drop
+// one. The key also includes from+content, so distinct messages survive while a
+// genuine duplicate (all fields equal) still collapses (#58).
+func TestReadFullTranscriptKeepsDistinctMessagesSameIDAndTimestamp(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "collide"
+	const ts = "2026-06-22T10:00:00.000000"
+	// Pre-clear message archived as id=1, and a post-clear DISTINCT message that
+	// reused id=1 within the same microsecond — different content (and sender).
+	txWriteArchive(t, dataDir, room, []types.Message{
+		{ID: 1, From: "alice", To: "bob", Content: "pre-clear", Timestamp: ts, Type: "direct"},
+	})
+	txWriteSnapshot(t, dataDir, room, "1700000100", []types.Message{
+		{ID: 1, From: "carol", To: "bob", Content: "post-clear", Timestamp: ts, Type: "direct"},
+	})
+
+	got, err := ReadFullTranscript(dataDir, room, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("distinct same-id/same-ts messages conflated: got %d, want 2: %v", len(got), txContents(got))
+	}
+}
+
 // A true duplicate (same message present in BOTH archive and snapshot) still
 // dedupes — identical id AND timestamp.
 func TestReadFullTranscriptDedupsTrueDuplicate(t *testing.T) {
