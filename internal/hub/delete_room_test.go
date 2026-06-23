@@ -97,6 +97,15 @@ func TestHandleDeleteRoom(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects path-traversal room name", func(t *testing.T) {
+		h, c := authedDesktop(t)
+		// A crafted name must never reach os.Remove (would delete files outside hub-state).
+		h.handleRequest(c, types.Request{ID: "1", Type: "delete_room", Room: "../evil"})
+		if readResponse(t, c, "delete_room").Success {
+			t.Fatalf("path-traversal oda adı reddedilmeli")
+		}
+	})
+
 	t.Run("rejects subscribed room", func(t *testing.T) {
 		h, c := authedDesktop(t)
 		h.getOrCreateRoom("live")

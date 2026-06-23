@@ -1025,6 +1025,13 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 		return
 	}
 	room := h.resolveRoom(req.Room)
+	// room feeds os.Remove below; validate it as a filename the same way every other
+	// file-touching handler does (archive.go, session.go, transcript.go) — rejects
+	// path traversal ("..", "/") so a crafted name can't delete files outside hub-state.
+	if err := validation.ValidateName(room); err != nil {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
+		return
+	}
 	if room == h.defaultRoom {
 		c.sendError(req.ID, req.Type, "varsayılan oda silinemez")
 		return

@@ -741,4 +741,8 @@ func TestCreate_RejectsDuplicateName(t *testing.T) {
 	if _, err := s.Create("Alpha", "2x2", nil); err == nil {
 		t.Fatalf("ikinci 'Alpha' Create hata döndürmeliydi")
 	}
+	// Case-insensitive FS (macOS/Windows): "alpha" ve "Alpha" aynı dosyaya yazar → reddedilmeli.
+	if _, err := s.Create("alpha", "2x2", nil); err == nil {
+		t.Fatalf("case-insensitive 'alpha' de reddedilmeliydi")
+	}
 }

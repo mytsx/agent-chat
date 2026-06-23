@@ -142,8 +142,11 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// EqualFold: team names become room filenames; on case-insensitive filesystems
+	// (macOS/Windows) "Alpha" and "alpha" collide on the same file, so reject names that
+	// differ only by case to prevent data-losing collisions.
 	for _, existing := range s.teams {
-		if existing.Name == name {
+		if strings.EqualFold(existing.Name, name) {
 			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
 		}
 	}

@@ -13,19 +13,26 @@ function isValidName(name: string): boolean {
   return true;
 }
 
-type Row = { name: string; role: string; cli_type: string };
+type Row = { id: string; name: string; role: string; cli_type: string };
+
+// Stable, unique row ids so React keys don't shift when rows are added/removed
+// (array-index keys cause input focus loss / stale values in dynamic lists).
+let rowCounter = 0;
+const newRow = (init?: Partial<Row>): Row => ({
+  id: `row-${rowCounter++}`,
+  name: "",
+  role: "",
+  cli_type: "claude",
+  ...init,
+});
 
 function seedRows(room: RoomSummary): Row[] {
   const agentNames = Object.keys(room.agents || {});
   if (agentNames.length > 0) {
-    return agentNames.map((n) => ({
-      name: n,
-      role: room.agents[n]?.role || "",
-      cli_type: "claude",
-    }));
+    return agentNames.map((n) => newRow({ name: n, role: room.agents[n]?.role || "" }));
   }
   if (room.historical_agents?.length > 0) {
-    return room.historical_agents.map((n) => ({ name: n, role: "", cli_type: "claude" }));
+    return room.historical_agents.map((n) => newRow({ name: n }));
   }
   return [];
 }
@@ -48,7 +55,7 @@ export default function ImportRoomModal({
   const update = (i: number, patch: Partial<Row>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const remove = (i: number) => setRows((rs) => rs.filter((_, j) => j !== i));
-  const add = () => setRows((rs) => [...rs, { name: "", role: "", cli_type: "claude" }]);
+  const add = () => setRows((rs) => [...rs, newRow()]);
 
   const submit = async () => {
     setBusy(true);
@@ -86,7 +93,7 @@ export default function ImportRoomModal({
         )}
         <div className="import-rows">
           {rows.map((r, i) => (
-            <div key={i} className="import-row">
+            <div key={r.id} className="import-row">
               <input
                 placeholder="ad"
                 value={r.name}

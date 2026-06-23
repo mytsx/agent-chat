@@ -49,7 +49,18 @@ function RoomRow({
       : `${room.message_count} messages`;
 
   return (
-    <div className="room-row" role="button" tabIndex={0} onClick={onClick}>
+    <div
+      className="room-row"
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+    >
       <div className="room-row-top">
         <span className="room-row-name">
           {room.name}

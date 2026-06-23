@@ -1537,8 +1537,15 @@ func (a *App) DeleteRoom(room string) error {
 	if room == "default" {
 		return fmt.Errorf("varsayılan oda silinemez")
 	}
+	if err := validation.ValidateName(room); err != nil {
+		return fmt.Errorf("geçersiz oda adı: %w", err)
+	}
+	// EqualFold: room names are filenames (hub-state/{room}.json). On case-insensitive
+	// filesystems (macOS/Windows) team "Alpha" and room "alpha" resolve to the SAME file,
+	// so a case-sensitive compare would let "alpha" past this guard and delete the team's
+	// state file. Match case-insensitively to keep team-backed rooms protected.
 	for _, t := range a.teamStore.List() {
-		if roomNameOrDefault(t.Name) == room {
+		if strings.EqualFold(roomNameOrDefault(t.Name), room) {
 			return fmt.Errorf("'%s' bir takıma bağlı; önce takımı silin", room)
 		}
 	}
