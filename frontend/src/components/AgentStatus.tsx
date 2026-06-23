@@ -27,6 +27,10 @@ export default function AgentStatus({ chatDir }: Props) {
     return agent.role?.toLowerCase() === "manager";
   };
 
+  const isObserver = (agent: Agent) => {
+    return agent.role?.toLowerCase() === "observer";
+  };
+
   return (
     <div className="agent-status">
       <h3 className="sidebar-section-title">
@@ -42,6 +46,7 @@ export default function AgentStatus({ chatDir }: Props) {
               <span className="agent-name">
                 {name}
                 {isManager(agent) ? " (manager)" : ""}
+                {isObserver(agent) ? " 👁️ (gözlemci)" : ""}
               </span>
               {agent.role && (
                 <span className="agent-role">{agent.role}</span>

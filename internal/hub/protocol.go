@@ -18,6 +18,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleIdentify(c, req)
 	case "set_manager":
 		h.handleSetManager(c, req)
+	case "set_observers":
+		h.handleSetObservers(c, req)
 	case "subscribe":
 		h.handleSubscribe(c, req)
 	case "join_room":
@@ -161,6 +163,40 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 
+// handleSetObservers replaces the desktop-authorized observer set for a room (#17).
+// Only the authorized desktop may call it (mirrors handleSetManager) — it is the
+// authority that decides who is a read-only observer, so a CLI agent can't grant
+// itself observer (and thus read-all) access.
+func (h *Hub) handleSetObservers(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi observer atayabilir")
+		return
+	}
+
+	var data struct {
+		Observers []string `json:"observers"`
+	}
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		c.sendError(req.ID, req.Type, "invalid set_observers payload")
+		return
+	}
+	for _, name := range data.Observers {
+		if n := strings.TrimSpace(name); n != "" {
+			if err := validation.ValidateName(n); err != nil {
+				c.sendError(req.ID, req.Type, err.Error())
+				return
+			}
+		}
+	}
+
+	room := h.resolveRoom(req.Room)
+	h.setConfiguredObservers(room, data.Observers)
+
+	text := fmt.Sprintf("'%s' odası için %d observer atandı.", room, len(data.Observers))
+	respData, _ := json.Marshal(map[string]string{"text": text})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
 func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	var data struct {
 		Rooms []string `json:"rooms"`
@@ -239,6 +275,13 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 			return
 		}
 	}
+	// Observer is desktop-gated like manager (#17 P1): role "observer" grants read-all
+	// transcript access, so a client must not be able to self-assert it. Only an agent
+	// the desktop registered as an observer for this room may join with that role.
+	if role == "observer" && !h.isConfiguredObserver(room, data.AgentName) {
+		c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
+		return
+	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
 
@@ -254,6 +297,12 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	c.rooms[room] = true
 	c.agentName = data.AgentName
 	c.joinedRoom = room
+	// Bind the observer role to the connection (#17): a gated observer join makes
+	// this connection permanently read-only, independent of later allow-list/roster
+	// changes.
+	if role == roleObserver {
+		c.isObserver = true
+	}
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
@@ -331,6 +380,33 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		data.From, data.To, room, data.Priority, data.ExpectsReply, len(data.Content))
 
 	roomState := h.getOrCreateRoom(room)
+
+	// Observer agents (#17) are read-only. Reject send_message BEFORE the manager
+	// gateway below, so an observer's message is never even rerouted to the manager
+	// — and because this returns before GetActiveManagerAndTouch, it cannot refresh
+	// the active manager's heartbeat. Two independent signals block the send, so
+	// neither a roster clear nor an allow-list change can re-enable it:
+	//   - c.isObserver: connection-bound (set at the gated join) — a connection that
+	//     joined as observer can NEVER send, even after the desktop de-configures it
+	//     (it would have to reconnect as a non-observer);
+	//   - isConfiguredObserver: fail-safe for a configured observer that joined under
+	//     a different role.
+	// Both key on join-bound identity (c.agentName, pinned by the from== check), so a
+	// forged `from` can't bypass the gate.
+	if c.isObserver || h.isConfiguredObserver(room, c.agentName) {
+		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
+		return
+	}
+	// Nobody may address a DIRECT message to an observer (#17): it is a read-only
+	// outside eye that talks only to the user, never a routing target. Reject before
+	// any routing/recording. Two signals so a revoked-but-still-joined observer is
+	// still protected: the desktop allow-list (configured) OR the live roster role
+	// (joined as observer, even if just de-configured). Broadcasts (to="all") are
+	// fine — the observer just watches them — so only a direct recipient is checked.
+	if data.To != "all" && (h.isConfiguredObserver(room, data.To) || roomState.IsObserver(data.To)) {
+		c.sendError(req.ID, req.Type, "observer'a doğrudan mesaj gönderilemez; observer yalnızca odayı izler ve kullanıcıyla konuşur")
+		return
+	}
 
 	activeManager := roomState.GetActiveManagerAndTouch(data.From)
 
@@ -457,11 +533,24 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 			return
 		}
 		activeManager := roomState.GetActiveManager()
-		if activeManager == "" || !sameAgentName(c.agentName, activeManager) {
-			c.sendError(req.ID, req.Type, "yalnızca aktif manager tüm mesajları okuyabilir")
+		isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
+		// Observer agents (#17) get read-only access to the full transcript. Authorize
+		// from the DESKTOP allow-list (isConfiguredObserver), not the room roster: this
+		// is revocable — removing an agent from the observer set via set_observers
+		// immediately drops its read-all access even while it stays connected.
+		isObserver := h.isConfiguredObserver(room, c.agentName)
+		if !isManager && !isObserver {
+			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya observer tüm mesajları okuyabilir")
 			return
 		}
-		roomState.TouchManagerHeartbeat(c.agentName)
+		if isManager {
+			roomState.TouchManagerHeartbeat(c.agentName)
+		} else {
+			// Refresh the observer's last_seen so a read_all-only poller is not
+			// stale-evicted (the read path itself doesn't touch last_seen). Without
+			// this the observer would lose read_all access after staleTimeout.
+			roomState.TouchAgentLastSeen(c.agentName)
+		}
 	}
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
 

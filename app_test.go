@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/team"
 )
@@ -339,5 +340,175 @@ func TestBroadcastOutcomeError(t *testing.T) {
 	}
 	if err := broadcastOutcomeError(3, nil); err != nil {
 		t.Errorf("full success must return nil, got %v", err)
+	}
+}
+
+// --- #17 observer: app-layer mode resolution + prompt composition ---
+
+func TestResolveAgentMode(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, err := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+		{Name: "dev", Role: "Developer", CLIType: "claude"},
+		{Name: "boss", CLIType: "claude"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetManager(tm.ID, "boss"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+
+	a := &App{teamStore: store}
+
+	cases := []struct {
+		agent string
+		want  string
+	}{
+		{"watcher", "observer"},
+		{"dev", ""},
+		{"boss", "manager"},
+	}
+	for _, c := range cases {
+		got, err := a.resolveAgentMode(tm.ID, c.agent, "")
+		if err != nil {
+			t.Fatalf("resolveAgentMode(%q): %v", c.agent, err)
+		}
+		if got != c.want {
+			t.Errorf("resolveAgentMode(%q) = %q, want %q", c.agent, got, c.want)
+		}
+	}
+}
+
+func TestIsObserverAgent(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "Watcher", Role: "OBSERVER", CLIType: "claude"}, // case-insensitive
+		{Name: "dev", Role: "Developer", CLIType: "claude"},
+	})
+	a := &App{teamStore: store}
+
+	if !a.isObserverAgent(tm.ID, "watcher") {
+		t.Error("watcher should be an observer (case-insensitive)")
+	}
+	if a.isObserverAgent(tm.ID, "dev") {
+		t.Error("dev is not an observer")
+	}
+	if a.isObserverAgent(tm.ID, "absent") {
+		t.Error("absent agent is not an observer")
+	}
+	if a.isObserverAgent("", "watcher") {
+		t.Error("empty teamID must resolve to not-observer")
+	}
+}
+
+func TestComposeAgentPrompt_ObserverInjectsObserverPrompt(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+	})
+	a := &App{teamStore: store, dataDir: t.TempDir()}
+
+	got := a.composeAgentPrompt(tm.ID, "watcher", "", "observer")
+	if !strings.Contains(got, `join_room("watcher", "observer")`) {
+		t.Fatalf("expected observer join instruction, got:\n%s", got)
+	}
+	if !strings.Contains(got, "outside eye") {
+		t.Fatalf("expected observer role prompt to be injected, got:\n%s", got)
+	}
+	if strings.Contains(got, "MANAGER agent for this room") {
+		t.Fatalf("observer prompt must not include the manager prompt:\n%s", got)
+	}
+}
+
+// #17 (Codex P2): an explicitly-selected observer must win over a manager-tagged
+// startup prompt. Otherwise resolveManagerIntent auto-promotes from the prompt tag
+// (persisting the team manager + clearing the observer role) and the read-only
+// observer terminal would start with manager routing authority.
+func TestResolveAgentMode_ExplicitObserverBeatsManagerPrompt(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+	})
+	ps, err := prompt.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("prompt.NewStore: %v", err)
+	}
+	mgrPrompt, err := ps.Create("Manager", "manage stuff", "task", []string{"manager"})
+	if err != nil {
+		t.Fatalf("prompt Create: %v", err)
+	}
+
+	a := &App{teamStore: store, promptStore: ps}
+
+	mode, err := a.resolveAgentMode(tm.ID, "watcher", mgrPrompt.ID)
+	if err != nil {
+		t.Fatalf("resolveAgentMode: %v", err)
+	}
+	if mode != "observer" {
+		t.Fatalf("explicit observer must win over a manager-tagged prompt, got %q", mode)
+	}
+	// The observer resolution must NOT have auto-set the team manager as a side effect.
+	updated, _ := store.Get(tm.ID)
+	if updated.ManagerAgent != "" {
+		t.Fatalf("observer resolution must not auto-set team manager, got %q", updated.ManagerAgent)
+	}
+}
+
+// #17 (Codex P2): a half-created observer leaves a phantom AgentConfig (Role
+// observer + empty CLIType); OpenTeamFromConfig skips it. The check must be narrow:
+// a blank CLIType alone is a legitimate login-shell fallback that must be preserved.
+func TestIsObserverPhantom(t *testing.T) {
+	if !isObserverPhantom(team.AgentConfig{Name: "x", Role: "observer", CLIType: ""}) {
+		t.Error("observer with empty CLIType must be a phantom")
+	}
+	if isObserverPhantom(team.AgentConfig{Name: "x", Role: "", CLIType: ""}) {
+		t.Error("a legacy blank-CLI shell (non-observer) must be preserved, not treated as a phantom")
+	}
+	if isObserverPhantom(team.AgentConfig{Name: "x", Role: "observer", CLIType: "claude"}) {
+		t.Error("a fully-configured observer is not a phantom")
+	}
+}
+
+// #17 (Codex P2): a worktree-backed agent later marked manager OR observer must
+// restart in the MAIN repo, not the stale worktree (both roles run from main repo).
+func TestRestartWorkDir(t *testing.T) {
+	if got := restartWorkDir(true, "/repo", "", ""); got != "/repo" {
+		t.Errorf("non-worktree: got %q, want /repo", got)
+	}
+	if got := restartWorkDir(true, "/wt", "/wt", "/repo"); got != "/repo" {
+		t.Errorf("manager/observer worktree-backed must move to main repo: got %q, want /repo", got)
+	}
+	if got := restartWorkDir(true, "/x", "/wt", ""); got != "/x" {
+		t.Errorf("main-repo role with no recorded repo falls back to workDir: got %q, want /x", got)
+	}
+	if got := restartWorkDir(false, "/x", "/wt", "/repo"); got != "/wt" {
+		t.Errorf("normal agent reuses worktree: got %q, want /wt", got)
+	}
+}
+
+// #17 (Codex P2): an empty team name resolves to the "default" room, so hub sync
+// targets it instead of being skipped.
+func TestRoomNameOrDefault(t *testing.T) {
+	if got := roomNameOrDefault(""); got != "default" {
+		t.Errorf("empty → %q, want default", got)
+	}
+	if got := roomNameOrDefault("   "); got != "default" {
+		t.Errorf("whitespace → %q, want default", got)
+	}
+	if got := roomNameOrDefault("TeamA"); got != "TeamA" {
+		t.Errorf("named → %q, want TeamA", got)
 	}
 }

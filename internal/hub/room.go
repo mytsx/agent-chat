@@ -16,6 +16,10 @@ const (
 	maxFieldLength     = 32000
 	staleTimeout       = 300 // seconds
 	managerTimeoutSec  = 300
+	// roleObserver is the special, normalized role value (#17) for a read-only
+	// "outside eye" agent: it watches the room but is blocked from send_message.
+	// Like "manager" it is matched case-insensitively after trimming.
+	roleObserver = "observer"
 )
 
 // RoomState holds in-memory state for a single chat room.
@@ -84,6 +88,7 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 	}
 
 	isManager := strings.EqualFold(strings.TrimSpace(role), "manager")
+	isObserver := strings.EqualFold(strings.TrimSpace(role), roleObserver)
 	if isManager {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
 			r.mu.Unlock()
@@ -112,12 +117,13 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 		Timestamp: types.Timestamp(),
 		Type:      "system",
 	}
-	// A MANAGER's own join must not truncate: it would drop history out from under
-	// the manager's first read_all_messages. Every other system message (a
-	// non-manager join, any leave) DOES go through the cap, so a flapping agent's
-	// connect/disconnect churn can't grow the room unbounded.
+	// A MANAGER's or OBSERVER's own join must not truncate: it would drop history out
+	// from under their first read_all_messages(limit=1000). Every other system message
+	// (a normal-agent join, any leave) DOES go through the cap, so a flapping agent's
+	// connect/disconnect churn can't grow the room unbounded. Managers are singular and
+	// observers are few (desktop-spawned), so their bypass can't be abused for growth.
 	var dropped []types.Message
-	if isManager {
+	if isManager || isObserver {
 		r.messages = append(r.messages, sysMsg)
 	} else {
 		dropped = r.appendMessageLocked(sysMsg)
@@ -385,6 +391,23 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 		r.agents[agentName] = agent
 		r.dirty = true
 	}
+}
+
+// IsObserver reports whether the named agent is currently in the room roster with
+// the observer role (#17). Used to reject a DIRECT message addressed to a live
+// observer even after the desktop revokes it from the allow-list — its roster entry
+// still marks it an observer until it leaves. The roster is matched by sameAgentName
+// (case-insensitive), consistent with isConfiguredObserver and the rest of observer
+// identity, so a send to "watcher" can't slip past an observer that joined as "Watcher".
+func (r *RoomState) IsObserver(agentName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for name, a := range r.agents {
+		if sameAgentName(name, agentName) {
+			return strings.EqualFold(strings.TrimSpace(a.Role), roleObserver)
+		}
+	}
+	return false
 }
 
 func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {

@@ -97,6 +97,15 @@ Orchestrator is PTY notification authority:
 - **Cooldown batching:** within 3s window, messages are queued and flushed as a single batch notification
 - **Broadcast:** sender is excluded from notification targets
 
+### Observer Role (#17)
+
+A read-only "outside eye" agent (`role="observer"`), distinct from manager — it stays **outside** routing:
+- **Send blocked:** the hub rejects an observer's `send_message` (`RoomState.IsObserver`), keyed on the join-bound `c.agentName`, *before* the manager gateway — so it never reroutes and never refreshes the manager heartbeat.
+- **Read-only:** `read_all_messages` is allowed for observers; that branch calls `TouchAgentLastSeen` so a read_all-only poller isn't stale-evicted (the read path itself doesn't touch `last_seen`).
+- **No lock, plural:** observers take no manager lock and can coexist with a manager and with each other.
+- **Notification-isolated:** observers are NOT registered with the orchestrator and are skipped in `broadcastToSessions` (via `broadcastRoleLookup` → `AgentConfig.Role`), so no automatic PTY notifications reach them (user-driven).
+- **Mode plumbing:** a single `agentMode` string ("manager"/"observer"/"") flows `resolveAgentMode → composeAgentPrompt → ComposeStartupPrompt`. Role is persisted as `AgentConfig.Role="observer"` (`SetTeamObserver`), mutually exclusive with `Team.ManagerAgent`.
+
 ### MCP Config Management
 
 The desktop app writes MCP server config to CLI config files at startup and per-terminal creation:

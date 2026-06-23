@@ -277,6 +277,10 @@ func (a *App) subscribeExistingTeams() {
 		}
 		rooms = append(rooms, teamName)
 		a.syncHubManager(teamName, strings.TrimSpace(t.ManagerAgent))
+		// Re-authorize observers too (#17): roomObservers is in-memory hub state, so
+		// it must be re-synced on startup and after a hub-crash reconnect, exactly
+		// like the manager, or a reconnecting observer would be rejected at join.
+		a.syncHubObservers(teamName, observerNames(t))
 	}
 	if len(rooms) > 0 {
 		if err := client.Subscribe(rooms); err != nil {
@@ -285,13 +289,52 @@ func (a *App) subscribeExistingTeams() {
 	}
 }
 
+// roomNameOrDefault maps a team name to its hub room, resolving an empty name to the
+// default room — the same convention CreateTerminal uses. The hub sync helpers rely
+// on this so a default-room team (empty Name) still targets "default" instead of
+// being silently skipped, which would leave its manager/observer state stale (#17).
+func roomNameOrDefault(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "default"
+	}
+	return name
+}
+
 func (a *App) syncHubManager(room, managerAgent string) {
 	client := a.hubClient.Load()
-	if client == nil || strings.TrimSpace(room) == "" {
+	if client == nil {
 		return
 	}
+	room = roomNameOrDefault(room)
 	if err := client.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
 		log.Printf("[HUB] set_manager failed for room=%s manager=%s: %v", room, managerAgent, err)
+	}
+}
+
+// observerNames returns the names of all agents in a team persisted with the
+// observer role (#17), used to sync the hub's desktop-authorized observer set.
+func observerNames(t team.Team) []string {
+	var names []string
+	for _, cfg := range t.Agents {
+		if strings.EqualFold(strings.TrimSpace(cfg.Role), team.RoleObserver) {
+			names = append(names, cfg.Name)
+		}
+	}
+	return names
+}
+
+// syncHubObservers tells the hub which agents are authorized observers for a room
+// (#17). The hub rejects a join_room with role "observer" for any agent not in this
+// set, so the desktop must sync it before an observer agent connects. The full list
+// is sent every time because the hub replaces (not merges) the set.
+func (a *App) syncHubObservers(room string, observers []string) {
+	client := a.hubClient.Load()
+	if client == nil {
+		return
+	}
+	room = roomNameOrDefault(room)
+	if err := client.SetObservers(room, observers); err != nil {
+		log.Printf("[HUB] set_observers failed for room=%s count=%d: %v", room, len(observers), err)
 	}
 }
 
@@ -559,6 +602,78 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 	return false, nil
 }
 
+// resolveAgentMode determines a terminal's startup mode (#17): "manager",
+// "observer", or "" (a normal agent). It threads a single mode string — never
+// parallel bools — through CreateTerminal → composeAgentPrompt → ComposeStartupPrompt
+// so the two roles can't both be set. Observer is read from the persisted
+// AgentConfig.Role — the same value the hub IsObserver gate and broadcastRoleLookup
+// read — set via SetTeamObserver.
+//
+// The EXPLICIT observer selection is checked FIRST, before resolveManagerIntent's
+// prompt-tag auto-promotion (Codex P2): otherwise an observer terminal whose user
+// also picked a manager-tagged prompt would auto-set the team manager, clear the
+// observer role, and start with manager routing authority instead of read-only.
+// SetManager/SetObserver keep the two roles mutually exclusive in storage, so a
+// genuine manager never carries the observer role here.
+func (a *App) resolveAgentMode(teamID, agentName, promptID string) (string, error) {
+	if a.isObserverAgent(teamID, agentName) {
+		return "observer", nil
+	}
+	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
+	if err != nil {
+		return "", err
+	}
+	if isManager {
+		return "manager", nil
+	}
+	return "", nil
+}
+
+// isObserverPhantom reports whether a persisted AgentConfig is a half-written
+// observer: SetTeamObserver pre-persists {Name, Role:observer} before CreateTerminal
+// supplies the CLIType, so a failed create leaves an observer with no CLIType. The
+// check is narrow ON PURPOSE — a blank CLIType alone is a legitimate login-shell
+// fallback (legacy/manually-configured teams), so only the observer-role+blank-CLI
+// combination identifies the phantom; legitimate shells (Role != observer) are kept.
+func isObserverPhantom(cfg team.AgentConfig) bool {
+	return isObserverRole(cfg.Role) && strings.TrimSpace(cfg.CLIType) == ""
+}
+
+// restartWorkDir decides which directory a restarted terminal runs in. A
+// worktree-backed agent that is now a main-repo role (manager OR observer) restarts
+// in the recorded main repo (wtRepo); any other agent reuses its existing worktree
+// (wtDir). When there's no worktree, the captured workDir is kept as-is.
+func restartWorkDir(mainRepoRole bool, workDir, wtDir, wtRepo string) string {
+	if wtDir == "" {
+		return workDir
+	}
+	if mainRepoRole {
+		if wtRepo != "" {
+			return wtRepo
+		}
+		return workDir
+	}
+	return wtDir
+}
+
+// isObserverAgent reports whether the agent is persisted with the observer role in
+// its team config. Case-insensitive, matching the rest of the role handling.
+func (a *App) isObserverAgent(teamID, agentName string) bool {
+	if teamID == "" || agentName == "" {
+		return false
+	}
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return false
+	}
+	for _, cfg := range t.Agents {
+		if strings.EqualFold(strings.TrimSpace(cfg.Name), strings.TrimSpace(agentName)) {
+			return strings.EqualFold(strings.TrimSpace(cfg.Role), team.RoleObserver)
+		}
+	}
+	return false
+}
+
 // CreateTerminal creates a new terminal and returns its session ID.
 // If useWorktree is true and workDir is a git repo, a worktree is created for the agent.
 // slotIndex is the grid position the terminal occupies; it is persisted to the team
@@ -580,13 +695,16 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		teamName = "default"
 	}
 
-	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
+	mode, err := a.resolveAgentMode(teamID, agentName, promptID)
 	if err != nil {
 		return "", err
 	}
+	isManager := mode == "manager"
+	isObserver := mode == "observer"
 
-	// Manager agent always works in main repo — backend guard
-	if isManager {
+	// Manager and observer always work in the main repo — neither writes code in an
+	// isolated worktree (manager routes; observer only watches). Backend guard.
+	if isManager || isObserver {
 		useWorktree = false
 	}
 
@@ -612,15 +730,20 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	managerAgent := ""
+	var observers []string
 	if teamID != "" {
 		if t, err := a.teamStore.Get(teamID); err == nil {
 			managerAgent = strings.TrimSpace(t.ManagerAgent)
+			observers = observerNames(t)
 		}
 	}
 	if managerAgent == "" && isManager {
 		managerAgent = agentName
 	}
 	a.syncHubManager(teamName, managerAgent)
+	// Authorize the room's observers on the hub BEFORE the agent spawns, so an
+	// observer's join_room (sent a few seconds after spawn) passes the hub gate (#17).
+	a.syncHubObservers(teamName, observers)
 
 	// Subscribe to room events
 	if client := a.hubClient.Load(); client != nil {
@@ -645,7 +768,7 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument
 	if ct == cli.CLICopilot && agentName != "" {
-		composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
+		composed := a.composeAgentPrompt(teamID, agentName, promptID, mode)
 		if composed != "" {
 			cmdArgs = append(cmdArgs, "-i", composed)
 			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(composed))
@@ -720,13 +843,17 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		}
 	}
 
-	// Register agent session for orchestrator (using room name)
-	if agentName != "" {
+	// Register agent session for orchestrator (using room name). An observer is
+	// deliberately NOT registered (#17): the orchestrator's broadcast path notifies
+	// every registered session, and an observer must receive no automatic PTY
+	// notifications (it is user-driven). Skipping registration is the cleanest
+	// isolation — the broadcast loop never sees the observer's session.
+	if agentName != "" && !isObserver {
 		a.orchestrator.RegisterAgent(teamName, agentName, sessionID)
 	}
 
 	// Send startup prompt in background
-	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, isManager)
+	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, mode)
 
 	return sessionID, nil
 }
@@ -758,21 +885,17 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	// leave the user with no terminal. The team config was already captured correctly
 	// on the initial create, and CreateTerminal skips re-persisting a worktree path
 	// (see its persist block), so it isn't corrupted.
-	isManager := false
+	// Manager AND observer always run from the main repo, never a worktree (#17):
+	// without this an observer promoted from a worktree-backed agent would restart
+	// inside its stale worktree because workDir was captured as wtDir (Codex P2).
+	mainRepoRole := false
 	if teamID != "" {
 		if t, err := a.teamStore.Get(teamID); err == nil {
-			isManager = t.IsManagerAgent(agentName)
+			mainRepoRole = t.IsManagerAgent(agentName)
 		}
+		mainRepoRole = mainRepoRole || a.isObserverAgent(teamID, agentName)
 	}
-	if wtDir != "" {
-		if isManager {
-			if wtRepo != "" {
-				workDir = wtRepo
-			}
-		} else {
-			workDir = wtDir
-		}
-	}
+	workDir = restartWorkDir(mainRepoRole, workDir, wtDir, wtRepo)
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
 	if err := a.closeTerminalInternal(sessionID, false); err != nil {
@@ -829,6 +952,17 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 	results := make([]OpenTeamResult, 0, len(ordered))
 	for _, cfg := range ordered {
 		res := OpenTeamResult{AgentName: cfg.Name, CLIType: cfg.CLIType, SlotIndex: cfg.SlotIndex}
+		// Skip an observer phantom: SetTeamObserver pre-persists {Name, Role:observer}
+		// before CreateTerminal fills in the CLIType. If that create failed, reopening
+		// the phantom would launch an unintended login shell in its slot (Codex P2).
+		// Narrowed to the observer-role+blank-CLI case so legitimate blank-CLI shells
+		// (legacy/manual configs) still reopen.
+		if isObserverPhantom(cfg) {
+			res.Error = "yarım kalan observer config (CLI tipi yok) — atlandı"
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s observer phantom (CLIType boş), atlandı", cfg.Name)
+			results = append(results, res)
+			continue
+		}
 		if capacity >= 0 && cfg.SlotIndex >= capacity {
 			res.Error = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
@@ -847,8 +981,10 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 	return results, nil
 }
 
-// composeAgentPrompt builds the startup prompt for an agent without sending it
-func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager bool) string {
+// composeAgentPrompt builds the startup prompt for an agent without sending it.
+// agentMode (#17) is "manager", "observer", or "" and selects which role prompt
+// (if any) is appended and how the join instruction is framed.
+func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode string) string {
 	if agentName == "" {
 		return ""
 	}
@@ -882,14 +1018,22 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 		}
 	}
 
-	if isManager {
-		managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")
-		managerText := strings.TrimSpace(string(managerPrompt))
-		if managerText != "" {
+	// Append the role prompt for manager/observer. Both fold into the selected
+	// prompt slot the same way (replace-if-empty, else append-if-absent).
+	var rolePromptFile string
+	switch agentMode {
+	case "manager":
+		rolePromptFile = "prompts/manager_prompt.md"
+	case "observer":
+		rolePromptFile = "prompts/observer_prompt.md"
+	}
+	if rolePromptFile != "" {
+		roleText := strings.TrimSpace(string(a.readEmbeddedPrompt(rolePromptFile)))
+		if roleText != "" {
 			if strings.TrimSpace(selectedPrompt) == "" {
-				selectedPrompt = managerText
-			} else if !strings.Contains(selectedPrompt, managerText) {
-				selectedPrompt = strings.TrimSpace(selectedPrompt) + "\n\n" + managerText
+				selectedPrompt = roleText
+			} else if !strings.Contains(selectedPrompt, roleText) {
+				selectedPrompt = strings.TrimSpace(selectedPrompt) + "\n\n" + roleText
 			}
 		}
 	}
@@ -909,11 +1053,11 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID string, isManager b
 		roomSummary = doc.Text
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, isManager)
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode)
 }
 
 // sendStartupPrompt sends the initial prompt to a CLI agent
-func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID string, isManager bool) {
+func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, agentMode string) {
 	if cliType == "" || cliType == "shell" || cliType == "copilot" || agentName == "" {
 		return
 	}
@@ -928,7 +1072,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID 
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
-	composed := a.composeAgentPrompt(teamID, agentName, promptID, isManager)
+	composed := a.composeAgentPrompt(teamID, agentName, promptID, agentMode)
 	if composed == "" {
 		return
 	}
@@ -1073,6 +1217,12 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	// a legacy/empty CLI type that falls through to the login shell — never does, so
 	// a prompt sent to it isn't room agent traffic and must not be logged (#29).
 	if !isAICLIType(sess.CLIType) {
+		return
+	}
+	// Observer sessions are the user's PRIVATE drafting/discussion space (#17). Their
+	// prompts must NOT enter the room transcript, or the private draft could be
+	// summarized and injected into worker agents — defeating the point of the role.
+	if a.isObserverAgent(sess.TeamID, sess.AgentName) {
 		return
 	}
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
@@ -1390,10 +1540,20 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 		return team.Team{}, err
 	}
 
-	if prev.Name != "" && prev.Name != updated.Name {
-		a.syncHubManager(prev.Name, "")
+	// A rename changes the room: clear the OLD room's manager + observer hub state so
+	// it doesn't linger, then sync the new/updated room. Observer authorization lives
+	// only in hub memory, so an UpdateTeam that changes Agents/roles must re-sync it
+	// here too — otherwise the room keeps a stale allow-list (Codex P2). Compare the
+	// RESOLVED room names (empty → "default"): a default-room team renamed to a named
+	// one must still have its old "default" state cleared (Codex P2).
+	prevRoom := roomNameOrDefault(prev.Name)
+	newRoom := roomNameOrDefault(updated.Name)
+	if prevRoom != newRoom {
+		a.syncHubManager(prevRoom, "")
+		a.syncHubObservers(prevRoom, nil)
 	}
-	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubObservers(newRoom, observerNames(updated))
 
 	return updated, nil
 }
@@ -1420,6 +1580,39 @@ func (a *App) SetTeamManager(id, managerAgent string) (team.Team, error) {
 		return team.Team{}, err
 	}
 	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	// Promoting an agent to manager clears its observer role (manager XOR observer);
+	// re-sync the observer allow-list so the hub no longer authorizes the now-manager
+	// as an observer — otherwise it would stay read-only (send-blocked) on the hub (#17).
+	a.syncHubObservers(updated.Name, observerNames(updated))
+	return updated, nil
+}
+
+// SetTeamObserver marks an agent as the room's read-only observer (#17), mirroring
+// SetTeamManager. It persists AgentConfig.Role="observer" (the value the hub
+// IsObserver gate and broadcastRoleLookup read), clearing the manager assignment if
+// this agent held it (an agent is manager XOR observer). If that cleared the team's
+// manager, the hub manager lock is synced to empty so routing stops treating the
+// agent as manager.
+func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
+	agentName = strings.TrimSpace(agentName)
+	if err := validation.ValidateName(agentName); err != nil {
+		return team.Team{}, fmt.Errorf("invalid observer agent: %w", err)
+	}
+
+	updated, err := a.teamStore.SetObserver(id, agentName)
+	if err != nil {
+		return team.Team{}, err
+	}
+	// SetObserver may have cleared the manager (an agent is manager XOR observer);
+	// re-sync both so the hub's manager lock and observer authorization match.
+	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubObservers(updated.Name, observerNames(updated))
+	// If the agent is already running (converted in place), unregister its live PTY
+	// session from the orchestrator so it stops receiving automatic broadcast/direct
+	// notifications — the create-time observer skip only covers future spawns (Codex
+	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
+	// → "default"), so resolve here too. No-op when the agent isn't registered.
+	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
 	return updated, nil
 }
 
@@ -1629,8 +1822,12 @@ func (a *App) DeleteTeam(id string) error {
 	if err := a.teamStore.Delete(id); err != nil {
 		return err
 	}
-	if getErr == nil && t.Name != "" {
+	if getErr == nil {
+		// Clear the deleted room's hub manager + observer state so a later team
+		// reusing the same room name doesn't inherit it. The sync helpers resolve an
+		// empty name to "default", so this also covers the default-room team (#17).
 		a.syncHubManager(t.Name, "")
+		a.syncHubObservers(t.Name, nil)
 	}
 	return nil
 }
