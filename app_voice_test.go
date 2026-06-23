@@ -195,6 +195,42 @@ func TestStopVoiceCaptureHallucinationSkips(t *testing.T) {
 	}
 }
 
+func TestStartVoiceCaptureRejectedWhileSessionTranscribing(t *testing.T) {
+	a := newVoiceTestApp()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		close(entered)
+		<-release
+		return "merhaba", nil
+	}
+	a.voiceInject = func(sessionID, text string, submit bool) error { return nil }
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = a.StopVoiceCapture("A"); close(done) }()
+	<-entered // session A is now transcribing (its recorder already stopped/cleared)
+
+	// Same session must be rejected while its transcription is still pending — even
+	// though the mic lock (activeRecorder) was released after ffmpeg exited.
+	if err := a.StartVoiceCapture("A"); err == nil {
+		t.Error("same-session Start must be rejected while its transcription is pending")
+	}
+	// A different session may still record — the mic is free during transcription.
+	if err := a.StartVoiceCapture("B"); err != nil {
+		t.Errorf("a different session should record during another's transcription: %v", err)
+	}
+	a.stopActiveVoice() // clear B's recorder without driving it through transcription
+
+	close(release)
+	<-done
+	// After A's transcription resolves, the same session can record again.
+	if err := a.StartVoiceCapture("A"); err != nil {
+		t.Errorf("session A should record again once its transcription finished: %v", err)
+	}
+}
+
 func TestStopActiveVoiceStopsRecorder(t *testing.T) {
 	a := newVoiceTestApp()
 	fr := &fakeRecorder{}

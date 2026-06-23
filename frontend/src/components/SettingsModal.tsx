@@ -21,7 +21,10 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   }, []);
 
   const handleSave = async () => {
-    if (saving) return;
+    // Mirror the Save button's disabled state here too: pressing Enter on the empty,
+    // auto-focused field would otherwise call SetVoiceConfig("") and wipe a stored
+    // key (Codex P2). Empty input is a no-op, not a clear.
+    if (saving || apiKey.trim() === "") return;
     setSaving(true);
     setError(null);
     setSaved(false);

@@ -210,13 +210,20 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     if (!recordingRef.current) return; // ref, not voiceState — avoids the stale-closure skip
     recordingRef.current = false;
     // busyRef stays true through transcription; cleared on the backend's idle/error
-    // event (or the catch below) so the next recording is blocked until then.
+    // event, OR the then/catch below so a missed event can't wedge the pane in
+    // "transcribing" forever (Codex P2 — the listener may not be registered yet, or
+    // the idle event may be dropped).
     setVoiceState("transcribing");
-    StopVoiceCapture(sessionID).catch((e) => {
-      busyRef.current = false;
-      setVoiceState("error");
-      setVoiceError(String(e));
-    });
+    StopVoiceCapture(sessionID)
+      .then(() => {
+        busyRef.current = false;
+        setVoiceState((s) => (s === "transcribing" ? "idle" : s));
+      })
+      .catch((e) => {
+        busyRef.current = false;
+        setVoiceState("error");
+        setVoiceError(String(e));
+      });
   };
 
   return (

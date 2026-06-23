@@ -77,6 +77,11 @@ type App struct {
 	voiceMu            sync.Mutex
 	activeRecorder     voice.Recorder
 	activeVoiceSession string
+	// transcribingSession is the session whose audio is being uploaded/transcribed
+	// right now. It outlives activeRecorder (which clears once ffmpeg exits) so a
+	// second capture for the SAME session is rejected until its injection finishes —
+	// the authoritative guard, since the pane-local busyRef resets on remount (Codex P2).
+	transcribingSession string
 	// Injectable seams (orchestrator SendFunc pattern), defaulted in startup(),
 	// overridden in tests so the flow runs with no ffmpeg/network/Wails runtime.
 	newVoiceRecorder func() (voice.Recorder, error)
@@ -2052,6 +2057,11 @@ func (a *App) StartVoiceCapture(sessionID string) error {
 		log.Printf("[VOICE] StartVoiceCapture reddedildi (zaten kayıt var) session=%s", sessionID)
 		return fmt.Errorf("⚠️ Zaten kayıt sürüyor")
 	}
+	if a.transcribingSession == sessionID {
+		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StartVoiceCapture reddedildi (bu panel hâlâ çevriliyor) session=%s", sessionID)
+		return fmt.Errorf("⚠️ Bu panelin önceki kaydı hâlâ çevriliyor")
+	}
 	rec, err := a.newVoiceRecorder()
 	if err != nil {
 		a.voiceMu.Unlock()
@@ -2102,7 +2112,17 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if a.activeRecorder == rec {
 		a.activeRecorder = nil
 	}
+	a.transcribingSession = sessionID
 	a.voiceMu.Unlock()
+	// Cleared on EVERY return path below so a failed/stuck transcription can't
+	// permanently block this session from recording again (Codex P2).
+	defer func() {
+		a.voiceMu.Lock()
+		if a.transcribingSession == sessionID {
+			a.transcribingSession = ""
+		}
+		a.voiceMu.Unlock()
+	}()
 
 	if err != nil {
 		log.Printf("[VOICE] kayıt durdurma/okuma hatası session=%s err=%v", sessionID, err)
