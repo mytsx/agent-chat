@@ -367,3 +367,51 @@ func TestHandleSendMessage_ObserverBlockedAfterDeconfig(t *testing.T) {
 		t.Fatalf("a connection that joined as observer must stay send-blocked after de-config")
 	}
 }
+
+// #17 (Codex P2): an observer is never a routing target — a direct message TO a
+// configured observer must be rejected (and not recorded), so other agents can't
+// communicate with the read-only outside eye.
+func TestHandleSendMessage_ToObserverRejected(t *testing.T) {
+	h, alice := newTestHubClient()
+	h.setConfiguredObservers("r1", []string{"watcher"})
+
+	h.handleRequest(alice, types.Request{
+		ID: "join-alice", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "alice", "role": "developer"}),
+	})
+	_ = readResponse(t, alice, "join_room")
+
+	h.handleRequest(alice, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "watcher", "content": "hey"}),
+	})
+	if resp := readResponse(t, alice, "send_message"); resp.Success {
+		t.Fatalf("a direct message addressed to an observer must be rejected")
+	}
+	for _, m := range h.getOrCreateRoom("r1").GetMessages() {
+		if m.From == "alice" && m.Type != "system" {
+			t.Fatalf("message to an observer must not be recorded, found: %+v", m)
+		}
+	}
+}
+
+// A broadcast (to="all") must NOT be blocked just because an observer is in the
+// room — the observer simply watches it; only DIRECT messages to it are rejected.
+func TestHandleSendMessage_BroadcastNotBlockedByObserver(t *testing.T) {
+	h, alice := newTestHubClient()
+	h.setConfiguredObservers("r1", []string{"watcher"})
+
+	h.handleRequest(alice, types.Request{
+		ID: "join-alice", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "alice", "role": "developer"}),
+	})
+	_ = readResponse(t, alice, "join_room")
+
+	h.handleRequest(alice, types.Request{
+		ID: "bc", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "all", "content": "hi all"}),
+	})
+	if resp := readResponse(t, alice, "send_message"); !resp.Success {
+		t.Fatalf("broadcast must not be blocked by a configured observer: %s", resp.Error)
+	}
+}

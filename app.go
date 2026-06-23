@@ -1798,12 +1798,19 @@ func (a *App) DeleteTeam(id string) error {
 	if err := a.teamStore.Delete(id); err != nil {
 		return err
 	}
-	if getErr == nil && t.Name != "" {
-		a.syncHubManager(t.Name, "")
-		// Also clear the room's observer allow-list (#17): roomObservers lives in
-		// hub memory, so without this a later team reusing the same room name would
-		// inherit the deleted team's authorized observers (stale read-all access).
-		a.syncHubObservers(t.Name, nil)
+	if getErr == nil {
+		// Resolve the room name the same way CreateTerminal does (empty → "default"),
+		// so deleting a default-room team also clears its hub state — otherwise the
+		// stale manager/observer authorization would linger under "default" (Codex P2).
+		room := t.Name
+		if room == "" {
+			room = "default"
+		}
+		a.syncHubManager(room, "")
+		// Clear the room's observer allow-list too: roomObservers lives in hub memory,
+		// so without this a later team reusing the same room name would inherit the
+		// deleted team's authorized observers (stale read-all access).
+		a.syncHubObservers(room, nil)
 	}
 	return nil
 }

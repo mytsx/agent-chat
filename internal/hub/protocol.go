@@ -397,6 +397,14 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}
+	// Nobody may address a DIRECT message to an observer (#17): it is a read-only
+	// outside eye that talks only to the user, never a routing target. Reject before
+	// any routing/recording. Broadcasts (to="all") are fine — the observer just
+	// watches them — so only a direct recipient is checked.
+	if data.To != "all" && h.isConfiguredObserver(room, data.To) {
+		c.sendError(req.ID, req.Type, "observer'a doğrudan mesaj gönderilemez; observer yalnızca odayı izler ve kullanıcıyla konuşur")
+		return
+	}
 
 	activeManager := roomState.GetActiveManagerAndTouch(data.From)
 
