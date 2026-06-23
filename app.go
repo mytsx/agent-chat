@@ -1084,6 +1084,16 @@ func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 		return "", fmt.Errorf("eski session kapatılamadı %s: %w", ptymgr.ShortID(sessionID), err)
 	}
 
+	// On RESUME, a same-file CLI (Copilot) reopens the SAME transcript the old
+	// watcher was on. Wait (bounded) for that watcher to finish its final drain and
+	// release its claim BEFORE the resumed CLI spawns, so it can't ingest the new
+	// session's bootstrap prompt under the old fingerprint store and log it as a
+	// user message (#40, Codex round-3). Skipped for plain restart (new file, no
+	// shared watcher) to avoid needless latency.
+	if resumeID != "" {
+		a.ingestMgr.StopAndWait(sessionID, 2*time.Second)
+	}
+
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
 	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID)

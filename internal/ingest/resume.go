@@ -26,15 +26,22 @@ type ResumeSeed struct {
 // they return nil. A missing/unreadable file also returns nil (the watcher then
 // starts at 0, which is correct for a not-yet-created file).
 func ResumeSeedFor(cliType, sessionID string) *ResumeSeed {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return resumeSeedForRoot(home, cliType, sessionID)
+}
+
+// resumeSeedForRoot is ResumeSeedFor with the home root injected, so tests can
+// point it at a t.TempDir() instead of touching the developer's real ~/.copilot
+// (Copilot review).
+func resumeSeedForRoot(home, cliType, sessionID string) *ResumeSeed {
 	if sessionID == "" {
 		return nil
 	}
 	switch cliType {
 	case "copilot":
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
 		p := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
 		info, err := os.Stat(p)
 		if err != nil {

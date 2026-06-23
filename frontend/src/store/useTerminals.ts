@@ -238,20 +238,28 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
     const newSessionID = await RestartTerminal(sessionID);
 
-    // Replace old session with new one, preserving slotIndex. Clear cliSessionID:
-    // the new PTY hasn't captured a session id yet, so a stale id must not keep the
-    // resume button enabled — ResumeTerminal(newSessionID) would only fall back to
-    // another fresh restart, discarding the just-started process (#40, Codex P3).
-    set((s) => ({
-      sessions: {
-        ...s.sessions,
-        [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-          t.sessionID === sessionID
-            ? { ...t, sessionID: newSessionID, cliSessionID: undefined }
-            : t
-        ),
-      },
-    }));
+    // Replace old session with new one, preserving slotIndex. cliSessionID resets
+    // to whatever was buffered for newSessionID (normally undefined → resume button
+    // disabled until the new PTY captures an id; a stale old id must NOT carry over,
+    // or ResumeTerminal would fall back to another fresh restart — #40 Codex P3).
+    // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
+    // captured id is never lost if its event raced this replacement (#40 Codex P2).
+    set((s) => {
+      const pending = { ...s.pendingCLISessionIDs };
+      const captured = pending[newSessionID];
+      delete pending[newSessionID];
+      return {
+        sessions: {
+          ...s.sessions,
+          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
+            t.sessionID === sessionID
+              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
+              : t
+          ),
+        },
+        pendingCLISessionIDs: pending,
+      };
+    });
 
     return newSessionID;
   },
@@ -266,18 +274,27 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
     const newSessionID = await ResumeTerminal(sessionID);
 
-    // Replace old session with new one, preserving slotIndex; clear cliSessionID
-    // since the resumed session hasn't captured a new id yet.
-    set((s) => ({
-      sessions: {
-        ...s.sessions,
-        [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-          t.sessionID === sessionID
-            ? { ...t, sessionID: newSessionID, cliSessionID: undefined }
-            : t
-        ),
-      },
-    }));
+    // Replace old session with new one, preserving slotIndex. cliSessionID resets to
+    // whatever was buffered for newSessionID (normally undefined until the resumed
+    // PTY captures its new id; the resumed CLI regenerates its session id). Draining
+    // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
+    // isn't lost if its event raced this replacement (#40 Codex P2).
+    set((s) => {
+      const pending = { ...s.pendingCLISessionIDs };
+      const captured = pending[newSessionID];
+      delete pending[newSessionID];
+      return {
+        sessions: {
+          ...s.sessions,
+          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
+            t.sessionID === sessionID
+              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
+              : t
+          ),
+        },
+        pendingCLISessionIDs: pending,
+      };
+    });
 
     return newSessionID;
   },

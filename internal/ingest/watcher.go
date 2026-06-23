@@ -283,6 +283,30 @@ func (m *Manager) StopSession(sessionID string) {
 	}
 }
 
+// StopAndWait stops a single terminal's watcher and waits — bounded by timeout —
+// for its final drain to finish and its file claim to be released. Used before a
+// same-file RESUME (Copilot appends to the prior session's events.jsonl): without
+// this, the old watcher could still be alive when the resumed CLI writes its
+// bootstrap prompt and ingest it under the OLD fingerprint store, logging the
+// app's startup prompt into the room as a user message (#40, Codex round-3). A
+// nil/unknown/already-finished session is a no-op.
+func (m *Manager) StopAndWait(sessionID string, timeout time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	s := m.sessions[sessionID]
+	m.mu.Unlock()
+	if s == nil {
+		return // already finished (or never started) — nothing to drain
+	}
+	m.StopSession(sessionID) // closes cancel + releases the claim (safe-once via map delete)
+	select {
+	case <-s.done:
+	case <-time.After(timeout):
+	}
+}
+
 // StopAll stops every watcher (app shutdown) and waits — bounded — for their
 // final drains to deliver, so a prompt typed just before quit isn't lost from the
 // post-shutdown room snapshot (#65).

@@ -219,6 +219,43 @@ func TestStartSession_ResumeSeed_IgnoredOnDifferentFile(t *testing.T) {
 	}
 }
 
+// StopAndWait must stop the watcher, wait for its final drain, and release its
+// file claim before returning — so a same-file resume can safely reopen the file
+// (#40). After it returns, another session can claim the same path.
+func TestStopAndWait_StopsAndReleasesClaim(t *testing.T) {
+	m := New()
+	ad := &fakeAdapter{}
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, func(string, string) bool { return true }, nil, nil)
+
+	// Wait for the watcher to discover + claim "fake".
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !m.isClaimedByOther("other", "fake") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.isClaimedByOther("other", "fake") {
+		t.Fatal("s1 should have claimed 'fake' before StopAndWait")
+	}
+
+	m.StopAndWait("s1", 2*time.Second)
+
+	if m.isClaimedByOther("other", "fake") {
+		t.Fatal("StopAndWait must release s1's claim so the file is reclaimable")
+	}
+}
+
+// StopAndWait on an unknown/already-finished session returns immediately and never
+// blocks on a missing done channel (#40).
+func TestStopAndWait_UnknownSessionNoOp(t *testing.T) {
+	m := New()
+	done := make(chan struct{})
+	go func() { m.StopAndWait("ghost", time.Second); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("StopAndWait on unknown session must return immediately")
+	}
+}
+
 // Two watchers in the same cwd must not both lock onto the same discovered file:
 // tryClaim is exclusive, and isClaimedByOther reports the lock to siblings (#65).
 func TestManager_ClaimsAreExclusive(t *testing.T) {
