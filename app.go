@@ -835,9 +835,10 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// build the resume invocation instead of a fresh launch. Everything downstream
 	// (Copilot -i, startup prompt, ingest) is unchanged so the resumed agent still
 	// re-joins the room.
+	resuming := resumeID != "" && cli.ResumeSupported(ct)
 	var cmdName string
 	var cmdArgs []string
-	if resumeID != "" && cli.ResumeSupported(ct) {
+	if resuming {
 		cmdName, cmdArgs = cli.GetCommandResume(ct, resumeID)
 		log.Printf("[RESUME] agent=%s cli=%s id=%s", agentName, cliType, resumeID)
 	} else {
@@ -989,7 +990,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				"sessionID":    sessionID,
 				"cliSessionID": id,
 			})
-		})
+		}, resuming)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
 			// same-cwd watchers skip it) but discards every message (#17/#65 P1).

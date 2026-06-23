@@ -119,7 +119,7 @@ func TestStartSession_FiresOnSessionID(t *testing.T) {
 			case got <- id:
 			default:
 			}
-		})
+		}, false)
 	defer m.StopSession("s1")
 
 	select {
@@ -129,6 +129,40 @@ func TestStartSession_FiresOnSessionID(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("onSessionID not fired within 2s")
+	}
+}
+
+// On RESUME (seedAtEnd=true) the watcher must skip everything already in the
+// discovered transcript — the prior conversation the resumed CLI is continuing —
+// and ingest only messages appended AFTER resume. Without this, the first poll
+// re-logs the entire history into the room (#40, Codex P1).
+func TestStartSession_SeedAtEnd_SkipsExistingTranscript(t *testing.T) {
+	m := New()
+	// batch[0] = the pre-existing transcript (must be skipped via the seed parse);
+	// batch[1] = a message appended after resume (must be emitted).
+	ad := &fakeAdapter{batches: [][]ParsedMessage{
+		{pm("old-1", 1), pm("old-2", 2)},
+		{pm("new-after-resume", 3)},
+	}}
+	var mu sync.Mutex
+	var got []string
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil, true)
+	defer m.StopSession("s1")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "new-after-resume" {
+		t.Fatalf("seedAtEnd: emitted %v, want only [new-after-resume] (pre-existing transcript must be skipped)", got)
 	}
 }
 
