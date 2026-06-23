@@ -4,12 +4,6 @@
 // package only observes the CLI's session files.
 package ingest
 
-// UserMessage is one verbatim human message extracted from a CLI session file.
-type UserMessage struct {
-	Content   string // verbatim user text (no tool results / assistant output)
-	Timestamp string // the CLI file's own ISO-8601 timestamp for this message
-}
-
 // Cursor records how far a session file has been ingested. JSONL adapters use
 // Offset (byte offset of the next unread line). The monolithic-JSON Gemini
 // adapter uses Count (number of messages already emitted) plus ModTime (the file
