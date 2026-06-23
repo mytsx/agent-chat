@@ -74,7 +74,10 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, sel
 		// onu tanıyıp send_message'ını reddetsin. Tüm trafiği read_all_messages ile
 		// izler, ama hiçbir agent'a mesaj göndermez — yalnızca kullanıcıyla konuşur.
 		role = "observer"
-		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0) ile odadaki tüm trafiği izle. DİĞER AGENT'LARA MESAJ GÖNDERME (send_message reddedilir); yalnızca kullanıcıyla konuş ve odanın gidişatını analiz et."
+		// limit=1000 like the manager path: read_all_messages defaults to 15, so
+		// without it an observer meant to watch "all traffic" would only see the
+		// last 15 messages (oda en çok 500 mesaj tutar).
+		readInstruction = "Odaya katıldıktan sonra read_all_messages(since_id=0, limit=1000) ile odadaki tüm trafiği izle. DİĞER AGENT'LARA MESAJ GÖNDERME (send_message reddedilir); yalnızca kullanıcıyla konuş ve odanın gidişatını analiz et."
 	}
 	if hasSummary {
 		// Önceki session özeti zaten yukarıda enjekte edildi: agent'ı tüm geçmişi
@@ -85,7 +88,7 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, sel
 		case isManager:
 			readInstruction = "Önceki session özetini yukarıda okudun. Güncel ayrıntı için read_summary() çağır; yalnızca gerekiyorsa son mesajları read_all_messages(since_id=0, limit=50) ile çek ve yönlendir."
 		case isObserver:
-			readInstruction = "Önceki session özetini yukarıda okudun. Güncel trafiği read_all_messages(since_id=0) ile izle; DİĞER AGENT'LARA MESAJ GÖNDERME, yalnızca kullanıcıyla konuş."
+			readInstruction = "Önceki session özetini yukarıda okudun. Güncel trafiği read_all_messages(since_id=0, limit=1000) ile izle; DİĞER AGENT'LARA MESAJ GÖNDERME, yalnızca kullanıcıyla konuş."
 		default:
 			readInstruction = fmt.Sprintf("Önceki session özetini yukarıda okudun. Ayrıntı için read_summary() ya da read_messages(\"%s\") çağır ve diğer agent'larla iletişime geç.", agentName)
 		}

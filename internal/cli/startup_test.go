@@ -99,6 +99,11 @@ func TestComposeStartupPrompt_ObserverRole(t *testing.T) {
 	if !strings.Contains(got, "read_all_messages") {
 		t.Fatalf("expected observer to watch via read_all_messages, got:\n%s", got)
 	}
+	// read_all_messages defaults to limit=15; without an explicit high limit the
+	// observer would only see the last 15 messages, not "all traffic" (Codex P2).
+	if !strings.Contains(got, "read_all_messages(since_id=0, limit=") {
+		t.Fatalf("expected observer read_all to pass an explicit limit, got:\n%s", got)
+	}
 	if !strings.Contains(got, "GÖNDERME") {
 		t.Fatalf("expected observer to be told NOT to send messages, got:\n%s", got)
 	}

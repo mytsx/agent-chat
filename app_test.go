@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/team"
 )
@@ -426,5 +427,74 @@ func TestComposeAgentPrompt_ObserverInjectsObserverPrompt(t *testing.T) {
 	}
 	if strings.Contains(got, "MANAGER agent for this room") {
 		t.Fatalf("observer prompt must not include the manager prompt:\n%s", got)
+	}
+}
+
+// #17 (Codex P2): an explicitly-selected observer must win over a manager-tagged
+// startup prompt. Otherwise resolveManagerIntent auto-promotes from the prompt tag
+// (persisting the team manager + clearing the observer role) and the read-only
+// observer terminal would start with manager routing authority.
+func TestResolveAgentMode_ExplicitObserverBeatsManagerPrompt(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	tm, _ := store.Create("TeamA", "2x2", []team.AgentConfig{
+		{Name: "watcher", Role: "observer", CLIType: "claude"},
+	})
+	ps, err := prompt.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("prompt.NewStore: %v", err)
+	}
+	mgrPrompt, err := ps.Create("Manager", "manage stuff", "task", []string{"manager"})
+	if err != nil {
+		t.Fatalf("prompt Create: %v", err)
+	}
+
+	a := &App{teamStore: store, promptStore: ps}
+
+	mode, err := a.resolveAgentMode(tm.ID, "watcher", mgrPrompt.ID)
+	if err != nil {
+		t.Fatalf("resolveAgentMode: %v", err)
+	}
+	if mode != "observer" {
+		t.Fatalf("explicit observer must win over a manager-tagged prompt, got %q", mode)
+	}
+	// The observer resolution must NOT have auto-set the team manager as a side effect.
+	updated, _ := store.Get(tm.ID)
+	if updated.ManagerAgent != "" {
+		t.Fatalf("observer resolution must not auto-set team manager, got %q", updated.ManagerAgent)
+	}
+}
+
+// #17 (Codex P2): a half-created observer leaves a phantom AgentConfig with an
+// empty CLIType; OpenTeamFromConfig must skip such incomplete configs so it doesn't
+// launch an unintended login shell in the phantom's slot.
+func TestIsIncompleteAgentConfig(t *testing.T) {
+	if !isIncompleteAgentConfig(team.AgentConfig{Name: "x", Role: "observer", CLIType: ""}) {
+		t.Error("empty CLIType (phantom observer) must be treated as incomplete")
+	}
+	if isIncompleteAgentConfig(team.AgentConfig{Name: "x", CLIType: "claude"}) {
+		t.Error("a configured AI agent must not be incomplete")
+	}
+	if isIncompleteAgentConfig(team.AgentConfig{Name: "x", CLIType: "shell"}) {
+		t.Error("a shell agent is complete")
+	}
+}
+
+// #17 (Codex P2): a worktree-backed agent later marked manager OR observer must
+// restart in the MAIN repo, not the stale worktree (both roles run from main repo).
+func TestRestartWorkDir(t *testing.T) {
+	if got := restartWorkDir(true, "/repo", "", ""); got != "/repo" {
+		t.Errorf("non-worktree: got %q, want /repo", got)
+	}
+	if got := restartWorkDir(true, "/wt", "/wt", "/repo"); got != "/repo" {
+		t.Errorf("manager/observer worktree-backed must move to main repo: got %q, want /repo", got)
+	}
+	if got := restartWorkDir(true, "/x", "/wt", ""); got != "/x" {
+		t.Errorf("main-repo role with no recorded repo falls back to workDir: got %q, want /x", got)
+	}
+	if got := restartWorkDir(false, "/x", "/wt", "/repo"); got != "/wt" {
+		t.Errorf("normal agent reuses worktree: got %q, want /wt", got)
 	}
 }

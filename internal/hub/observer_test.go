@@ -117,6 +117,9 @@ func TestObserverHeartbeat_TouchAgentLastSeenKeepsAlive(t *testing.T) {
 
 func joinObserver(t *testing.T, h *Hub, c *Client, room, name string) {
 	t.Helper()
+	// Observer join is desktop-gated like manager (#17 P1): the agent must be a
+	// configured observer for the room before it may join with role "observer".
+	h.setConfiguredObservers(room, []string{name})
 	h.handleRequest(c, types.Request{
 		ID:   "join-" + name,
 		Type: "join_room",
@@ -126,6 +129,66 @@ func joinObserver(t *testing.T, h *Hub, c *Client, room, name string) {
 	resp := readResponse(t, c, "join_room")
 	if !resp.Success {
 		t.Fatalf("observer %q join should succeed: %s", name, resp.Error)
+	}
+}
+
+// #17 P1: a self-asserted observer must not get read-all access. join_room with
+// role "observer" is rejected unless the desktop has configured that agent as an
+// observer for the room (mirrors the manager gate).
+func TestHandleJoinRoom_ObserverRequiresConfiguration(t *testing.T) {
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "join-1",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "watcher", "role": "observer"}),
+	})
+	if resp := readResponse(t, c, "join_room"); resp.Success {
+		t.Fatalf("unconfigured observer join must be rejected")
+	}
+
+	h.setConfiguredObservers("r1", []string{"watcher"})
+	c2 := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleRequest(c2, types.Request{
+		ID:   "join-2",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "watcher", "role": "observer"}),
+	})
+	if resp := readResponse(t, c2, "join_room"); !resp.Success {
+		t.Fatalf("configured observer should be allowed to join: %s", resp.Error)
+	}
+}
+
+func TestIsConfiguredObserver_CaseInsensitive(t *testing.T) {
+	h, _ := newTestHubClient()
+	h.setConfiguredObservers("r1", []string{"Watcher", "Eye"})
+	if !h.isConfiguredObserver("r1", "watcher") {
+		t.Error("configured observer match must be case-insensitive")
+	}
+	if !h.isConfiguredObserver("r1", "EYE") {
+		t.Error("second configured observer must match")
+	}
+	if h.isConfiguredObserver("r1", "stranger") {
+		t.Error("unconfigured name must not match")
+	}
+	// Replacing the set drops the old members.
+	h.setConfiguredObservers("r1", []string{"Eye"})
+	if h.isConfiguredObserver("r1", "watcher") {
+		t.Error("replaced set must no longer contain the old observer")
+	}
+}
+
+func TestHandleSetObservers_RequiresDesktopAuth(t *testing.T) {
+	h, c := newTestHubClient() // a plain (non-desktop) client
+	h.handleRequest(c, types.Request{
+		ID:   "set-obs",
+		Type: "set_observers",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"observers": []string{"watcher"}}),
+	})
+	if resp := readResponse(t, c, "set_observers"); resp.Success {
+		t.Fatalf("set_observers must require desktop authorization")
 	}
 }
 

@@ -274,6 +274,20 @@ func (c *HubClient) SetManager(room, managerAgent string) error {
 	return nil
 }
 
+// SetObservers configures the desktop-authorized observer set for a room (#17).
+// The hub rejects join_room with role "observer" for any agent not in this set.
+func (c *HubClient) SetObservers(room string, observers []string) error {
+	data, _ := json.Marshal(map[string][]string{"observers": observers})
+	resp, err := c.Send(types.Request{Type: "set_observers", Room: room, Data: data})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("set_observers failed: %s", resp.Error)
+	}
+	return nil
+}
+
 // JoinRoom joins a room.
 func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{

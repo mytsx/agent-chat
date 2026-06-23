@@ -277,6 +277,10 @@ func (a *App) subscribeExistingTeams() {
 		}
 		rooms = append(rooms, teamName)
 		a.syncHubManager(teamName, strings.TrimSpace(t.ManagerAgent))
+		// Re-authorize observers too (#17): roomObservers is in-memory hub state, so
+		// it must be re-synced on startup and after a hub-crash reconnect, exactly
+		// like the manager, or a reconnecting observer would be rejected at join.
+		a.syncHubObservers(teamName, observerNames(t))
 	}
 	if len(rooms) > 0 {
 		if err := client.Subscribe(rooms); err != nil {
@@ -292,6 +296,32 @@ func (a *App) syncHubManager(room, managerAgent string) {
 	}
 	if err := client.SetManager(room, strings.TrimSpace(managerAgent)); err != nil {
 		log.Printf("[HUB] set_manager failed for room=%s manager=%s: %v", room, managerAgent, err)
+	}
+}
+
+// observerNames returns the names of all agents in a team persisted with the
+// observer role (#17), used to sync the hub's desktop-authorized observer set.
+func observerNames(t team.Team) []string {
+	var names []string
+	for _, cfg := range t.Agents {
+		if strings.EqualFold(strings.TrimSpace(cfg.Role), team.RoleObserver) {
+			names = append(names, cfg.Name)
+		}
+	}
+	return names
+}
+
+// syncHubObservers tells the hub which agents are authorized observers for a room
+// (#17). The hub rejects a join_room with role "observer" for any agent not in this
+// set, so the desktop must sync it before an observer agent connects. The full list
+// is sent every time because the hub replaces (not merges) the set.
+func (a *App) syncHubObservers(room string, observers []string) {
+	client := a.hubClient.Load()
+	if client == nil || strings.TrimSpace(room) == "" {
+		return
+	}
+	if err := client.SetObservers(room, observers); err != nil {
+		log.Printf("[HUB] set_observers failed for room=%s count=%d: %v", room, len(observers), err)
 	}
 }
 
@@ -562,12 +592,20 @@ func (a *App) resolveManagerIntent(teamID, agentName, promptID string, persist b
 // resolveAgentMode determines a terminal's startup mode (#17): "manager",
 // "observer", or "" (a normal agent). It threads a single mode string — never
 // parallel bools — through CreateTerminal → composeAgentPrompt → ComposeStartupPrompt
-// so the two roles can't both be set. Manager takes precedence: SetManager/SetObserver
-// keep the two roles mutually exclusive in storage, so a conflict is unreachable
-// from the UI; if one is somehow set anyway, manager (the locked, routing role) wins.
-// Observer is read purely from the persisted AgentConfig.Role — the same value the
-// hub IsObserver gate and broadcastRoleLookup read — set via SetTeamObserver.
+// so the two roles can't both be set. Observer is read from the persisted
+// AgentConfig.Role — the same value the hub IsObserver gate and broadcastRoleLookup
+// read — set via SetTeamObserver.
+//
+// The EXPLICIT observer selection is checked FIRST, before resolveManagerIntent's
+// prompt-tag auto-promotion (Codex P2): otherwise an observer terminal whose user
+// also picked a manager-tagged prompt would auto-set the team manager, clear the
+// observer role, and start with manager routing authority instead of read-only.
+// SetManager/SetObserver keep the two roles mutually exclusive in storage, so a
+// genuine manager never carries the observer role here.
 func (a *App) resolveAgentMode(teamID, agentName, promptID string) (string, error) {
+	if a.isObserverAgent(teamID, agentName) {
+		return "observer", nil
+	}
 	isManager, err := a.resolveManagerIntent(teamID, agentName, promptID, true)
 	if err != nil {
 		return "", err
@@ -575,10 +613,32 @@ func (a *App) resolveAgentMode(teamID, agentName, promptID string) (string, erro
 	if isManager {
 		return "manager", nil
 	}
-	if a.isObserverAgent(teamID, agentName) {
-		return "observer", nil
-	}
 	return "", nil
+}
+
+// isIncompleteAgentConfig reports whether a persisted AgentConfig was never fully
+// created — it has no CLIType. SetTeamObserver pre-persists {Name, Role:observer}
+// before CreateTerminal supplies the rest; a failed create leaves such a phantom.
+// Every legitimately-created agent (including shells) has a non-empty CLIType.
+func isIncompleteAgentConfig(cfg team.AgentConfig) bool {
+	return strings.TrimSpace(cfg.CLIType) == ""
+}
+
+// restartWorkDir decides which directory a restarted terminal runs in. A
+// worktree-backed agent that is now a main-repo role (manager OR observer) restarts
+// in the recorded main repo (wtRepo); any other agent reuses its existing worktree
+// (wtDir). When there's no worktree, the captured workDir is kept as-is.
+func restartWorkDir(mainRepoRole bool, workDir, wtDir, wtRepo string) string {
+	if wtDir == "" {
+		return workDir
+	}
+	if mainRepoRole {
+		if wtRepo != "" {
+			return wtRepo
+		}
+		return workDir
+	}
+	return wtDir
 }
 
 // isObserverAgent reports whether the agent is persisted with the observer role in
@@ -655,15 +715,20 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	managerAgent := ""
+	var observers []string
 	if teamID != "" {
 		if t, err := a.teamStore.Get(teamID); err == nil {
 			managerAgent = strings.TrimSpace(t.ManagerAgent)
+			observers = observerNames(t)
 		}
 	}
 	if managerAgent == "" && isManager {
 		managerAgent = agentName
 	}
 	a.syncHubManager(teamName, managerAgent)
+	// Authorize the room's observers on the hub BEFORE the agent spawns, so an
+	// observer's join_room (sent a few seconds after spawn) passes the hub gate (#17).
+	a.syncHubObservers(teamName, observers)
 
 	// Subscribe to room events
 	if client := a.hubClient.Load(); client != nil {
@@ -805,21 +870,17 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 	// leave the user with no terminal. The team config was already captured correctly
 	// on the initial create, and CreateTerminal skips re-persisting a worktree path
 	// (see its persist block), so it isn't corrupted.
-	isManager := false
+	// Manager AND observer always run from the main repo, never a worktree (#17):
+	// without this an observer promoted from a worktree-backed agent would restart
+	// inside its stale worktree because workDir was captured as wtDir (Codex P2).
+	mainRepoRole := false
 	if teamID != "" {
 		if t, err := a.teamStore.Get(teamID); err == nil {
-			isManager = t.IsManagerAgent(agentName)
+			mainRepoRole = t.IsManagerAgent(agentName)
 		}
+		mainRepoRole = mainRepoRole || a.isObserverAgent(teamID, agentName)
 	}
-	if wtDir != "" {
-		if isManager {
-			if wtRepo != "" {
-				workDir = wtRepo
-			}
-		} else {
-			workDir = wtDir
-		}
-	}
+	workDir = restartWorkDir(mainRepoRole, workDir, wtDir, wtRepo)
 
 	// Close PTY but do NOT cleanup worktree (it will be reused)
 	if err := a.closeTerminalInternal(sessionID, false); err != nil {
@@ -876,6 +937,16 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 	results := make([]OpenTeamResult, 0, len(ordered))
 	for _, cfg := range ordered {
 		res := OpenTeamResult{AgentName: cfg.Name, CLIType: cfg.CLIType, SlotIndex: cfg.SlotIndex}
+		// Skip incomplete configs: SetTeamObserver pre-persists an AgentConfig with
+		// only Name+Role before CreateTerminal fills in CLIType/WorkDir. If that create
+		// failed, the team is left with a phantom (empty CLIType); reopening it would
+		// otherwise launch an unintended login shell in its slot (Codex P2).
+		if isIncompleteAgentConfig(cfg) {
+			res.Error = "eksik yapılandırma (CLI tipi yok) — atlandı"
+			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s eksik config (CLIType boş), atlandı", cfg.Name)
+			results = append(results, res)
+			continue
+		}
 		if capacity >= 0 && cfg.SlotIndex >= capacity {
 			res.Error = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
@@ -1496,7 +1567,10 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	if err != nil {
 		return team.Team{}, err
 	}
+	// SetObserver may have cleared the manager (an agent is manager XOR observer);
+	// re-sync both so the hub's manager lock and observer authorization match.
 	a.syncHubManager(updated.Name, strings.TrimSpace(updated.ManagerAgent))
+	a.syncHubObservers(updated.Name, observerNames(updated))
 	return updated, nil
 }
 

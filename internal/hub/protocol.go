@@ -18,6 +18,8 @@ func (h *Hub) handleRequest(c *Client, req types.Request) {
 		h.handleIdentify(c, req)
 	case "set_manager":
 		h.handleSetManager(c, req)
+	case "set_observers":
+		h.handleSetObservers(c, req)
 	case "subscribe":
 		h.handleSubscribe(c, req)
 	case "join_room":
@@ -161,6 +163,40 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
 }
 
+// handleSetObservers replaces the desktop-authorized observer set for a room (#17).
+// Only the authorized desktop may call it (mirrors handleSetManager) — it is the
+// authority that decides who is a read-only observer, so a CLI agent can't grant
+// itself observer (and thus read-all) access.
+func (h *Hub) handleSetObservers(c *Client, req types.Request) {
+	if !c.isDesktopAuthorized() {
+		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi observer atayabilir")
+		return
+	}
+
+	var data struct {
+		Observers []string `json:"observers"`
+	}
+	if err := json.Unmarshal(req.Data, &data); err != nil {
+		c.sendError(req.ID, req.Type, "invalid set_observers payload")
+		return
+	}
+	for _, name := range data.Observers {
+		if n := strings.TrimSpace(name); n != "" {
+			if err := validation.ValidateName(n); err != nil {
+				c.sendError(req.ID, req.Type, err.Error())
+				return
+			}
+		}
+	}
+
+	room := h.resolveRoom(req.Room)
+	h.setConfiguredObservers(room, data.Observers)
+
+	text := fmt.Sprintf("'%s' odası için %d observer atandı.", room, len(data.Observers))
+	respData, _ := json.Marshal(map[string]string{"text": text})
+	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+}
+
 func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	var data struct {
 		Rooms []string `json:"rooms"`
@@ -238,6 +274,13 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("manager rolü yalnızca '%s' agent'ına atanabilir", configuredManager))
 			return
 		}
+	}
+	// Observer is desktop-gated like manager (#17 P1): role "observer" grants read-all
+	// transcript access, so a client must not be able to self-assert it. Only an agent
+	// the desktop registered as an observer for this room may join with that role.
+	if role == "observer" && !h.isConfiguredObserver(room, data.AgentName) {
+		c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
+		return
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)

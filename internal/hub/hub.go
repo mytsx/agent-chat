@@ -27,7 +27,11 @@ type Hub struct {
 	clients     map[*Client]bool
 	subs        map[string]map[*Client]bool // room → subscribed clients
 	roomManager map[string]string           // room → configured manager agent name
-	defaultRoom string
+	// roomObservers is the desktop-authorized observer set per room (#17). join_room
+	// with role "observer" is rejected unless the agent is in this set, mirroring the
+	// manager gate — so a self-asserted observer can't gain read-all transcript access.
+	roomObservers map[string]map[string]bool
+	defaultRoom   string
 	// desktopAuthToken is a shared secret set by the desktop app when spawning the hub.
 	// It is required to identify as client_type=desktop.
 	desktopAuthToken string
@@ -87,6 +91,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		clients:          make(map[*Client]bool),
 		subs:             make(map[string]map[*Client]bool),
 		roomManager:      make(map[string]string),
+		roomObservers:    make(map[string]map[string]bool),
 		defaultRoom:      defaultRoom,
 		desktopAuthToken: desktopAuthToken,
 		register:         make(chan *Client),
@@ -338,6 +343,42 @@ func (h *Hub) getConfiguredManager(room string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.roomManager[room]
+}
+
+// setConfiguredObservers replaces the desktop-authorized observer set for a room
+// (#17). An empty list clears the set. Names are stored verbatim; membership is
+// matched case-insensitively by isConfiguredObserver.
+func (h *Hub) setConfiguredObservers(room string, observers []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(observers) == 0 {
+		delete(h.roomObservers, room)
+		return
+	}
+	set := make(map[string]bool, len(observers))
+	for _, name := range observers {
+		if n := strings.TrimSpace(name); n != "" {
+			set[n] = true
+		}
+	}
+	if len(set) == 0 {
+		delete(h.roomObservers, room)
+		return
+	}
+	h.roomObservers[room] = set
+}
+
+// isConfiguredObserver reports whether agentName is a desktop-authorized observer
+// for the room, compared case-insensitively (sameAgentName) like the manager gate.
+func (h *Hub) isConfiguredObserver(room, agentName string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for name := range h.roomObservers[room] {
+		if sameAgentName(name, agentName) {
+			return true
+		}
+	}
+	return false
 }
 
 // broadcastEvent sends an event to all subscribers of a room.
