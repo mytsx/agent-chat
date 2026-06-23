@@ -22,6 +22,11 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const fitRef = useRef<FitAddon | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [voiceError, setVoiceError] = useState<string>("");
+  // recordingRef tracks "are we currently recording" synchronously. The push-to-
+  // talk handlers must NOT guard on voiceState — that's a stale closure captured at
+  // render time, so a mouseup arriving before the "recording" event re-renders
+  // would read "idle" and skip StopVoiceCapture, leaving ffmpeg recording forever.
+  const recordingRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -166,14 +171,20 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // so a drag-off doesn't leave the mic recording. Backend enforces the single
   // active-recording lock; a rejected Start just shows an error state.
   const startVoice = () => {
-    if (voiceState === "recording" || voiceState === "transcribing") return;
+    if (recordingRef.current) return;
+    recordingRef.current = true;
+    setVoiceState("recording"); // optimistic — turn red instantly, don't wait for the event
+    setVoiceError("");
     StartVoiceCapture(sessionID).catch((e) => {
+      recordingRef.current = false;
       setVoiceState("error");
       setVoiceError(String(e));
     });
   };
   const stopVoice = () => {
-    if (voiceState !== "recording") return;
+    if (!recordingRef.current) return; // ref, not voiceState — avoids the stale-closure skip
+    recordingRef.current = false;
+    setVoiceState("transcribing");
     StopVoiceCapture(sessionID).catch((e) => {
       setVoiceState("error");
       setVoiceError(String(e));

@@ -2025,25 +2025,30 @@ func (a *App) emitVoiceState(sessionID, state, message string) {
 // down). Only one capture runs at a time (single mic): a second Start while one is
 // active returns an error the frontend surfaces. Emits voice:state events.
 func (a *App) StartVoiceCapture(sessionID string) error {
+	log.Printf("[VOICE] StartVoiceCapture session=%s", sessionID)
 	a.voiceMu.Lock()
 	if a.activeRecorder != nil {
 		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StartVoiceCapture reddedildi (zaten kayıt var) session=%s", sessionID)
 		return fmt.Errorf("⚠️ Zaten kayıt sürüyor")
 	}
 	rec, err := a.newVoiceRecorder()
 	if err != nil {
 		a.voiceMu.Unlock()
+		log.Printf("[VOICE] recorder oluşturulamadı session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", err.Error())
 		return err
 	}
 	if err := rec.Start(a.ctx); err != nil {
 		a.voiceMu.Unlock()
+		log.Printf("[VOICE] recorder Start hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", err.Error())
 		return err
 	}
 	a.activeRecorder = rec
 	a.activeVoiceSession = sessionID
 	a.voiceMu.Unlock()
+	log.Printf("[VOICE] kayıt başladı session=%s", sessionID)
 	a.emitVoiceState(sessionID, "recording", "")
 	return nil
 }
@@ -2055,9 +2060,11 @@ func (a *App) StartVoiceCapture(sessionID string) error {
 // detached under the lock and released before the network call, so another panel
 // may start recording while this transcript uploads.
 func (a *App) StopVoiceCapture(sessionID string) error {
+	log.Printf("[VOICE] StopVoiceCapture session=%s", sessionID)
 	a.voiceMu.Lock()
 	if a.activeRecorder == nil || a.activeVoiceSession != sessionID {
 		a.voiceMu.Unlock()
+		log.Printf("[VOICE] StopVoiceCapture no-op (aktif kayıt yok ya da farklı session) session=%s active=%s", sessionID, a.activeVoiceSession)
 		return nil
 	}
 	rec := a.activeRecorder
@@ -2067,9 +2074,11 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 
 	wav, err := rec.Stop()
 	if err != nil {
+		log.Printf("[VOICE] kayıt durdurma/okuma hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", "⚠️ Kayıt okunamadı: "+err.Error())
 		return err
 	}
+	log.Printf("[VOICE] kayıt durdu session=%s wavBytes=%d", sessionID, len(wav))
 
 	a.emitVoiceState(sessionID, "transcribing", "")
 	base := a.ctx
@@ -2080,9 +2089,11 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	defer cancel()
 	text, err := a.voiceTranscribe(ctx, wav)
 	if err != nil {
+		log.Printf("[VOICE] transkripsiyon hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", err.Error())
 		return err
 	}
+	log.Printf("[VOICE] transkript session=%s len=%d", sessionID, len(text))
 	if strings.TrimSpace(text) == "" {
 		a.emitVoiceState(sessionID, "idle", "")
 		return nil

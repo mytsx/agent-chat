@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -44,6 +45,7 @@ type ffmpegRecorder struct {
 	deviceSpec string
 	outPath    string
 	cmd        *exec.Cmd
+	stderr     bytes.Buffer
 }
 
 // NewFFmpegRecorder returns a Recorder writing to a unique temp WAV under dataDir.
@@ -59,6 +61,10 @@ func NewFFmpegRecorder(dataDir, deviceSpec string) (Recorder, error) {
 
 func (r *ffmpegRecorder) Start(ctx context.Context) error {
 	r.cmd = exec.Command("ffmpeg", ffmpegArgs(r.deviceSpec, r.outPath)...)
+	// Capture ffmpeg's stderr so a failed capture (mic permission denied, bad
+	// device index) surfaces a real message instead of vanishing — otherwise an
+	// empty/missing WAV only shows up later as an opaque read error.
+	r.cmd.Stderr = &r.stderr
 	return r.cmd.Start()
 }
 
@@ -80,5 +86,20 @@ func (r *ffmpegRecorder) Stop() ([]byte, error) {
 		<-done
 	}
 	defer os.Remove(r.outPath)
-	return os.ReadFile(r.outPath)
+	wav, err := os.ReadFile(r.outPath)
+	if err != nil {
+		return nil, fmt.Errorf("WAV okunamadı (%v) — ffmpeg: %s", err, tail(r.stderr.String(), 400))
+	}
+	if len(wav) <= 44 { // 44 bytes = empty WAV header, no audio captured
+		return nil, fmt.Errorf("ses yakalanamadı (boş kayıt) — ffmpeg: %s", tail(r.stderr.String(), 400))
+	}
+	return wav, nil
+}
+
+// tail returns the last n bytes of s (for surfacing ffmpeg's most recent stderr).
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
 }
