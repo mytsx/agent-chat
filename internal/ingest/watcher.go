@@ -84,12 +84,15 @@ func New() *Manager {
 // exited is a channel that closes when the terminal's PTY process dies (e.g. the
 // user typed /exit inside the CLI) so the watcher stops even without an explicit
 // StopSession; nil means "no PTY-death signal" (#65).
-// seedAtEnd, when true, makes the watcher start ingesting from the END of the
-// discovered file instead of from offset 0. Used on RESUME (#40): the CLI is
-// continuing an existing ID-keyed transcript that already holds the prior
-// conversation, so reading from 0 would re-log every past user message into the
-// room. Seeding past the existing content ingests only messages typed AFTER resume.
-func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), seedAtEnd bool) {
+// resume, when non-nil, makes the watcher SKIP content already present in the
+// CLI's existing transcript on RESUME (#40): a CLI that appends to its prior
+// ID-keyed file (Copilot) would otherwise be read from offset 0 and re-log every
+// past user message into the room. The seed is applied ONLY when the discovered
+// file is exactly resume.Path, so a CLI that resumes into a NEW file (Claude/
+// Codex) is unaffected and starts fresh. resume.Cur is snapshotted at spawn —
+// before the resumed CLI writes — so a prompt typed right after resume (which
+// lands past the snapshot) is still ingested, not skipped (Codex P2-round2).
+func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), resume *ResumeSeed) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
@@ -102,10 +105,10 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
-	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit, onSessionID, seedAtEnd)
+	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit, onSessionID, resume)
 }
 
-func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), seedAtEnd bool) {
+func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), resume *ResumeSeed) {
 	defer close(s.done)  // registered first → runs LAST (after finish), so a StopAll
 	defer m.finish(s.id) //   waiter sees a fully cleaned-up session.
 	ticker := time.NewTicker(pollInterval)
@@ -148,15 +151,13 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 					onSessionID(id)
 				}
 			}
-			// #40 resume (Codex P1): the discovered file already holds the prior
-			// conversation. Seed the cursor past everything currently in it — a
-			// throwaway parse returns the end cursor — so only messages typed AFTER
-			// resume are ingested, not the whole replayed transcript. final carries
-			// the consumed offset/count even on a partial-read error, so it is safe to
-			// adopt unconditionally.
-			if seedAtEnd {
-				_, final, _ := ad.ParseNewUserMessages(path, Cursor{})
-				cur = final
+			// #40 resume (Codex P1): if this is the SAME transcript the resumed CLI is
+			// appending to (Copilot), start past the content that existed at spawn so
+			// the prior conversation isn't re-logged. Applied only on an exact path
+			// match — a resume into a NEW file (Claude/Codex) discovers a different
+			// path and is left at offset 0 (a fresh file has nothing to skip).
+			if resume != nil && path == resume.Path {
+				cur = resume.Cur
 			}
 		}
 		// Gate only the poll/emit on hub readiness: don't advance the cursor (drop a

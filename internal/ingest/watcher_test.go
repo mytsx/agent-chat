@@ -119,7 +119,7 @@ func TestStartSession_FiresOnSessionID(t *testing.T) {
 			case got <- id:
 			default:
 			}
-		}, false)
+		}, nil)
 	defer m.StopSession("s1")
 
 	select {
@@ -132,37 +132,90 @@ func TestStartSession_FiresOnSessionID(t *testing.T) {
 	}
 }
 
-// On RESUME (seedAtEnd=true) the watcher must skip everything already in the
-// discovered transcript — the prior conversation the resumed CLI is continuing —
-// and ingest only messages appended AFTER resume. Without this, the first poll
-// re-logs the entire history into the room (#40, Codex P1).
-func TestStartSession_SeedAtEnd_SkipsExistingTranscript(t *testing.T) {
-	m := New()
-	// batch[0] = the pre-existing transcript (must be skipped via the seed parse);
-	// batch[1] = a message appended after resume (must be emitted).
-	ad := &fakeAdapter{batches: [][]ParsedMessage{
-		{pm("old-1", 1), pm("old-2", 2)},
-		{pm("new-after-resume", 3)},
-	}}
-	var mu sync.Mutex
-	var got []string
-	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil, true)
-	defer m.StopSession("s1")
+// offsetAdapter parses by byte offset like the real JSONL adapters: it returns
+// only messages whose After.Offset is past the current cursor, so a ResumeSeed
+// cursor actually gates what gets emitted (the fakeAdapter ignores the cursor).
+type offsetAdapter struct {
+	path string
+	msgs []ParsedMessage // After.Offset strictly increasing
+}
 
+func (a *offsetAdapter) DiscoverFile(string, int64, func(string) bool) (string, error) {
+	return a.path, nil
+}
+func (a *offsetAdapter) SessionID(string) string { return "" }
+func (a *offsetAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
+	final := cur
+	var out []ParsedMessage
+	for _, m := range a.msgs {
+		if m.After.Offset > cur.Offset {
+			out = append(out, m)
+		}
+		if m.After.Offset > final.Offset {
+			final = m.After
+		}
+	}
+	return out, final, nil
+}
+
+func waitForEmits(t *testing.T, got *[]string, mu *sync.Mutex, n int) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		n := len(got)
+		c := len(*got)
 		mu.Unlock()
-		if n >= 1 {
-			break
+		if c >= n {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// On RESUME the watcher must skip content already in the SAME transcript the CLI
+// appends to (Copilot): a ResumeSeed whose Path matches the discovered file starts
+// ingestion past the snapshotted offset, so the prior conversation is not re-logged
+// — only messages appended after the seed are emitted (#40, Codex P1).
+func TestStartSession_ResumeSeed_SkipsExistingOnSameFile(t *testing.T) {
+	m := New()
+	ad := &offsetAdapter{path: "events.jsonl", msgs: []ParsedMessage{
+		pm("old-1", 1), pm("old-2", 2), pm("new-after-resume", 3),
+	}}
+	var mu sync.Mutex
+	var got []string
+	// Seed past offset 2 (old-1, old-2) on the SAME discovered path.
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+		&ResumeSeed{Path: "events.jsonl", Cur: Cursor{Offset: 2}})
+	defer m.StopSession("s1")
+
+	waitForEmits(t, &got, &mu, 1)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 || got[0] != "new-after-resume" {
-		t.Fatalf("seedAtEnd: emitted %v, want only [new-after-resume] (pre-existing transcript must be skipped)", got)
+		t.Fatalf("resume seed: emitted %v, want only [new-after-resume] (pre-resume transcript must be skipped)", got)
+	}
+}
+
+// A ResumeSeed for a DIFFERENT path than the one discovered must be ignored: a CLI
+// that resumes into a NEW file (Claude/Codex) has a fresh transcript with nothing
+// to skip, so every message is ingested from offset 0 (#40, Codex P2-round2).
+func TestStartSession_ResumeSeed_IgnoredOnDifferentFile(t *testing.T) {
+	m := New()
+	ad := &offsetAdapter{path: "new-file.jsonl", msgs: []ParsedMessage{
+		pm("m1", 1), pm("m2", 2), pm("m3", 3),
+	}}
+	var mu sync.Mutex
+	var got []string
+	// Seed references the OLD file; discovery returns a different (new) file.
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+		&ResumeSeed{Path: "old-file.jsonl", Cur: Cursor{Offset: 2}})
+	defer m.StopSession("s1")
+
+	waitForEmits(t, &got, &mu, 3)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("resume seed on different file: emitted %v, want all 3 (new file has nothing to skip)", got)
 	}
 }
 

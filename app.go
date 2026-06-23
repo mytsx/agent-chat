@@ -963,6 +963,14 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// ready: only ingest while the hub is connected, so a prompt parsed while the
 		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
 		ready := func() bool { return a.hubClient.Load() != nil }
+		// #40: on resume, skip the prior transcript a same-file CLI (Copilot) appends
+		// to — snapshotted now, before the CLI writes, so a prompt typed right after
+		// resume isn't skipped. nil for fresh creates and for CLIs that resume into a
+		// new file (Claude/Codex), which need no seed.
+		var resumeSeed *ingest.ResumeSeed
+		if resuming {
+			resumeSeed = ingest.ResumeSeedFor(cliType, resumeID)
+		}
 		// exited closes when this terminal's CLI process dies (incl. an in-CLI /exit
 		// with no app-side close), so the watcher stops and frees its file claim (#65).
 		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, a.ptyManager.SessionDone(sessionID), func(content, ts string) bool {
@@ -990,7 +998,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				"sessionID":    sessionID,
 				"cliSessionID": id,
 			})
-		}, resuming)
+		}, resumeSeed)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
 			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
