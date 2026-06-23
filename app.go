@@ -30,6 +30,7 @@ import (
 	"desktop/internal/team"
 	"desktop/internal/types"
 	"desktop/internal/validation"
+	"desktop/internal/voice"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -69,6 +70,19 @@ type App struct {
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
 	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
 	promptLogN atomic.Int64
+	// Voice/STT state (#16). voiceMu guards the single active microphone capture —
+	// only one panel records at a time (one mic). activeRecorder/activeVoiceSession
+	// are non-nil exactly while a capture is in flight; transcription runs after the
+	// recorder is detached, so panel B can record while panel A's audio uploads.
+	voiceMu            sync.Mutex
+	activeRecorder     voice.Recorder
+	activeVoiceSession string
+	// Injectable seams (orchestrator SendFunc pattern), defaulted in startup(),
+	// overridden in tests so the flow runs with no ffmpeg/network/Wails runtime.
+	newVoiceRecorder func() (voice.Recorder, error)
+	voiceTranscribe  func(ctx context.Context, wav []byte) (string, error)
+	voiceInject      func(sessionID, text string, submit bool) error
+	voiceEmit        func(event string, payload interface{})
 }
 
 // NewApp creates a new App application struct
@@ -102,6 +116,26 @@ func (a *App) startup(ctx context.Context) {
 			"prompt":    prompt,
 		})
 	})
+
+	// Voice seam defaults (#16). Tests replace these; production uses ffmpeg +
+	// Whisper + the real PTY injection and Wails event bus.
+	a.newVoiceRecorder = func() (voice.Recorder, error) {
+		return voice.NewFFmpegRecorder(a.dataDir, ":0")
+	}
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) {
+		cfg, err := voice.LoadConfig(a.dataDir)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(cfg.OpenAIAPIKey) == "" {
+			return "", fmt.Errorf("⚠️ OpenAI API anahtarı yok — Ayarlar'dan girin")
+		}
+		return voice.NewWhisperClient(cfg.OpenAIAPIKey).Transcribe(ctx, wav)
+	}
+	a.voiceInject = a.ptyManager.InjectText
+	a.voiceEmit = func(event string, payload interface{}) {
+		runtime.EventsEmit(a.ctx, event, payload)
+	}
 
 	// Initialize stores
 	a.promptStore, _ = prompt.NewStore(a.dataDir)
@@ -1977,4 +2011,87 @@ func (a *App) WatchChatDir(room string) error {
 		return fmt.Errorf("hub not connected")
 	}
 	return client.Subscribe([]string{room})
+}
+
+// emitVoiceState pushes a voice:state:<sessionID> event for the panel's mic UI.
+func (a *App) emitVoiceState(sessionID, state, message string) {
+	a.voiceEmit("voice:state:"+sessionID, map[string]string{
+		"state":   state,
+		"message": message,
+	})
+}
+
+// StartVoiceCapture begins recording the microphone for a session (push-to-talk
+// down). Only one capture runs at a time (single mic): a second Start while one is
+// active returns an error the frontend surfaces. Emits voice:state events.
+func (a *App) StartVoiceCapture(sessionID string) error {
+	a.voiceMu.Lock()
+	if a.activeRecorder != nil {
+		a.voiceMu.Unlock()
+		return fmt.Errorf("⚠️ Zaten kayıt sürüyor")
+	}
+	rec, err := a.newVoiceRecorder()
+	if err != nil {
+		a.voiceMu.Unlock()
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	if err := rec.Start(a.ctx); err != nil {
+		a.voiceMu.Unlock()
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	a.activeRecorder = rec
+	a.activeVoiceSession = sessionID
+	a.voiceMu.Unlock()
+	a.emitVoiceState(sessionID, "recording", "")
+	return nil
+}
+
+// StopVoiceCapture ends recording for a session (push-to-talk up), transcribes the
+// audio, and injects the transcript into that session's PTY input line WITHOUT
+// submitting (autosubmit off — the user reviews and presses Enter). A Stop for a
+// session that isn't the active recording one is a silent no-op. The recorder is
+// detached under the lock and released before the network call, so another panel
+// may start recording while this transcript uploads.
+func (a *App) StopVoiceCapture(sessionID string) error {
+	a.voiceMu.Lock()
+	if a.activeRecorder == nil || a.activeVoiceSession != sessionID {
+		a.voiceMu.Unlock()
+		return nil
+	}
+	rec := a.activeRecorder
+	a.activeRecorder = nil
+	a.activeVoiceSession = ""
+	a.voiceMu.Unlock()
+
+	wav, err := rec.Stop()
+	if err != nil {
+		a.emitVoiceState(sessionID, "error", "⚠️ Kayıt okunamadı: "+err.Error())
+		return err
+	}
+
+	a.emitVoiceState(sessionID, "transcribing", "")
+	base := a.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 30*time.Second)
+	defer cancel()
+	text, err := a.voiceTranscribe(ctx, wav)
+	if err != nil {
+		a.emitVoiceState(sessionID, "error", err.Error())
+		return err
+	}
+	if strings.TrimSpace(text) == "" {
+		a.emitVoiceState(sessionID, "idle", "")
+		return nil
+	}
+	if err := a.voiceInject(sessionID, text, false); err != nil {
+		a.emitVoiceState(sessionID, "error", "⚠️ Enjeksiyon hatası: "+err.Error())
+		return err
+	}
+	a.voiceEmit("voice:transcript:"+sessionID, text)
+	a.emitVoiceState(sessionID, "idle", "")
+	return nil
 }
