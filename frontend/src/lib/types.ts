@@ -66,6 +66,7 @@ export interface RoomSummary {
   name: string;
   message_count: number;
   agents: Record<string, Agent>;
+  historical_agents: string[];
   last_activity: string;
   is_default: boolean;
 }

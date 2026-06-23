@@ -77,6 +77,15 @@ function RoomRow({
               {n}
             </span>
           ))
+        ) : room.historical_agents?.length > 0 ? (
+          <span className="room-historical">
+            <span className="room-historical-label">geçmişte bulunmuş:</span>
+            {room.historical_agents.map((n) => (
+              <span key={n} className="room-agent-badge room-agent-badge-historical">
+                {n}
+              </span>
+            ))}
+          </span>
         ) : (
           <span className="room-agent-empty">no agents (archived room)</span>
         )}

@@ -1688,3 +1688,8 @@ html, body, #root {
   gap: 4px;
   padding: 6px 0;
 }
+
+/* Room Browser v2 — geçmişte bulunmuş agent rozetleri (#18) */
+.room-historical { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.room-historical-label { font-size: 11px; opacity: 0.6; margin-right: 2px; }
+.room-agent-badge-historical { opacity: 0.7; border-style: dashed; }
