@@ -938,8 +938,11 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 	}
 
 	room := h.resolveRoom(req.Room)
-	roomState := h.getOrCreateRoom(room)
-	agents := roomState.GetAgents()
+	roomState := h.getRoom(room)
+	agents := map[string]types.Agent{}
+	if roomState != nil {
+		agents = roomState.GetAgents()
+	}
 
 	respData, _ := json.Marshal(map[string]any{"agents": agents})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
@@ -953,8 +956,11 @@ func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
 	}
 
 	room := h.resolveRoom(req.Room)
-	roomState := h.getOrCreateRoom(room)
-	messages := roomState.GetMessages()
+	roomState := h.getRoom(room)
+	messages := []types.Message{}
+	if roomState != nil {
+		messages = roomState.GetMessages()
+	}
 
 	respData, _ := json.Marshal(map[string]any{"messages": messages})
 	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
