@@ -2095,3 +2095,35 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	a.emitVoiceState(sessionID, "idle", "")
 	return nil
 }
+
+// VoiceStatus is the Settings-panel view of voice config. The real API key never
+// crosses to the frontend — only whether one is set, a short hint (last 4 chars),
+// and whether ffmpeg is available.
+type VoiceStatus struct {
+	HasKey      bool   `json:"hasKey"`
+	KeyHint     string `json:"keyHint"`
+	FFmpegFound bool   `json:"ffmpegFound"`
+}
+
+// GetVoiceStatus reports voice config state for the Settings panel (no raw key).
+func (a *App) GetVoiceStatus() (VoiceStatus, error) {
+	cfg, err := voice.LoadConfig(a.dataDir)
+	if err != nil {
+		return VoiceStatus{}, err
+	}
+	key := strings.TrimSpace(cfg.OpenAIAPIKey)
+	st := VoiceStatus{HasKey: key != "", FFmpegFound: voice.FFmpegAvailable()}
+	if r := []rune(key); len(r) > 0 {
+		last := r
+		if len(r) > 4 {
+			last = r[len(r)-4:]
+		}
+		st.KeyHint = "…" + string(last)
+	}
+	return st, nil
+}
+
+// SetVoiceConfig persists the OpenAI API key (set-only). An empty string clears it.
+func (a *App) SetVoiceConfig(apiKey string) error {
+	return voice.SaveConfig(a.dataDir, voice.Config{OpenAIAPIKey: strings.TrimSpace(apiKey)})
+}

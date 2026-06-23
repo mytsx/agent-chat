@@ -99,3 +99,47 @@ func TestStopVoiceCaptureEmptyTranscriptDoesNotInject(t *testing.T) {
 		t.Errorf("empty transcript must not inject; got %d", n)
 	}
 }
+
+func TestGetVoiceStatusMasksKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := voice.SaveConfig(dir, voice.Config{OpenAIAPIKey: "sk-abcd1234wxyz"}); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{dataDir: dir}
+	st, err := a.GetVoiceStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.HasKey {
+		t.Error("HasKey should be true")
+	}
+	if st.KeyHint != "…wxyz" {
+		t.Errorf("KeyHint = %q, want …wxyz", st.KeyHint)
+	}
+}
+
+func TestGetVoiceStatusNoKey(t *testing.T) {
+	a := &App{dataDir: t.TempDir()}
+	st, err := a.GetVoiceStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.HasKey {
+		t.Error("HasKey should be false with no key")
+	}
+	if st.KeyHint != "" {
+		t.Errorf("KeyHint = %q, want empty", st.KeyHint)
+	}
+}
+
+func TestSetVoiceConfigPersistsTrimmed(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{dataDir: dir}
+	if err := a.SetVoiceConfig("  sk-trim-me  "); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := voice.LoadConfig(dir)
+	if cfg.OpenAIAPIKey != "sk-trim-me" {
+		t.Errorf("key = %q, want sk-trim-me (trimmed)", cfg.OpenAIAPIKey)
+	}
+}
