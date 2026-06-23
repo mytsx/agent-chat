@@ -146,7 +146,7 @@ func TestClaudeDiscover_PicksNewestAfterSpawn(t *testing.T) {
 	os.Chtimes(old, past, past)
 	os.Chtimes(newer, future, future)
 
-	got, err := claudeAdapter{}.DiscoverFile(cwd, spawn.UnixNano())
+	got, err := claudeAdapter{}.DiscoverFile(cwd, spawn.UnixNano(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestClaudeDiscover_PicksNewestAfterSpawn(t *testing.T) {
 func TestClaudeDiscover_MissingDirReturnsEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	got, err := claudeAdapter{}.DiscoverFile("/tmp/never", time.Now().UnixNano())
+	got, err := claudeAdapter{}.DiscoverFile("/tmp/never", time.Now().UnixNano(), nil)
 	if err != nil || got != "" {
 		t.Fatalf("missing dir → (%q, %v), want (\"\", nil)", got, err)
 	}

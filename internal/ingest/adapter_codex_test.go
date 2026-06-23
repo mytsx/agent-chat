@@ -25,7 +25,7 @@ func TestCodexDiscover_MatchesByCwd(t *testing.T) {
 	os.Chtimes(mine, spawn.Add(time.Second), spawn.Add(time.Second))
 	os.Chtimes(other, spawn.Add(time.Hour), spawn.Add(time.Hour)) // newer but wrong cwd
 
-	got, err := codexAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano())
+	got, err := codexAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

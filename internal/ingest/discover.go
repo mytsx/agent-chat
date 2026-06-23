@@ -14,9 +14,10 @@ import (
 const discoverSkew = 2 * time.Second
 
 // newestJSONLAfter returns the most-recently-modified file in dir matching glob
-// whose modtime is at/after spawn (minus a small skew), or "" if none. A missing
-// dir yields ("", nil).
-func newestJSONLAfter(dir, glob string, spawnedAtUnixNano int64) (string, error) {
+// whose modtime is at/after spawn (minus a small skew) and which claimed reports
+// is not already locked by another watcher, or "" if none. A missing dir yields
+// ("", nil). A nil claimed treats every candidate as unclaimed.
+func newestJSONLAfter(dir, glob string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -41,8 +42,12 @@ func newestJSONLAfter(dir, glob string, spawnedAtUnixNano int64) (string, error)
 		if info.ModTime().Before(cutoff) {
 			continue
 		}
+		p := filepath.Join(dir, e.Name())
+		if claimed != nil && claimed(p) {
+			continue // already locked by another terminal's watcher (#65)
+		}
 		if best == "" || info.ModTime().After(bestMod) {
-			best, bestMod = filepath.Join(dir, e.Name()), info.ModTime()
+			best, bestMod = p, info.ModTime()
 		}
 	}
 	return best, nil

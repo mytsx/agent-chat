@@ -27,28 +27,29 @@ type codexLine struct {
 	} `json:"payload"` // new format
 }
 
-func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
+func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []UserMessage
+	var out []ParsedMessage
 	for _, line := range lines {
 		var cl codexLine
-		if json.Unmarshal(line, &cl) != nil {
+		if json.Unmarshal(line.Data, &cl) != nil {
 			continue
 		}
+		after := Cursor{Offset: line.OffsetAfter}
 		switch {
 		case cl.Type == "event_msg" && cl.Payload.Type == "user_message" && cl.Payload.Message != "":
-			out = append(out, UserMessage{Content: cl.Payload.Message, Timestamp: cl.Timestamp})
+			out = append(out, ParsedMessage{Content: cl.Payload.Message, Timestamp: cl.Timestamp, After: after})
 		case cl.Type == "message" && cl.Role == "user":
 			var s string
 			if json.Unmarshal(cl.Content, &s) == nil && s != "" {
-				out = append(out, UserMessage{Content: s, Timestamp: cl.Timestamp})
+				out = append(out, ParsedMessage{Content: s, Timestamp: cl.Timestamp, After: after})
 			}
 		}
 	}
 	return out, Cursor{Offset: next}, err
 }
 
-func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
+func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -56,13 +57,15 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, e
 	base := filepath.Join(home, ".codex", "sessions")
 	spawn := time.Unix(0, spawnedAtUnixNano)
 	cutoff := spawn.Add(-discoverSkew)
-	// Check the spawn day and the previous day (around-midnight spawns). Among the
+	// Check the spawn day plus the adjacent days: the previous day for a just-after-
+	// midnight spawn whose file the CLI dated to the prior day, and the NEXT day
+	// because spawnedAt is captured before pty.Start, so a just-before-midnight spawn
+	// can have its rollout created under tomorrow's dir (#65 / Codex P3). Among the
 	// newest-after-spawn rollouts, pick the one whose session_meta.cwd matches THIS
-	// terminal's cwd — otherwise a concurrent Codex session in another dir, written
-	// just after spawn, could be ingested under the wrong agent (#65 / Codex P2).
+	// terminal and isn't already locked by another watcher (#65 / Codex P2).
 	var best string
 	var bestMod time.Time
-	for _, day := range []time.Time{spawn, spawn.Add(-24 * time.Hour)} {
+	for _, day := range []time.Time{spawn, spawn.Add(-24 * time.Hour), spawn.Add(24 * time.Hour)} {
 		dir := filepath.Join(base, day.Format("2006"), day.Format("01"), day.Format("02"))
 		entries, derr := os.ReadDir(dir)
 		if derr != nil {
@@ -82,6 +85,9 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, e
 			p := filepath.Join(dir, e.Name())
 			if codexFileCwd(p) != cwd {
 				continue
+			}
+			if claimed != nil && claimed(p) {
+				continue // another terminal's watcher already locked this file (#65)
 			}
 			if best == "" || info.ModTime().After(bestMod) {
 				best, bestMod = p, info.ModTime()

@@ -940,15 +940,19 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// ready: only ingest while the hub is connected, so a prompt parsed while the
 		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
 		ready := func() bool { return a.hubClient.Load() != nil }
-		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, func(content, ts string) {
-			if client := a.hubClient.Load(); client != nil {
-				// Convert the CLI file's RFC3339/UTC timestamp into the hub's canonical
-				// local layout so the ingested message sorts correctly in the
-				// lexically-ordered transcript (#65).
-				if err := client.LogMessage(room, agent, content, types.NormalizeTimestamp(ts)); err != nil {
-					log.Printf("[INGEST] mesaj loglanamadı (agent=%s): %v", agent, err)
-				}
+		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, func(content, ts string) bool {
+			client := a.hubClient.Load()
+			if client == nil {
+				return false // hub down — keep the cursor, retry next tick (#65)
 			}
+			// Convert the CLI file's RFC3339/UTC timestamp into the hub's canonical
+			// local layout so the ingested message sorts correctly in the
+			// lexically-ordered transcript (#65).
+			if err := client.LogMessage(room, agent, content, types.NormalizeTimestamp(ts)); err != nil {
+				log.Printf("[INGEST] mesaj loglanamadı (agent=%s): %v", agent, err)
+				return false // delivery failed — don't advance the cursor past this message
+			}
+			return true
 		})
 		// Copilot's startup prompt is the -i launch arg (recorded as its first user
 		// message); record it so ingestion suppresses the CLI's copy. Other CLIs get
@@ -1800,6 +1804,15 @@ func (a *App) SetTeamObserver(id, agentName string) (team.Team, error) {
 	// P2). The orchestrator keyed it by the resolved room (CreateTerminal maps empty
 	// → "default"), so resolve here too. No-op when the agent isn't registered.
 	a.orchestrator.UnregisterAgent(roomNameOrDefault(updated.Name), agentName)
+	// Likewise stop ingesting that terminal: an observer's terminal is the user's
+	// PRIVATE drafting space (#17), so its directly-typed prompts must not keep
+	// flowing into the room transcript after an in-place promotion — the create-time
+	// observer skip only covers future spawns (#65).
+	for _, s := range a.ptyManager.GetSessionsByTeam(id) {
+		if strings.EqualFold(strings.TrimSpace(s.AgentName), agentName) {
+			a.ingestMgr.StopSession(s.ID)
+		}
+	}
 	return updated, nil
 }
 

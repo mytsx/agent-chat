@@ -10,41 +10,62 @@ import (
 // log latency against churn; the CLI append is durable so nothing is lost.
 const pollInterval = 700 * time.Millisecond
 
+// stopDrainBudget bounds how long StopAll waits for watchers' final drains to
+// deliver before the caller (shutdown) proceeds to snapshot the rooms (#65).
+const stopDrainBudget = 2 * time.Second
+
 // pollOnce performs one ingest tick: parse new user messages from path starting
-// at cur, suppress any that match a recorded self-injection, emit the rest, and
-// return the advanced cursor. The single testable unit of a watcher.
-func pollOnce(ad SessionAdapter, path string, cur Cursor, fp *fingerprintStore, emit EmitFunc) Cursor {
-	msgs, next, err := ad.ParseNewUserMessages(path, cur)
+// at startCur, suppress any that match a recorded self-injection, emit the rest,
+// and return the cursor to commit. The cursor advances PER MESSAGE, so if an emit
+// fails (hub unavailable mid-RPC) the returned cursor stays before that message
+// and it is retried next tick rather than silently lost (#65).
+func pollOnce(ad SessionAdapter, path string, startCur Cursor, fp *fingerprintStore, emit EmitFunc) Cursor {
+	msgs, final, err := ad.ParseNewUserMessages(path, startCur)
 	if err != nil {
 		log.Printf("[INGEST] parse error (%s): %v", path, err)
-		// next is still advanced past the read region by the adapter; keep it.
 	}
+	cur := startCur
 	for _, m := range msgs {
 		if fp.Consume(m.Content) {
-			continue // app's own injection (startup/broadcast/prompt-send)
+			cur = m.After // app's own injection (startup/broadcast/prompt-send) — handled
+			continue
 		}
-		emit(m.Content, m.Timestamp)
+		if !emit(m.Content, m.Timestamp) {
+			return cur // emit failed (hub down) — stop, retry from here next tick
+		}
+		cur = m.After
 	}
-	return next
+	// Every message delivered; also commit past trailing non-user lines. Only when
+	// the parse itself didn't error (on error, keep the per-message cursor so a
+	// partially-read region is re-read).
+	if err == nil {
+		return final
+	}
+	return cur
 }
 
 // session is one terminal's running watcher.
 type session struct {
+	id     string
 	cancel chan struct{}
+	done   chan struct{} // closed when run() returns (after its final drain)
 	fp     *fingerprintStore
 }
 
-// Manager owns one watcher per AI terminal and the per-terminal fingerprint
-// stores. Safe for concurrent use from the app (StartSession/RecordInjection/
-// StopSession run on the Wails/event goroutines).
+// Manager owns one watcher per AI terminal, the per-terminal fingerprint stores,
+// and the set of session-file paths currently claimed by a live watcher (so two
+// terminals from the same cwd don't lock onto the same file). Safe for concurrent
+// use from the app (StartSession/RecordInjection/StopSession run on the
+// Wails/event goroutines).
 type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
+	claims   map[string]string // session-file path → owning sessionID (#65)
 }
 
 // New creates an empty Manager.
 func New() *Manager {
-	return &Manager{sessions: make(map[string]*session)}
+	return &Manager{sessions: make(map[string]*session), claims: make(map[string]string)}
 }
 
 // StartSession begins watching the CLI session file for a terminal. The watcher
@@ -54,7 +75,7 @@ func New() *Manager {
 // ready reports whether emits can be delivered right now (e.g. the hub is
 // connected). When it returns false the tick is skipped WITHOUT advancing the
 // cursor, so a prompt parsed while the hub is down is retried once it returns
-// rather than silently dropped (#65 / Codex P2). A nil ready means always-ready.
+// rather than silently dropped (#65). A nil ready means always-ready.
 func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
@@ -64,7 +85,7 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 		m.mu.Unlock()
 		return
 	}
-	s := &session{cancel: make(chan struct{}), fp: newFingerprintStore()}
+	s := &session{id: sessionID, cancel: make(chan struct{}), done: make(chan struct{}), fp: newFingerprintStore()}
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
@@ -72,6 +93,7 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 }
 
 func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, emit EmitFunc) {
+	defer close(s.done)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	var path string
@@ -83,13 +105,21 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 			return
 		}
 		if path == "" {
-			p, err := ad.DiscoverFile(cwd, spawnedAtUnixNano)
+			p, err := ad.DiscoverFile(cwd, spawnedAtUnixNano, func(cp string) bool {
+				return m.isClaimedByOther(s.id, cp)
+			})
 			if err != nil {
 				log.Printf("[INGEST] discover error: %v", err)
 				return
 			}
 			if p == "" {
 				return // not created yet — keep waiting
+			}
+			// Claim the file so a sibling terminal in the same cwd picks a different
+			// one. If another watcher claimed it between discovery and here, retry
+			// next tick (its claimed-check will now exclude p) (#65).
+			if !m.tryClaim(s.id, p) {
+				return
 			}
 			path = p
 		}
@@ -108,6 +138,31 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 	}
 }
 
+func (m *Manager) tryClaim(sessionID, path string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner := m.claims[path]; owner == "" || owner == sessionID {
+		m.claims[path] = sessionID
+		return true
+	}
+	return false
+}
+
+func (m *Manager) isClaimedByOther(sessionID, path string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owner := m.claims[path]
+	return owner != "" && owner != sessionID
+}
+
+func (m *Manager) releaseClaims(sessionID string) {
+	for p, owner := range m.claims {
+		if owner == sessionID {
+			delete(m.claims, p)
+		}
+	}
+}
+
 // RecordInjection notes that the app injected text into this terminal's PTY, so
 // the watcher suppresses the CLI's recorded copy. No-op for an unknown session.
 func (m *Manager) RecordInjection(sessionID, text string) {
@@ -122,7 +177,7 @@ func (m *Manager) RecordInjection(sessionID, text string) {
 	}
 }
 
-// StopSession stops and forgets a terminal's watcher.
+// StopSession stops and forgets a terminal's watcher and releases its file claim.
 func (m *Manager) StopSession(sessionID string) {
 	if m == nil {
 		return
@@ -130,13 +185,16 @@ func (m *Manager) StopSession(sessionID string) {
 	m.mu.Lock()
 	s := m.sessions[sessionID]
 	delete(m.sessions, sessionID)
+	m.releaseClaims(sessionID)
 	m.mu.Unlock()
 	if s != nil {
 		close(s.cancel)
 	}
 }
 
-// StopAll stops every watcher (app shutdown).
+// StopAll stops every watcher (app shutdown) and waits — bounded — for their
+// final drains to deliver, so a prompt typed just before quit isn't lost from the
+// post-shutdown room snapshot (#65).
 func (m *Manager) StopAll() {
 	if m == nil {
 		return
@@ -144,8 +202,16 @@ func (m *Manager) StopAll() {
 	m.mu.Lock()
 	all := m.sessions
 	m.sessions = make(map[string]*session)
+	m.claims = make(map[string]string)
 	m.mu.Unlock()
 	for _, s := range all {
 		close(s.cancel)
+	}
+	deadline := time.Now().Add(stopDrainBudget)
+	for _, s := range all {
+		select {
+		case <-s.done:
+		case <-time.After(time.Until(deadline)):
+		}
 	}
 }

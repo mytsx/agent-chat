@@ -43,7 +43,7 @@ func TestCopilotDiscover_PicksNewestMatchingCwd(t *testing.T) {
 	os.Chtimes(f1, spawn.Add(-time.Hour), spawn.Add(-time.Hour))
 	os.Chtimes(f2, spawn.Add(time.Second), spawn.Add(time.Second))
 
-	got, err := copilotAdapter{}.DiscoverFile(cwd, spawn.UnixNano())
+	got, err := copilotAdapter{}.DiscoverFile(cwd, spawn.UnixNano(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestCopilotDiscover_IgnoresOtherCwd(t *testing.T) {
 	os.Chtimes(fmine, spawn.Add(time.Second), spawn.Add(time.Second))
 	os.Chtimes(fother, spawn.Add(time.Hour), spawn.Add(time.Hour)) // newer but wrong cwd
 
-	got, err := copilotAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano())
+	got, err := copilotAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

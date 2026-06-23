@@ -6,6 +6,13 @@ import (
 	"os"
 )
 
+// jsonlLine is one complete JSONL line plus the byte offset just past it (so the
+// caller can commit a per-line cursor).
+type jsonlLine struct {
+	Data        []byte
+	OffsetAfter int64
+}
+
 // readCompleteJSONLines reads a JSONL file from byteOffset and returns each
 // COMPLETE (newline-terminated) line, plus the offset just past the last complete
 // line. A partial final line — one the CLI is still mid-writing, with no trailing
@@ -16,7 +23,7 @@ import (
 // A missing file yields (nil, byteOffset, nil) so a not-yet-created session file
 // is a no-op. Lines are returned WITH their trailing '\n' stripped; callers
 // json.Unmarshal them (JSON ignores surrounding whitespace either way).
-func readCompleteJSONLines(path string, byteOffset int64) ([][]byte, int64, error) {
+func readCompleteJSONLines(path string, byteOffset int64) ([]jsonlLine, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -30,7 +37,7 @@ func readCompleteJSONLines(path string, byteOffset int64) ([][]byte, int64, erro
 		return nil, byteOffset, err
 	}
 
-	var lines [][]byte
+	var lines []jsonlLine
 	consumed := byteOffset
 	r := bufio.NewReader(f)
 	for {
@@ -39,13 +46,12 @@ func readCompleteJSONLines(path string, byteOffset int64) ([][]byte, int64, erro
 		// still being written, so we stop without consuming it.
 		line, rerr := r.ReadBytes('\n')
 		if rerr == nil {
-			consumed += int64(len(line)) // includes the '\n'
-			// Strip the trailing newline for the caller.
-			trimmed := line[:len(line)-1]
+			consumed += int64(len(line))  // includes the '\n'
+			trimmed := line[:len(line)-1] // strip the trailing newline
 			if len(trimmed) > 0 {
 				cp := make([]byte, len(trimmed))
 				copy(cp, trimmed)
-				lines = append(lines, cp)
+				lines = append(lines, jsonlLine{Data: cp, OffsetAfter: consumed})
 			}
 			continue
 		}

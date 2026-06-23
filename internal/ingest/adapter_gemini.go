@@ -26,7 +26,7 @@ type geminiFile struct {
 	} `json:"messages"`
 }
 
-func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
+func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -39,7 +39,9 @@ func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessag
 		// Partial write mid-append — skip this tick, keep the cursor.
 		return nil, cur, nil
 	}
-	var all []UserMessage
+	// Collect ALL user messages (with their 1-based index as the commit cursor),
+	// then return only those past cur.Count.
+	var all []ParsedMessage
 	for _, m := range gf.Messages {
 		if m.Type != "user" {
 			continue
@@ -51,21 +53,21 @@ func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessag
 		if text == "" {
 			continue
 		}
-		all = append(all, UserMessage{Content: text, Timestamp: m.Timestamp})
+		all = append(all, ParsedMessage{Content: text, Timestamp: m.Timestamp, After: Cursor{Count: len(all) + 1}})
 	}
+	final := Cursor{Count: len(all)}
 	if cur.Count >= len(all) {
-		return nil, cur, nil
+		return nil, final, nil
 	}
-	fresh := all[cur.Count:]
-	return fresh, Cursor{Count: len(all)}, nil
+	return all[cur.Count:], final, nil
 }
 
-func (geminiAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
+func (geminiAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(cwd))
 	dir := filepath.Join(home, ".gemini", "tmp", hex.EncodeToString(sum[:]), "chats")
-	return newestJSONLAfter(dir, "session-*.json", spawnedAtUnixNano)
+	return newestJSONLAfter(dir, "session-*.json", spawnedAtUnixNano, claimed)
 }

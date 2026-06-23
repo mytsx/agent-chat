@@ -22,23 +22,23 @@ type copilotLine struct {
 	} `json:"data"`
 }
 
-func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
+func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []UserMessage
+	var out []ParsedMessage
 	for _, line := range lines {
 		var cl copilotLine
-		if json.Unmarshal(line, &cl) != nil {
+		if json.Unmarshal(line.Data, &cl) != nil {
 			continue
 		}
 		if cl.Type != "user.message" || cl.Data.Content == "" {
 			continue
 		}
-		out = append(out, UserMessage{Content: cl.Data.Content, Timestamp: cl.Timestamp})
+		out = append(out, ParsedMessage{Content: cl.Data.Content, Timestamp: cl.Timestamp, After: Cursor{Offset: line.OffsetAfter}})
 	}
 	return out, Cursor{Offset: next}, err
 }
 
-func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
+func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -66,12 +66,16 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string,
 		if copilotWorkspaceCwd(dir) != cwd {
 			continue
 		}
-		info, serr := os.Stat(filepath.Join(dir, "events.jsonl"))
+		ev := filepath.Join(dir, "events.jsonl")
+		info, serr := os.Stat(ev)
 		if serr != nil || info.ModTime().Before(cutoff) {
 			continue
 		}
+		if claimed != nil && claimed(ev) {
+			continue // another terminal's watcher already locked this file (#65)
+		}
 		if best == "" || info.ModTime().After(bestMod) {
-			best, bestMod = filepath.Join(dir, "events.jsonl"), info.ModTime()
+			best, bestMod = ev, info.ModTime()
 		}
 	}
 	return best, nil

@@ -44,7 +44,7 @@ func TestGeminiDiscover_Sha256Folder(t *testing.T) {
 	spawn := time.Now()
 	os.Chtimes(f, spawn.Add(time.Second), spawn.Add(time.Second))
 
-	got, err := geminiAdapter{}.DiscoverFile(cwd, spawn.UnixNano())
+	got, err := geminiAdapter{}.DiscoverFile(cwd, spawn.UnixNano(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

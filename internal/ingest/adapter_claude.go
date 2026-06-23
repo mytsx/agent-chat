@@ -23,12 +23,12 @@ type claudeLine struct {
 	} `json:"message"`
 }
 
-func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessage, Cursor, error) {
+func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []UserMessage
+	var out []ParsedMessage
 	for _, line := range lines {
 		var cl claudeLine
-		if json.Unmarshal(line, &cl) != nil {
+		if json.Unmarshal(line.Data, &cl) != nil {
 			continue // skip a corrupt line, keep the rest
 		}
 		if cl.Type != "user" {
@@ -43,7 +43,7 @@ func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]UserMessag
 		if content == "" {
 			continue
 		}
-		out = append(out, UserMessage{Content: content, Timestamp: cl.Timestamp})
+		out = append(out, ParsedMessage{Content: content, Timestamp: cl.Timestamp, After: Cursor{Offset: line.OffsetAfter}})
 	}
 	return out, Cursor{Offset: next}, err
 }
@@ -63,11 +63,11 @@ func claudeSlug(cwd string) string {
 	return b.String()
 }
 
-func (claudeAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64) (string, error) {
+func (claudeAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	dir := filepath.Join(home, ".claude", "projects", claudeSlug(cwd))
-	return newestJSONLAfter(dir, "*.jsonl", spawnedAtUnixNano)
+	return newestJSONLAfter(dir, "*.jsonl", spawnedAtUnixNano, claimed)
 }

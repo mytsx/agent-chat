@@ -25,5 +25,5 @@ func TestNilIngestManagerMethodsAreSafe(t *testing.T) {
 	m.RecordInjection("s", "x")
 	m.StopSession("s")
 	m.StopAll()
-	m.StartSession("s", ingest.AdapterFor("claude"), "/tmp", 0, func() bool { return true }, func(string, string) {})
+	m.StartSession("s", ingest.AdapterFor("claude"), "/tmp", 0, func() bool { return true }, func(string, string) bool { return true })
 }
