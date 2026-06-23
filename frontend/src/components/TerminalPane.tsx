@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { WriteToTerminal, ResizeTerminal } from "../../wailsjs/go/main/App";
-import { CLIType } from "../lib/types";
+import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } from "../../wailsjs/go/main/App";
+import { CLIType, VoiceState } from "../lib/types";
 
 interface Props {
   sessionID: string;
@@ -20,6 +20,8 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [voiceError, setVoiceError] = useState<string>("");
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -135,6 +137,49 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     };
   }, [sessionID]);
 
+  // Voice (#16) state/transcript events for this panel only (sessionID-scoped).
+  // The transcript text is already injected into the PTY by the backend; these
+  // events only drive the mic button UI, so we never write transcript to xterm.
+  useEffect(() => {
+    if (!sessionID) return;
+    let cancelled = false;
+    let cleanup = () => {};
+    import("../../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      if (cancelled) return;
+      const stateEv = "voice:state:" + sessionID;
+      EventsOn(stateEv, (data: { state: VoiceState; message: string }) => {
+        setVoiceState(data.state);
+        setVoiceError(data.state === "error" ? data.message : "");
+      });
+      cleanup = () => {
+        try { EventsOff(stateEv); } catch (e) {
+          if (import.meta.env.DEV) console.warn("voice EventsOff failed:", e);
+        }
+      };
+    }).catch((e) => {
+      if (import.meta.env.DEV) console.warn("voice runtime load failed:", e);
+    });
+    return () => { cancelled = true; cleanup(); };
+  }, [sessionID]);
+
+  // Push-to-talk: hold to record, release to transcribe. onMouseLeave also stops
+  // so a drag-off doesn't leave the mic recording. Backend enforces the single
+  // active-recording lock; a rejected Start just shows an error state.
+  const startVoice = () => {
+    if (voiceState === "recording" || voiceState === "transcribing") return;
+    StartVoiceCapture(sessionID).catch((e) => {
+      setVoiceState("error");
+      setVoiceError(String(e));
+    });
+  };
+  const stopVoice = () => {
+    if (voiceState !== "recording") return;
+    StopVoiceCapture(sessionID).catch((e) => {
+      setVoiceState("error");
+      setVoiceError(String(e));
+    });
+  };
+
   return (
     <div className="terminal-pane">
       <div className="terminal-header">
@@ -146,6 +191,24 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
           className="terminal-header-actions"
           onMouseDown={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            className={"terminal-btn-voice voice-" + voiceState}
+            onMouseDown={startVoice}
+            onMouseUp={stopVoice}
+            onMouseLeave={stopVoice}
+            title={
+              voiceState === "recording"
+                ? "Kaydediliyor… bırakınca yazılır"
+                : voiceState === "transcribing"
+                ? "Çevriliyor…"
+                : voiceError
+                ? voiceError
+                : "Bas-konuş (sesli prompt)"
+            }
+          >
+            {voiceState === "transcribing" ? "⋯" : "🎤"}
+          </button>
           {onRestart && (
             <button
               type="button"
