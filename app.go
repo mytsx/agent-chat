@@ -735,11 +735,18 @@ func (a *App) isObserverAgent(teamID, agentName string) bool {
 	return false
 }
 
-// CreateTerminal creates a new terminal and returns its session ID.
-// If useWorktree is true and workDir is a git repo, a worktree is created for the agent.
-// slotIndex is the grid position the terminal occupies; it is persisted to the team
-// template so the agent reopens into the same slot.
+// CreateTerminal creates a new terminal and returns its session ID. Exported
+// signature is unchanged (Wails binding stable); it delegates to createTerminal
+// with no resume ID (fresh launch).
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int) (string, error) {
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "")
+}
+
+// createTerminal is the implementation. A non-empty resumeID with a resume-capable
+// CLI launches via cli.GetCommandResume (--resume <id>); otherwise a fresh
+// cli.GetCommand. Everything else (worktree, MCP config, ingest, startup prompt)
+// is identical to a fresh create (#40).
+func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -824,8 +831,18 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		}
 	}
 
-	// Get command for CLI type
-	cmdName, cmdArgs := cli.GetCommand(ct)
+	// Get command for CLI type. #40: when resuming (resumeID set + CLI supports it)
+	// build the resume invocation instead of a fresh launch. Everything downstream
+	// (Copilot -i, startup prompt, ingest) is unchanged so the resumed agent still
+	// re-joins the room.
+	var cmdName string
+	var cmdArgs []string
+	if resumeID != "" && cli.ResumeSupported(ct) {
+		cmdName, cmdArgs = cli.GetCommandResume(ct, resumeID)
+		log.Printf("[RESUME] agent=%s cli=%s id=%s", agentName, cliType, resumeID)
+	} else {
+		cmdName, cmdArgs = cli.GetCommand(ct)
+	}
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument.
 	// copilotComposed is hoisted so it can be fingerprinted for ingestion below
@@ -991,9 +1008,32 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	return sessionID, nil
 }
 
-// RestartTerminal closes a terminal and creates a new one with the same parameters.
-// If the terminal was using a worktree, the worktree is preserved.
+// RestartTerminal closes a terminal and creates a fresh one with the same
+// parameters (no resume).
 func (a *App) RestartTerminal(sessionID string) (string, error) {
+	return a.restartInternal(sessionID, "")
+}
+
+// ResumeTerminal restarts a terminal resuming its captured CLI session (#40). If
+// nothing was captured (the CLI hasn't written its session file yet, or it is an
+// unsupported CLI), it falls back to a fresh restart so the user still gets a
+// working terminal.
+func (a *App) ResumeTerminal(sessionID string) (string, error) {
+	resumeID := a.ptyManager.GetCLISessionID(sessionID)
+	cliType := ""
+	if s := a.ptyManager.GetSession(sessionID); s != nil {
+		cliType = s.CLIType
+	}
+	if resumeID == "" || !cli.ResumeSupported(cli.CLIType(cliType)) {
+		log.Printf("[RESUME] session=%s — yakalı oturum yok, düz restart", ptymgr.ShortID(sessionID))
+		return a.restartInternal(sessionID, "")
+	}
+	return a.restartInternal(sessionID, resumeID)
+}
+
+// restartInternal closes a terminal and recreates it, optionally resuming from
+// resumeID. If the terminal was using a worktree, the worktree is preserved.
+func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
 		return "", fmt.Errorf("session not found: %s", sessionID)
@@ -1037,7 +1077,7 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex)
+	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID)
 	if err != nil {
 		return "", err
 	}

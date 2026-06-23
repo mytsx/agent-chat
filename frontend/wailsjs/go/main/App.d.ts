@@ -60,6 +60,8 @@ export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void
 
 export function RestartTerminal(arg1:string):Promise<string>;
 
+export function ResumeTerminal(arg1:string):Promise<string>;
+
 export function SaveRoomSummary(arg1:string,arg2:string):Promise<main.RoomSummaryInfo>;
 
 export function SaveSession(arg1:string):Promise<main.SaveSessionResult>;
