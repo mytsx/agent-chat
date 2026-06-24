@@ -27,6 +27,7 @@ import (
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/sanitize"
+	"desktop/internal/sessionlog"
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
@@ -67,6 +68,7 @@ type App struct {
 	// hand-constructed test Apps leave it nil, and the Manager's methods no-op on a
 	// nil receiver.
 	ingestMgr     *ingest.Manager
+	sessionLog    *sessionlog.Store
 	promptStore   *prompt.Store
 	teamStore     *team.Store
 	dataDir       string
@@ -123,6 +125,12 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize session-file ingestion (#65): logs messages the user types
 	// directly into an AI terminal by reading the CLI's own session file.
 	a.ingestMgr = ingest.New()
+	// #40 Faz-2: persistent per-agent session history for the resume picker.
+	if sl, err := sessionlog.New(a.dataDir); err != nil {
+		log.Printf("[SESSIONLOG] init failed: %v", err)
+	} else {
+		a.sessionLog = sl
+	}
 	// UI fallback: when a notification can't be safely injected (the user kept
 	// typing past the deferral cap), surface it in the frontend instead of
 	// corrupting the user's input line.
@@ -994,6 +1002,10 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				return
 			}
 			a.ptyManager.SetCLISessionID(sessionID, id)
+			// #40 Faz-2: also log to the persistent history so this session can be
+			// resumed/correlated later (room/agent/cliType/cwd from the enclosing
+			// createTerminal scope).
+			a.sessionLog.Record(id, room, agentName, cliType, ingestCwd)
 			runtime.EventsEmit(a.ctx, "terminal:resume-available", map[string]string{
 				"sessionID":    sessionID,
 				"cliSessionID": id,
@@ -1686,6 +1698,11 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 			}
 			a.orchestrator.UnregisterAgent(teamName, agentName)
 		}
+	}
+
+	// #40 Faz-2: close the session's open-window (lastSeen) in the history log.
+	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
+		a.sessionLog.Touch(cid)
 	}
 
 	// Close PTY (terminates process)
