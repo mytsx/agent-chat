@@ -71,3 +71,12 @@ func (claudeAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed f
 	dir := filepath.Join(home, ".claude", "projects", claudeSlug(cwd))
 	return nearestSessionFileAfter(dir, "*.jsonl", spawnedAtUnixNano, claimed)
 }
+
+// SessionID extracts Claude's session UUID from a discovered file path
+// ({uuid}.jsonl → uuid), or "" for an empty path (#40).
+func (claudeAdapter) SessionID(path string) string {
+	if path == "" {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}

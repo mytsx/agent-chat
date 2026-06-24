@@ -3,6 +3,7 @@ package ingest
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeAdapter returns a preset batch of ParsedMessages once per ParseNewUserMessages
@@ -10,11 +11,13 @@ import (
 type fakeAdapter struct {
 	batches [][]ParsedMessage
 	calls   int
+	sessID  string
 }
 
 func (f *fakeAdapter) DiscoverFile(string, int64, func(string) bool) (string, error) {
 	return "fake", nil
 }
+func (f *fakeAdapter) SessionID(string) string { return f.sessID }
 func (f *fakeAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
 	i := f.calls
 	f.calls++
@@ -102,6 +105,154 @@ func TestPollOnce_EmitFailureKeepsCursorBeforeMessage(t *testing.T) {
 	}
 	if cur.Offset != 1 {
 		t.Fatalf("cursor = %d, want 1 (must stay before the un-delivered message for retry)", cur.Offset)
+	}
+}
+
+func TestStartSession_FiresOnSessionID(t *testing.T) {
+	m := New()
+	ad := &fakeAdapter{sessID: "fake-id"}
+	got := make(chan string, 1)
+	m.StartSession("s1", ad, "cwd", 0, nil, nil,
+		func(string, string) bool { return true },
+		func(id string) {
+			select {
+			case got <- id:
+			default:
+			}
+		}, nil)
+	defer m.StopSession("s1")
+
+	select {
+	case id := <-got:
+		if id != "fake-id" {
+			t.Fatalf("onSessionID = %q, want fake-id", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("onSessionID not fired within 2s")
+	}
+}
+
+// offsetAdapter parses by byte offset like the real JSONL adapters: it returns
+// only messages whose After.Offset is past the current cursor, so a ResumeSeed
+// cursor actually gates what gets emitted (the fakeAdapter ignores the cursor).
+type offsetAdapter struct {
+	path string
+	msgs []ParsedMessage // After.Offset strictly increasing
+}
+
+func (a *offsetAdapter) DiscoverFile(string, int64, func(string) bool) (string, error) {
+	return a.path, nil
+}
+func (a *offsetAdapter) SessionID(string) string { return "" }
+func (a *offsetAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
+	final := cur
+	var out []ParsedMessage
+	for _, m := range a.msgs {
+		if m.After.Offset > cur.Offset {
+			out = append(out, m)
+		}
+		if m.After.Offset > final.Offset {
+			final = m.After
+		}
+	}
+	return out, final, nil
+}
+
+func waitForEmits(t *testing.T, got *[]string, mu *sync.Mutex, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		c := len(*got)
+		mu.Unlock()
+		if c >= n {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// On RESUME the watcher must skip content already in the SAME transcript the CLI
+// appends to (Copilot): a ResumeSeed whose Path matches the discovered file starts
+// ingestion past the snapshotted offset, so the prior conversation is not re-logged
+// — only messages appended after the seed are emitted (#40, Codex P1).
+func TestStartSession_ResumeSeed_SkipsExistingOnSameFile(t *testing.T) {
+	m := New()
+	ad := &offsetAdapter{path: "events.jsonl", msgs: []ParsedMessage{
+		pm("old-1", 1), pm("old-2", 2), pm("new-after-resume", 3),
+	}}
+	var mu sync.Mutex
+	var got []string
+	// Seed past offset 2 (old-1, old-2) on the SAME discovered path.
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+		&ResumeSeed{Path: "events.jsonl", Cur: Cursor{Offset: 2}})
+	defer m.StopSession("s1")
+
+	waitForEmits(t, &got, &mu, 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "new-after-resume" {
+		t.Fatalf("resume seed: emitted %v, want only [new-after-resume] (pre-resume transcript must be skipped)", got)
+	}
+}
+
+// A ResumeSeed for a DIFFERENT path than the one discovered must be ignored: a CLI
+// that resumes into a NEW file (Claude/Codex) has a fresh transcript with nothing
+// to skip, so every message is ingested from offset 0 (#40, Codex P2-round2).
+func TestStartSession_ResumeSeed_IgnoredOnDifferentFile(t *testing.T) {
+	m := New()
+	ad := &offsetAdapter{path: "new-file.jsonl", msgs: []ParsedMessage{
+		pm("m1", 1), pm("m2", 2), pm("m3", 3),
+	}}
+	var mu sync.Mutex
+	var got []string
+	// Seed references the OLD file; discovery returns a different (new) file.
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+		&ResumeSeed{Path: "old-file.jsonl", Cur: Cursor{Offset: 2}})
+	defer m.StopSession("s1")
+
+	waitForEmits(t, &got, &mu, 3)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("resume seed on different file: emitted %v, want all 3 (new file has nothing to skip)", got)
+	}
+}
+
+// StopAndWait must stop the watcher, wait for its final drain, and release its
+// file claim before returning — so a same-file resume can safely reopen the file
+// (#40). After it returns, another session can claim the same path.
+func TestStopAndWait_StopsAndReleasesClaim(t *testing.T) {
+	m := New()
+	ad := &fakeAdapter{}
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, func(string, string) bool { return true }, nil, nil)
+
+	// Wait for the watcher to discover + claim "fake".
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !m.isClaimedByOther("other", "fake") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.isClaimedByOther("other", "fake") {
+		t.Fatal("s1 should have claimed 'fake' before StopAndWait")
+	}
+
+	m.StopAndWait("s1", 2*time.Second)
+
+	if m.isClaimedByOther("other", "fake") {
+		t.Fatal("StopAndWait must release s1's claim so the file is reclaimable")
+	}
+}
+
+// StopAndWait on an unknown/already-finished session returns immediately and never
+// blocks on a missing done channel (#40).
+func TestStopAndWait_UnknownSessionNoOp(t *testing.T) {
+	m := New()
+	done := make(chan struct{})
+	go func() { m.StopAndWait("ghost", time.Second); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("StopAndWait on unknown session must return immediately")
 	}
 }
 

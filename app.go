@@ -735,11 +735,18 @@ func (a *App) isObserverAgent(teamID, agentName string) bool {
 	return false
 }
 
-// CreateTerminal creates a new terminal and returns its session ID.
-// If useWorktree is true and workDir is a git repo, a worktree is created for the agent.
-// slotIndex is the grid position the terminal occupies; it is persisted to the team
-// template so the agent reopens into the same slot.
+// CreateTerminal creates a new terminal and returns its session ID. Exported
+// signature is unchanged (Wails binding stable); it delegates to createTerminal
+// with no resume ID (fresh launch).
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int) (string, error) {
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "")
+}
+
+// createTerminal is the implementation. A non-empty resumeID with a resume-capable
+// CLI launches via cli.GetCommandResume (--resume <id>); otherwise a fresh
+// cli.GetCommand. Everything else (worktree, MCP config, ingest, startup prompt)
+// is identical to a fresh create (#40).
+func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -824,8 +831,19 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		}
 	}
 
-	// Get command for CLI type
-	cmdName, cmdArgs := cli.GetCommand(ct)
+	// Get command for CLI type. #40: when resuming (resumeID set + CLI supports it)
+	// build the resume invocation instead of a fresh launch. Everything downstream
+	// (Copilot -i, startup prompt, ingest) is unchanged so the resumed agent still
+	// re-joins the room.
+	resuming := resumeID != "" && cli.ResumeSupported(ct)
+	var cmdName string
+	var cmdArgs []string
+	if resuming {
+		cmdName, cmdArgs = cli.GetCommandResume(ct, resumeID)
+		log.Printf("[RESUME] agent=%s cli=%s id=%s", agentName, cliType, resumeID)
+	} else {
+		cmdName, cmdArgs = cli.GetCommand(ct)
+	}
 
 	// For Copilot, use -i flag to pass startup prompt directly as argument.
 	// copilotComposed is hoisted so it can be fingerprinted for ingestion below
@@ -945,6 +963,14 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// ready: only ingest while the hub is connected, so a prompt parsed while the
 		// hub is restarting isn't parsed-and-dropped (the cursor stays put) (#65).
 		ready := func() bool { return a.hubClient.Load() != nil }
+		// #40: on resume, skip the prior transcript a same-file CLI (Copilot) appends
+		// to — snapshotted now, before the CLI writes, so a prompt typed right after
+		// resume isn't skipped. nil for fresh creates and for CLIs that resume into a
+		// new file (Claude/Codex), which need no seed.
+		var resumeSeed *ingest.ResumeSeed
+		if resuming {
+			resumeSeed = ingest.ResumeSeedFor(cliType, resumeID)
+		}
 		// exited closes when this terminal's CLI process dies (incl. an in-CLI /exit
 		// with no app-side close), so the watcher stops and frees its file claim (#65).
 		a.ingestMgr.StartSession(sessionID, ad, ingestCwd, ingestSpawnedAt, ready, a.ptyManager.SessionDone(sessionID), func(content, ts string) bool {
@@ -960,7 +986,19 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 				return false // delivery failed — don't advance the cursor past this message
 			}
 			return true
-		})
+		}, func(id string) {
+			// #40: capture the CLI's session ID for opt-in resume. Only for CLIs
+			// whose native resume we support — others (Gemini/shell) never enable
+			// the "Devam Et" button.
+			if !cli.ResumeSupported(ct) {
+				return
+			}
+			a.ptyManager.SetCLISessionID(sessionID, id)
+			runtime.EventsEmit(a.ctx, "terminal:resume-available", map[string]string{
+				"sessionID":    sessionID,
+				"cliSessionID": id,
+			})
+		}, resumeSeed)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
 			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
@@ -979,9 +1017,32 @@ func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID strin
 	return sessionID, nil
 }
 
-// RestartTerminal closes a terminal and creates a new one with the same parameters.
-// If the terminal was using a worktree, the worktree is preserved.
+// RestartTerminal closes a terminal and creates a fresh one with the same
+// parameters (no resume).
 func (a *App) RestartTerminal(sessionID string) (string, error) {
+	return a.restartInternal(sessionID, "")
+}
+
+// ResumeTerminal restarts a terminal resuming its captured CLI session (#40). If
+// nothing was captured (the CLI hasn't written its session file yet, or it is an
+// unsupported CLI), it falls back to a fresh restart so the user still gets a
+// working terminal.
+func (a *App) ResumeTerminal(sessionID string) (string, error) {
+	resumeID := a.ptyManager.GetCLISessionID(sessionID)
+	cliType := ""
+	if s := a.ptyManager.GetSession(sessionID); s != nil {
+		cliType = s.CLIType
+	}
+	if resumeID == "" || !cli.ResumeSupported(cli.CLIType(cliType)) {
+		log.Printf("[RESUME] session=%s — yakalı oturum yok, düz restart", ptymgr.ShortID(sessionID))
+		return a.restartInternal(sessionID, "")
+	}
+	return a.restartInternal(sessionID, resumeID)
+}
+
+// restartInternal closes a terminal and recreates it, optionally resuming from
+// resumeID. If the terminal was using a worktree, the worktree is preserved.
+func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 	session := a.ptyManager.GetSession(sessionID)
 	if session == nil {
 		return "", fmt.Errorf("session not found: %s", sessionID)
@@ -1023,9 +1084,19 @@ func (a *App) RestartTerminal(sessionID string) (string, error) {
 		return "", fmt.Errorf("eski session kapatılamadı %s: %w", ptymgr.ShortID(sessionID), err)
 	}
 
+	// On RESUME, a same-file CLI (Copilot) reopens the SAME transcript the old
+	// watcher was on. Wait (bounded) for that watcher to finish its final drain and
+	// release its claim BEFORE the resumed CLI spawns, so it can't ingest the new
+	// session's bootstrap prompt under the old fingerprint store and log it as a
+	// user message (#40, Codex round-3). Skipped for plain restart (new file, no
+	// shared watcher) to avoid needless latency.
+	if resumeID != "" {
+		a.ingestMgr.StopAndWait(sessionID, 2*time.Second)
+	}
+
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.CreateTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex)
+	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID)
 	if err != nil {
 		return "", err
 	}

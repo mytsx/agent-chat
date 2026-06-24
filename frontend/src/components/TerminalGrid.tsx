@@ -113,7 +113,7 @@ function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, openTeamFromConfig } = useTerminals();
+  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal, openTeamFromConfig } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
   const [openingFromConfig, setOpeningFromConfig] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -271,6 +271,8 @@ export default function TerminalGrid() {
               isFocused={s.sessionID === focusedSessionID}
               onToggleFocus={() => toggleFocusSession(s.sessionID)}
               onRestart={() => restartTerminal(s.teamID, s.sessionID).catch(err => console.error("[restart] failed:", err))}
+              onResume={() => resumeTerminal(s.teamID, s.sessionID).catch(err => console.error("[resume] failed:", err))}
+              canResume={!!s.cliSessionID}
             />
           </div>
         ))}
@@ -288,6 +290,8 @@ export default function TerminalGrid() {
           isFocused={false}
           onToggleFocus={() => toggleFocusSession(slot.session.sessionID)}
           onRestart={() => restartTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[restart] failed:", err))}
+          onResume={() => resumeTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[resume] failed:", err))}
+          canResume={!!slot.session.cliSessionID}
         />
       );
     }
@@ -350,6 +354,8 @@ export default function TerminalGrid() {
                     )
                   }
                   onRestart={() => restartTerminal(team.id, s.sessionID).catch(err => console.error("[restart] failed:", err))}
+                  onResume={() => resumeTerminal(team.id, s.sessionID).catch(err => console.error("[resume] failed:", err))}
+                  canResume={!!s.cliSessionID}
                 />
               </div>
             ))}

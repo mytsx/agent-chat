@@ -43,6 +43,10 @@ type PTYSession struct {
 	// only tracks CLI output. A value of 0 means the input line is considered
 	// empty (never typed, or submitted via Enter) — see ClearUserInput.
 	lastUserInputNano atomic.Int64
+	// cliSessionID holds the CLI's own session/conversation ID captured by the
+	// ingest watcher, used to resume this terminal on restart (#40). Set from the
+	// ingest goroutine, read from the restart goroutine — hence atomic.
+	cliSessionID atomic.Pointer[string]
 	// writeMu serializes writes to this session's PTY so a multi-write
 	// notification injection is not interleaved with user keystrokes.
 	writeMu sync.Mutex
@@ -567,6 +571,32 @@ func (m *Manager) GetSession(sessionID string) *PTYSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sessions[sessionID]
+}
+
+// SetCLISessionID records the CLI session ID for a terminal (#40). No-op for an
+// unknown session.
+func (m *Manager) SetCLISessionID(sessionID, id string) {
+	m.mu.RLock()
+	s := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if s != nil {
+		s.cliSessionID.Store(&id)
+	}
+}
+
+// GetCLISessionID returns the captured CLI session ID for a terminal, or "" if
+// none was captured or the session is unknown (#40).
+func (m *Manager) GetCLISessionID(sessionID string) string {
+	m.mu.RLock()
+	s := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if s == nil {
+		return ""
+	}
+	if p := s.cliSessionID.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // SessionDone returns a channel that is closed when the session's PTY process

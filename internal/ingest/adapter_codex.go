@@ -97,6 +97,32 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 	return pickNearestPostSpawn(cands, spawn), nil
 }
 
+// SessionID extracts Codex's session UUID from a rollout's session_meta first
+// line (payload.id) (#40). The filename embeds the uuid too, but its leading
+// timestamp also contains '-', so reading session_meta is robust where
+// filename-splitting is fragile.
+func (codexAdapter) SessionID(path string) string {
+	return codexFileID(path)
+}
+
+// codexFileID returns the session id recorded in a rollout's first line
+// (session_meta.payload.id), or "" if it can't be read.
+func codexFileID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	line, _ := bufio.NewReader(f).ReadBytes('\n')
+	var meta struct {
+		Payload struct {
+			ID string `json:"id"`
+		} `json:"payload"`
+	}
+	_ = json.Unmarshal(line, &meta)
+	return meta.Payload.ID
+}
+
 // codexFileCwd returns the cwd recorded in a rollout's first line
 // (session_meta.payload.cwd), or "" if it can't be read.
 func codexFileCwd(path string) string {

@@ -87,6 +87,7 @@ export interface TerminalSession {
   cliType: CLIType;
   index: number;
   slotIndex: number;
+  cliSessionID?: string; // captured CLI session ID for opt-in resume (#40)
 }
 
 // Wails event payload types

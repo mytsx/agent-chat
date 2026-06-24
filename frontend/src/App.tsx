@@ -2,8 +2,8 @@ import { useEffect, useState, useRef, useCallback, Component, ReactNode } from "
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, type PanelImperativeHandle } from "react-resizable-panels";
 import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
+import { useTerminals } from "./store/useTerminals";
 import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
-// useTerminals imported by PromptLibrary for target picker
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
@@ -129,6 +129,9 @@ function AppContent() {
         const nextId = broadcastIdRef.current++;
         setBroadcastNotices((prev) => [...prev, { id: nextId, injected, total, errors }]);
       });
+      EventsOn("terminal:resume-available", (data: { sessionID: string; cliSessionID: string }) => {
+        useTerminals.getState().setCLISessionID(data.sessionID, data.cliSessionID);
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
@@ -136,6 +139,7 @@ function AppContent() {
           EventsOff("worktree:dirty");
           EventsOff("notification:deferred");
           EventsOff("broadcast:partial");
+          EventsOff("terminal:resume-available");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }

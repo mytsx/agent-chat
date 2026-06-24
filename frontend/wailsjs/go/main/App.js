@@ -110,6 +110,10 @@ export function RestartTerminal(arg1) {
   return window['go']['main']['App']['RestartTerminal'](arg1);
 }
 
+export function ResumeTerminal(arg1) {
+  return window['go']['main']['App']['ResumeTerminal'](arg1);
+}
+
 export function SaveRoomSummary(arg1, arg2) {
   return window['go']['main']['App']['SaveRoomSummary'](arg1, arg2);
 }

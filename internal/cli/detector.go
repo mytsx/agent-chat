@@ -140,3 +140,36 @@ func GetCommand(cliType CLIType) (string, []string) {
 		return shell, []string{"-l"}
 	}
 }
+
+// ResumeSupported reports whether GetCommandResume can build a native resume
+// invocation for cliType. Claude/Copilot/Codex are supported (resume-by-id
+// empirically verified, 2026-06-24); Gemini/shell are not this round (#40).
+func ResumeSupported(cliType CLIType) bool {
+	switch cliType {
+	case CLIClaude, CLICopilot, CLICodex:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetCommandResume returns the command and args to resume cliType from sessionID.
+// Codex's `resume` is a SUBCOMMAND (positional, first); the others use a flag
+// (Copilot needs the `=` form). An unsupported cliType or empty sessionID falls
+// back to a fresh GetCommand so callers never accidentally launch a broken
+// resume (#40).
+func GetCommandResume(cliType CLIType, sessionID string) (string, []string) {
+	if sessionID == "" || !ResumeSupported(cliType) {
+		return GetCommand(cliType)
+	}
+	switch cliType {
+	case CLIClaude:
+		return "claude", []string{"--resume", sessionID, "--dangerously-skip-permissions"}
+	case CLICopilot:
+		return "copilot", []string{"--resume=" + sessionID, "--yolo"}
+	case CLICodex:
+		return "codex", []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
+	default:
+		return GetCommand(cliType)
+	}
+}

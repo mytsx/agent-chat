@@ -40,6 +40,10 @@ type SessionAdapter interface {
 	// output, tool results, and system/preamble entries, and gracefully skip records
 	// whose schema version it does not recognize (returning no error).
 	ParseNewUserMessages(path string, cur Cursor) (msgs []ParsedMessage, final Cursor, err error)
+	// SessionID extracts the CLI's own session/conversation ID from a discovered
+	// session-file path, or "" if it can't be determined. Used to resume the CLI
+	// from this session on a later restart (#40).
+	SessionID(path string) string
 }
 
 // EmitFunc receives one extracted, non-suppressed user message and reports
