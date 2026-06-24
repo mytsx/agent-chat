@@ -50,6 +50,25 @@ func TestCapturedSessionIDs(t *testing.T) {
 	}
 }
 
+func TestSessionExitedAt(t *testing.T) {
+	m := NewManager(nil)
+	if at, ok := m.SessionExitedAt("nope"); ok || at != 0 {
+		t.Fatalf("unknown = %v,%v, want 0,false", at, ok)
+	}
+	// Still-running session (exitedAtNano==0) → not exited.
+	m.sessions["live"] = &PTYSession{ID: "live"}
+	if at, ok := m.SessionExitedAt("live"); ok || at != 0 {
+		t.Fatalf("live = %v,%v, want 0,false", at, ok)
+	}
+	// Exited session → exit time in unix seconds. 2e18 ns == 2e9 s exactly.
+	exited := &PTYSession{ID: "dead"}
+	exited.exitedAtNano.Store(2_000_000_000_000_000_000)
+	m.sessions["dead"] = exited
+	if at, ok := m.SessionExitedAt("dead"); !ok || at != 2_000_000_000 {
+		t.Fatalf("dead = %v,%v, want 2e9,true", at, ok)
+	}
+}
+
 func TestCLISessionID_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	m.SetCLISessionID("ghost", "x") // must not panic

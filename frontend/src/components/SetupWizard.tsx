@@ -163,8 +163,11 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               <select value={resumeID} onChange={(e) => setResumeID(e.target.value)}>
                 <option value="">✨ Yeni (taze)</option>
                 {agentSessions.map((s) => (
-                  <option key={s.sessionID} value={s.sessionID}>
-                    {new Date(s.startUnix * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {s.messageCount} mesaj{s.fileMissing ? " ⚠️ dosya yok" : ""}
+                  // fileMissing: shown (so the user sees why it's unavailable) but disabled
+                  // — its transcript is pruned, so resuming would open an error/fresh
+                  // terminal; matches the bulk picker paths that skip it (Codex P2).
+                  <option key={s.sessionID} value={s.sessionID} disabled={s.fileMissing}>
+                    {new Date(s.startUnix * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {s.messageCount} mesaj{s.fileMissing ? " ⚠️ dosya yok (devam edilemez)" : ""}
                   </option>
                 ))}
               </select>

@@ -858,7 +858,12 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			// being promoted — ignore it rather than dragging a main-repo role into a
 			// stale isolated worktree (Codex P2). All other resumes take the override.
 			if recIsWorktree && (isManager || isObserver) {
-				log.Printf("[TEAM] resume: %s main-repo rolü, kayıtlı worktree cwd yok sayıldı", agentName)
+				// Refusing the worktree cwd means we run in the main repo — but the recorded
+				// transcript is cwd-keyed to that worktree, so passing --resume <id> here
+				// would open the wrong/fresh conversation. Drop the resume and start clean
+				// (Codex P2).
+				log.Printf("[TEAM] resume: %s main-repo rolü, kayıtlı worktree cwd yok sayıldı — taze başlatılıyor", agentName)
+				resumeID = ""
 			} else {
 				configRepo := workDir // before override (= main repo for a worktree agent)
 				workDir = rec.Cwd
@@ -1151,7 +1156,13 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				go func(sid string, done <-chan struct{}) {
 					<-done
 					if cid := a.ptyManager.GetCLISessionID(sid); cid != "" {
-						a.sessionLog.Touch(cid)
+						// Pin to the exit time (just stamped before done closed), so it matches
+						// what a later UI-close records and the window can't drift (Codex P2).
+						if exitedAt, exited := a.ptyManager.SessionExitedAt(sid); exited {
+							a.sessionLog.TouchAt(cid, exitedAt)
+						} else {
+							a.sessionLog.Touch(cid)
+						}
 					}
 				}(sessionID, doneCh)
 			}
@@ -1870,13 +1881,18 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 
 	// #40 Faz-2: close the history open-window (lastSeen) here, BEFORE Close deletes the
 	// session from the map (after which the PTY-death watcher's GetCLISessionID returns ""
-	// and never Touch). Touch UNCONDITIONALLY — even a just-self-exited session must be
-	// touched here: its done-watcher goroutine may not have been scheduled yet, and Close
-	// would then race ahead and delete the id, leaving the window at firstSeen==lastSeen
-	// and breaking same-period matching (Codex P2). A later redundant watcher Touch is
-	// harmless — Touch is idempotent and the timestamps are within seconds.
+	// and never touches). For a session that ALREADY self-exited (in-CLI /exit or crash),
+	// pin lastSeen to the REAL exit time — a dead pane the user closes minutes or hours
+	// later must NOT stretch the window forward to close time (Codex P2). TouchAt only
+	// advances if newer, so this is idempotent with the done-watcher and also recovers the
+	// case where that watcher raced behind an immediate close and missed the id. A still-
+	// live terminal is touched at now() — the UI-close IS the end of its window.
 	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
-		a.sessionLog.Touch(cid)
+		if exitedAt, exited := a.ptyManager.SessionExitedAt(sessionID); exited {
+			a.sessionLog.TouchAt(cid, exitedAt)
+		} else {
+			a.sessionLog.Touch(cid)
+		}
 	}
 
 	// Close PTY (terminates process).

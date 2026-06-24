@@ -36,6 +36,7 @@ type PTYSession struct {
 	WorktreeDir    string // worktree directory path (empty if not using worktree)
 	WorktreeRepo   string // main repo directory (for worktree cleanup)
 	done           chan struct{}
+	exitedAtNano   atomic.Int64 // unix nano when the PTY died (0 while running) (#40 Faz-2)
 	lastOutputNano atomic.Int64 // unix nano timestamp of last PTY output
 
 	// lastUserInputNano is the unix nano timestamp of the last *user* keystroke
@@ -134,7 +135,10 @@ func (m *Manager) Create(teamID, agentName, room, workDir string, env []string, 
 // readLoop continuously reads from PTY and calls the output handler.
 // It buffers incomplete UTF-8 sequences across reads to prevent garbled output.
 func (m *Manager) readLoop(session *PTYSession) {
+	// Stamp the PTY-death time BEFORE signalling done, so a watcher woken by done can
+	// pin the history window to the real exit time rather than a later UI-close (#40).
 	defer close(session.done)
+	defer session.exitedAtNano.Store(time.Now().UnixNano())
 
 	buf := make([]byte, 8192)
 	var carry []byte // incomplete UTF-8 bytes from previous read
@@ -597,6 +601,22 @@ func (m *Manager) GetCLISessionID(sessionID string) string {
 		return *p
 	}
 	return ""
+}
+
+// SessionExitedAt returns the unix-seconds time the session's PTY died and true, or
+// (0, false) if the session is unknown or still running. Lets the close path pin the
+// history window to the real exit time instead of a later UI-close (#40 Faz-2).
+func (m *Manager) SessionExitedAt(sessionID string) (float64, bool) {
+	m.mu.RLock()
+	s := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if s == nil {
+		return 0, false
+	}
+	if nano := s.exitedAtNano.Load(); nano > 0 {
+		return float64(nano) / 1e9, true
+	}
+	return 0, false
 }
 
 // SessionDone returns a channel that is closed when the session's PTY process

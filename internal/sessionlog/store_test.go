@@ -133,6 +133,7 @@ func TestNilStoreListsAreSafe(t *testing.T) {
 		t.Fatal("nil Get must be false")
 	}
 	s.RenameRoom("a", "b") // nil, must not panic
+	s.TouchAt("x", 1)      // nil, must not panic
 }
 
 func TestTouch(t *testing.T) {
@@ -147,6 +148,23 @@ func TestTouch(t *testing.T) {
 	if got[0].LastSeen != 300 || got[0].FirstSeen != 100 {
 		t.Fatalf("after touch = %+v", got[0])
 	}
+}
+
+func TestTouchAt(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "r", "a", "claude", "/c") // firstSeen=lastSeen=100
+
+	s.TouchAt("sid", 250) // newer → advances
+	if got := s.ListSessions("r", "a")[0]; got.LastSeen != 250 || got.FirstSeen != 100 {
+		t.Fatalf("after TouchAt(250) = %+v, want lastSeen=250 firstSeen=100", got)
+	}
+	s.TouchAt("sid", 150) // older → must NOT regress
+	if got := s.ListSessions("r", "a")[0]; got.LastSeen != 250 {
+		t.Fatalf("TouchAt(150) regressed lastSeen to %v, want 250", got.LastSeen)
+	}
+	s.TouchAt("unknown", 999) // no-op, no panic
 }
 
 func TestListAgents(t *testing.T) {

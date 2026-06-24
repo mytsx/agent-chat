@@ -112,6 +112,23 @@ func (s *Store) Touch(sessionID string) {
 	}
 }
 
+// TouchAt sets LastSeen to an EXPLICIT time (unix seconds) for a known session, but
+// only if t is newer — it never regresses the window. Unknown id, nil store, or a
+// non-newer t → no-op. Used to pin a session's window to its real PTY-exit time when a
+// dead pane is UI-closed later, instead of stretching it to the close time (Codex P2).
+func (s *Store) TouchAt(sessionID string, t float64) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, ok := s.records[sessionID]; ok && t > r.LastSeen {
+		r.LastSeen = t
+		s.records[sessionID] = r
+		s.save()
+	}
+}
+
 // ListSessions returns a room+agent's sessions, newest LastSeen first. Nil-safe:
 // a failed New leaves the app's store nil, and the enumeration binding calls this
 // directly — returning nil (→ empty history) instead of panicking (Codex/Copilot).
