@@ -14,7 +14,6 @@ import {
   WriteToTerminal,
   BroadcastToTeam,
   DetectCLIs,
-  OpenTeamFromConfig,
   OpenTeamFromConfigResume,
 } from "../../wailsjs/go/main/App";
 

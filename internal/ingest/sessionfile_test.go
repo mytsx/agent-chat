@@ -34,7 +34,10 @@ func TestSessionFilePath(t *testing.T) {
 func TestSessionStats(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
-	body := `{"type":"user","message":{"role":"user","content":"ilk mesaj burada"}}` + "\n" +
+	// msg[0] is the app bootstrap/join prompt (always first) → skipped. The two real
+	// user messages remain: count=2, snippet="ilk gerçek mesaj".
+	body := `{"type":"user","message":{"role":"user","content":"BOOTSTRAP join prompt"}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":"ilk gerçek mesaj"}}` + "\n" +
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"x"}]}}` + "\n" +
 		`{"type":"user","message":{"role":"user","content":"ikinci"}}` + "\n"
 	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
@@ -42,10 +45,23 @@ func TestSessionStats(t *testing.T) {
 	}
 	count, snippet := SessionStats("claude", path)
 	if count != 2 {
-		t.Fatalf("count = %d, want 2", count)
+		t.Fatalf("count = %d, want 2 (bootstrap skipped)", count)
 	}
-	if snippet != "ilk mesaj burada" {
-		t.Fatalf("snippet = %q", snippet)
+	if snippet != "ilk gerçek mesaj" {
+		t.Fatalf("snippet = %q, want first real message (bootstrap skipped)", snippet)
+	}
+}
+
+func TestSessionStatsOnlyBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "b.jsonl")
+	// Only the bootstrap prompt → no real user message yet → 0 / "".
+	body := `{"type":"user","message":{"role":"user","content":"BOOTSTRAP only"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if c, s := SessionStats("claude", path); c != 0 || s != "" {
+		t.Fatalf("only-bootstrap = %d,%q, want 0,\"\"", c, s)
 	}
 }
 

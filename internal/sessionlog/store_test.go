@@ -64,6 +64,38 @@ func TestRecordNewRunStartsFreshWindow(t *testing.T) {
 	}
 }
 
+func TestListMatchesAgentCaseInsensitively(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "Room", "alice", "claude", "/c") // launched lower-case
+	// Querying with the config casing ("Alice") must still find the "alice" record.
+	if got := s.ListSessions("room", "Alice"); len(got) != 1 {
+		t.Fatalf("case-insensitive ListSessions = %d, want 1", len(got))
+	}
+	agents := s.ListAgents("ROOM")
+	if len(agents) != 1 || agents[0] != "alice" {
+		t.Fatalf("ListAgents = %v, want [alice]", agents)
+	}
+}
+
+func TestReRecordRefreshesMetadataOnNewWindow(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "old-room", "alice", "copilot", "/old")
+	clock = 100 + newWindowGapSec + 10 // new run after a gap (e.g. team renamed)
+	s.Record("sid", "new-room", "alice", "copilot", "/new")
+	// The record must now be indexed under the CURRENT room/cwd, not the old ones.
+	if got := s.ListSessions("old-room", "alice"); len(got) != 0 {
+		t.Fatalf("old-room still has the record: %v", got)
+	}
+	got := s.ListSessions("new-room", "alice")
+	if len(got) != 1 || got[0].Cwd != "/new" {
+		t.Fatalf("new-room record = %+v, want cwd=/new", got)
+	}
+}
+
 func TestNilStoreListsAreSafe(t *testing.T) {
 	var s *Store // nil (failed New)
 	if got := s.ListSessions("r", "a"); got != nil {

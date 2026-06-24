@@ -43,6 +43,16 @@ func SessionStats(cliType, path string) (int, string) {
 		return 0, ""
 	}
 	msgs, _, _ := ad.ParseNewUserMessages(path, Cursor{})
+	// Drop the app-injected startup/bootstrap prompt (sendStartupPrompt / Copilot -i).
+	// The live ingester suppresses it via RecordInjection, but this raw reparse can't —
+	// and it is always the FIRST user message of an app-created agent session, so the
+	// picker would otherwise show the join/bootstrap prompt as the "first message" and
+	// inflate the count by one. Dropping msgs[0] yields the user's real first message;
+	// a session with only the bootstrap reports 0 / "" (Codex P2). Rare caveat: a prompt
+	// typed before the ~3s startup injection is dropped instead.
+	if len(msgs) > 0 {
+		msgs = msgs[1:]
+	}
 	if len(msgs) == 0 {
 		return 0, ""
 	}

@@ -19,6 +19,31 @@ func TestCLISessionID_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestCapturedSessionIDs(t *testing.T) {
+	m := NewManager(nil)
+	if got := m.CapturedSessionIDs(); len(got) != 0 {
+		t.Fatalf("empty manager = %v, want none", got)
+	}
+	// Two sessions captured an id, one never captured (nil pointer), one captured
+	// then cleared to "" — only the two non-empty ids must be returned (#40 Faz-2).
+	m.sessions["a"] = &PTYSession{ID: "a"}
+	m.SetCLISessionID("a", "id-a")
+	m.sessions["b"] = &PTYSession{ID: "b"}
+	m.SetCLISessionID("b", "id-b")
+	m.sessions["c"] = &PTYSession{ID: "c"} // never captured → nil → skipped
+	m.sessions["d"] = &PTYSession{ID: "d"}
+	m.SetCLISessionID("d", "") // empty → skipped
+
+	got := m.CapturedSessionIDs()
+	set := map[string]bool{}
+	for _, id := range got {
+		set[id] = true
+	}
+	if len(got) != 2 || !set["id-a"] || !set["id-b"] {
+		t.Fatalf("CapturedSessionIDs = %v, want exactly {id-a, id-b}", got)
+	}
+}
+
 func TestCLISessionID_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	m.SetCLISessionID("ghost", "x") // must not panic

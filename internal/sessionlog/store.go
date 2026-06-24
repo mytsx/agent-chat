@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -80,6 +81,10 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 			r.FirstSeen = t
 		}
 		r.LastSeen = t
+		// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
+		// resumed after a team rename or config change. Re-indexing under the CURRENT
+		// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).
+		r.Room, r.AgentName, r.CLIType, r.Cwd = room, agent, cliType, cwd
 		s.records[sessionID] = r
 	} else {
 		s.records[sessionID] = Record{
@@ -115,7 +120,10 @@ func (s *Store) ListSessions(room, agent string) []Record {
 	defer s.mu.Unlock()
 	var out []Record
 	for _, r := range s.records {
-		if r.Room == room && r.AgentName == agent {
+		// Case-insensitive: UpsertAgent preserves the config casing while Record stores
+		// the raw launch name, so "Alice" (config) and "alice" (launched) must match —
+		// the rest of the team code treats names case-insensitively (Codex P2).
+		if strings.EqualFold(r.Room, room) && strings.EqualFold(r.AgentName, agent) {
 			out = append(out, r)
 		}
 	}
@@ -131,20 +139,27 @@ func (s *Store) ListAgents(room string) []string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Group case-insensitively (see ListSessions); the newest-seen casing is the
+	// display name so "Alice"/"alice" collapse to one entry (Codex P2).
 	last := map[string]float64{}
+	display := map[string]string{}
 	for _, r := range s.records {
-		if r.Room != room {
+		if !strings.EqualFold(r.Room, room) {
 			continue
 		}
-		if r.LastSeen > last[r.AgentName] {
-			last[r.AgentName] = r.LastSeen
+		key := strings.ToLower(r.AgentName)
+		if r.LastSeen > last[key] {
+			last[key] = r.LastSeen
+			display[key] = r.AgentName
 		}
 	}
 	names := make([]string, 0, len(last))
-	for n := range last {
-		names = append(names, n)
+	for key := range last {
+		names = append(names, display[key])
 	}
-	sort.Slice(names, func(i, j int) bool { return last[names[i]] > last[names[j]] })
+	sort.Slice(names, func(i, j int) bool {
+		return last[strings.ToLower(names[i])] > last[strings.ToLower(names[j])]
+	})
 	return names
 }
 

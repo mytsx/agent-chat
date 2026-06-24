@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import { SessionInfo, CLIType } from "../lib/types";
@@ -34,15 +34,20 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
   const team = useTeams((s) => s.teams.find((t) => t.id === teamID));
   const { listAgentSessions, openTeamFromConfigResume } = useTerminals();
   const [rows, setRows] = useState<Row[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>("custom");
   const [opening, setOpening] = useState(false);
+  // driver = the session the user LAST explicitly picked; it drives the 🟢 same-period
+  // highlights and "set all". Derived-from-first-selected would mis-correlate after
+  // "Son oturumlardan" selects every row (Codex P2). Cleared by the bulk modes.
+  const [driver, setDriver] = useState<SessionInfo | undefined>();
 
   // Load each configured agent's session history once.
   useEffect(() => {
     if (!team) return;
     let alive = true;
     (async () => {
-      const loaded: Row[] = [];
+      const out: Row[] = [];
       for (const ag of team.agents ?? []) {
         const cli = (ag.cli_type || "shell") as CLIType;
         // Only the agent's CURRENT-CLI sessions are resumable as configured — a Claude
@@ -50,26 +55,27 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
         // would fail/open the wrong conversation). Filter so the resume always uses the
         // matching CLI (Codex P2).
         const sessions = (await listAgentSessions(teamID, ag.name)).filter((s) => s.cliType === cli);
-        loaded.push({
+        out.push({
           agentName: ag.name,
           cliType: cli,
           workDir: ag.work_dir || "",
           promptID: ag.prompt_id || "",
           useWorktree: !!ag.use_worktree,
-          slotIndex: ag.slot_index ?? loaded.length,
+          slotIndex: ag.slot_index ?? out.length,
           sessions, open: false,
         });
       }
-      if (alive) setRows(loaded);
+      if (alive) {
+        setRows(out);
+        setLoaded(true);
+      }
     })();
     return () => { alive = false; };
   }, [teamID]); // eslint-disable-line
 
-  // The currently-selected session that drives correlation (first row with a pick).
-  const driver = useMemo(() => rows.find((r) => r.selected)?.selected, [rows]);
-
   const applyMode = (m: Mode) => {
     setMode(m);
+    setDriver(undefined); // bulk modes have no single explicit driver
     setRows((rs) => rs.map((r) => ({
       ...r,
       selected: m === "fresh" ? undefined : m === "last" ? r.sessions[0] : r.selected,
@@ -78,6 +84,7 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
 
   const pick = (i: number, s?: SessionInfo) => {
     setMode("custom");
+    setDriver(s); // the last explicit pick drives correlation (undefined for "Yeni")
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, selected: s, open: false } : r)));
   };
   const toggleOpen = (i: number) =>
@@ -168,7 +175,7 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
 
         <div className="modal-actions">
           <button className="btn-secondary" onClick={onClose}>İptal</button>
-          <button className="btn" onClick={open} disabled={opening}>{opening ? "Açılıyor..." : `Aç (${rows.length})`}</button>
+          <button className="btn" onClick={open} disabled={opening || !loaded}>{opening ? "Açılıyor..." : !loaded ? "Yükleniyor…" : `Aç (${rows.length})`}</button>
         </div>
       </div>
     </div>
