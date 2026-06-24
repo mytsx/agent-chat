@@ -66,9 +66,12 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   // submit a resumeID belonging to a different agent (Codex P2).
   useEffect(() => {
     const trimmed = agentName.trim();
-    setResumeID(""); // any in-flight pick is invalid once the name changes
+    setResumeID(""); // any in-flight pick is invalid once the name/CLI changes
+    // Clear the prior agent/CLI's sessions IMMEDIATELY (not after the debounce) — a row
+    // left visible during the 300ms fetch window could be picked and then submitted under
+    // the new agent/CLI by handleCreate (Codex P2).
+    setAgentSessions([]);
     if (!trimmed) {
-      setAgentSessions([]);
       return;
     }
     let active = true;

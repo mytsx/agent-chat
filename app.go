@@ -848,7 +848,17 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				workDir = rec.Cwd
 				useWorktree = false
 				if recIsWorktree {
-					resumeWtDir, resumeWtRepo = rec.Cwd, configRepo
+					resumeWtDir = rec.Cwd
+					// Derive the OWNING repo from the worktree itself — the close path runs
+					// `git worktree remove <repo> <wt>` and configRepo can be blank (a
+					// history-only SetupWizard agent) or point at a different repo after a
+					// config change, which would leak the worktree (Codex P2). Fall back to
+					// configRepo only if git can't resolve it.
+					if owner, oerr := git.WorktreeOwnerRepo(rec.Cwd); oerr == nil {
+						resumeWtRepo = owner
+					} else {
+						resumeWtRepo = configRepo
+					}
 				} else if !a.agentConfigured(teamID, agentName) {
 					// New history-only agent in a PLAIN dir → persist the recorded cwd so
 					// future fresh opens find the cwd-keyed session. A worktree cwd is NOT

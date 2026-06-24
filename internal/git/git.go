@@ -103,6 +103,26 @@ func ForceRemoveWorktree(repoDir, worktreePath string) error {
 	return nil
 }
 
+// WorktreeOwnerRepo returns the main repository directory that owns the worktree at
+// worktreePath, derived from its git common dir (mirrors CreateWorktree's origin
+// check). Used to recover the cleanup repo when resuming directly into a managed
+// worktree whose owning repo isn't otherwise known — RemoveWorktree needs the real
+// repo, and guessing from the current config can be blank or wrong (#40 Faz-2).
+func WorktreeOwnerRepo(worktreePath string) (string, error) {
+	cmd := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-common-dir: %w", err)
+	}
+	commonDir := strings.TrimSpace(string(out))
+	// commonDir can be relative (e.g. ".git") when git resolves it against worktreePath;
+	// make it absolute so its parent is the real repo toplevel.
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreePath, commonDir)
+	}
+	return filepath.Dir(commonDir), nil
+}
+
 // IsDirty checks if the given git directory has uncommitted changes.
 // Returns (true, nil) if dirty, (false, nil) if clean, (false, err) on git errors.
 func IsDirty(dir string) (bool, error) {

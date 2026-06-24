@@ -12,10 +12,6 @@ type Mode = "fresh" | "last" | "custom";
 interface Row {
   agentName: string;
   cliType: CLIType;
-  workDir: string;
-  promptID: string;
-  useWorktree: boolean;
-  slotIndex: number;
   sessions: SessionInfo[];
   selected?: SessionInfo;
   open: boolean;
@@ -27,7 +23,8 @@ function fmt(unix: number): string {
 }
 function dur(sec: number): string {
   const m = Math.round(sec / 60);
-  return m >= 60 ? `${Math.floor(m / 60)}s ${m % 60}dk` : `${m}dk`;
+  // "sa" for hours, not "s" — "s" reads as saniye (seconds) in Turkish (Gemini).
+  return m >= 60 ? `${Math.floor(m / 60)}sa ${m % 60}dk` : `${m}dk`;
 }
 
 export default function OpenTeamModal({ teamID, onClose }: Props) {
@@ -49,22 +46,16 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     (async () => {
       // Fetch every agent's history in PARALLEL — sequential awaits made the modal
       // open slowly for multi-agent teams (each call stats+parses transcripts) (Gemini).
-      const out = await Promise.all((team.agents ?? []).map(async (ag, idx) => {
+      const out = await Promise.all((team.agents ?? []).map(async (ag) => {
         const cli = (ag.cli_type || "shell") as CLIType;
         // Only the agent's CURRENT-CLI sessions are resumable as configured — a Claude
         // session can't be resumed under a now-Codex agent (`codex resume <claude-id>`
         // would fail/open the wrong conversation). Filter so the resume always uses the
-        // matching CLI (Codex P2).
+        // matching CLI (Codex P2). The agent's workDir/promptID/useWorktree/slotIndex are
+        // NOT carried here — open() delegates to openTeamFromConfigResume, which reads
+        // each agent's config from the backend by name (Copilot).
         const sessions = (await listAgentSessions(teamID, ag.name)).filter((s) => s.cliType === cli);
-        return {
-          agentName: ag.name,
-          cliType: cli,
-          workDir: ag.work_dir || "",
-          promptID: ag.prompt_id || "",
-          useWorktree: !!ag.use_worktree,
-          slotIndex: ag.slot_index ?? idx,
-          sessions, open: false,
-        } as Row;
+        return { agentName: ag.name, cliType: cli, sessions, open: false } as Row;
       }));
       if (alive) {
         setRows(out);
@@ -113,7 +104,10 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     setRows((rs) => rs.map((r) => {
       // Compare by sessionID, not object identity — state updates clone rows (Gemini).
       if (r.selected?.sessionID === driver.sessionID) return r;
-      const m = bestMatch(driver, r.sessions);
+      // Exclude fileMissing rows: a pruned transcript that overlaps the driver would
+      // otherwise be auto-selected and submitted as a stale resume id, the same dead
+      // launch "Son oturumlardan" avoids (Codex P2).
+      const m = bestMatch(driver, r.sessions.filter((s) => !s.fileMissing));
       return m ? { ...r, selected: m } : r;
     }));
   };
