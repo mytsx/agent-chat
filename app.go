@@ -750,6 +750,13 @@ func (a *App) isObserverAgent(teamID, agentName string) bool {
 	return false
 }
 
+// dirExists reports whether p is an existing directory (#40 Faz-2: a recorded
+// worktree cwd may have been cleaned up since the session ran).
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
 // CreateTerminal creates a new terminal and returns its session ID. Exported
 // signature is unchanged (Wails binding stable); it delegates to createTerminal
 // with no resume ID (fresh launch).
@@ -766,15 +773,19 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
 
-	// #40 Faz-2: resume in the EXACT directory the session was recorded in. A CLI's
-	// session file is cwd-keyed (Claude's project slug, Gemini's sha256, Copilot/Codex
-	// metadata), and the conversation assumes that repo — so resuming under the wizard/
-	// config workDir (often blank, or changed since) would start in the wrong dir and the
-	// resume could fail to find its session or run tools against the wrong repo (Codex
-	// P2). The recorded cwd is already the effective dir (worktree included), so run in
-	// it directly without re-creating a worktree.
+	// #40 Faz-2: resume LAUNCHES in the EXACT directory the session was recorded in. A
+	// CLI's session file is cwd-keyed (Claude's project slug, Gemini's sha256, Copilot/
+	// Codex metadata), so resuming under the wizard/config workDir (often blank, or
+	// changed since) would start in the wrong dir and fail to find its session (Codex
+	// P2). persistWorkDir/persistUseWorktree keep the ORIGINAL config values so the
+	// transient launch dir is never written back to the team template (Codex P2). The
+	// override is applied ONLY if the recorded cwd still exists — a worktree agent's
+	// recorded cwd is its generated worktree, which CloseTerminal may have cleaned up;
+	// in that case fall through to the normal path, which recreates the worktree at the
+	// same deterministic path (Codex P2).
+	persistWorkDir, persistUseWorktree := workDir, useWorktree
 	if resumeID != "" {
-		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" {
+		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && dirExists(rec.Cwd) {
 			workDir = rec.Cwd
 			useWorktree = false
 		}
@@ -932,13 +943,12 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// nest a worktree inside a worktree. Role is intentionally omitted — UpsertAgent
 	// preserves any Role the user set earlier.
 	//
-	// #40 Faz-2: a RESUME (resumeID set) is a transient action — it overrode workDir to
-	// the session's recorded cwd + useWorktree=false above, which must NOT be written
-	// back to the saved config (it would make the next fresh "Config ile Aç" start in
-	// the historical repo). Skip persistence on resume; the config was already captured
-	// on the original create (Codex P2).
-	if teamID != "" && resumeID == "" {
-		cfgWorkDir := workDir
+	// #40 Faz-2: persist the ORIGINAL config values (persistWorkDir/persistUseWorktree),
+	// NOT the resume launch override — so resuming an EXISTING agent doesn't rewrite its
+	// config to the historical cwd, while a history-only agent the user just picked in
+	// SetupWizard (no existing config) STILL gets saved to the team (Codex P2).
+	if teamID != "" {
+		cfgWorkDir := persistWorkDir
 		if origWorkDir != "" {
 			cfgWorkDir = origWorkDir
 		}
@@ -962,7 +972,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			WorkDir:     cfgWorkDir,
 			CLIType:     cliType,
 			SlotIndex:   slotIndex,
-			UseWorktree: useWorktree,
+			UseWorktree: persistUseWorktree,
 		}); err != nil {
 			log.Printf("[TEAM] UpsertAgent failed for agent=%s team=%s: %v", agentName, teamID, err)
 		}
