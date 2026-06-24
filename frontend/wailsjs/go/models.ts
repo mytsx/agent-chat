@@ -79,6 +79,32 @@ export namespace main {
 	        this.count = source["count"];
 	    }
 	}
+	export class SessionInfo {
+	    sessionID: string;
+	    cliType: string;
+	    startUnix: number;
+	    lastUnix: number;
+	    durationSec: number;
+	    messageCount: number;
+	    snippet: string;
+	    fileMissing: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionID = source["sessionID"];
+	        this.cliType = source["cliType"];
+	        this.startUnix = source["startUnix"];
+	        this.lastUnix = source["lastUnix"];
+	        this.durationSec = source["durationSec"];
+	        this.messageCount = source["messageCount"];
+	        this.snippet = source["snippet"];
+	        this.fileMissing = source["fileMissing"];
+	    }
+	}
 	export class VoiceStatus {
 	    hasKey: boolean;
 	    keyHint: string;

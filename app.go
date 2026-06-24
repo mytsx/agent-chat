@@ -2467,3 +2467,76 @@ func (a *App) GetVoiceStatus() (VoiceStatus, error) {
 func (a *App) SetVoiceConfig(apiKey string) error {
 	return voice.SaveConfig(a.dataDir, voice.Config{OpenAIAPIKey: strings.TrimSpace(apiKey)})
 }
+
+// SessionInfo is one past CLI session of an agent, enriched for the resume picker
+// (#40 Faz-2). Times are unix seconds. Wails generates the TS interface from this.
+type SessionInfo struct {
+	SessionID    string  `json:"sessionID"`
+	CLIType      string  `json:"cliType"`
+	StartUnix    float64 `json:"startUnix"`
+	LastUnix     float64 `json:"lastUnix"`
+	DurationSec  float64 `json:"durationSec"`
+	MessageCount int     `json:"messageCount"`
+	Snippet      string  `json:"snippet"`
+	FileMissing  bool    `json:"fileMissing"`
+}
+
+// ListKnownAgents returns agent names previously seen in the team's room (session
+// history) unioned with the team's configured agents — newest-activity first, then
+// any config-only names (#40 Faz-2).
+func (a *App) ListKnownAgents(teamID string) []string {
+	room := a.roomForTeam(teamID)
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range a.sessionLog.ListAgents(room) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	if t, err := a.teamStore.Get(teamID); err == nil {
+		for _, ag := range t.Agents {
+			if ag.Name != "" && !seen[ag.Name] {
+				seen[ag.Name] = true
+				out = append(out, ag.Name)
+			}
+		}
+	}
+	return out
+}
+
+// ListAgentSessions returns an agent's past sessions in the team's room, newest
+// first, enriched with duration + message count + first-message snippet read live
+// from each CLI transcript (#40 Faz-2). A pruned transcript yields FileMissing.
+func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
+	room := a.roomForTeam(teamID)
+	recs := a.sessionLog.ListSessions(room, agentName)
+	out := make([]SessionInfo, 0, len(recs))
+	for _, r := range recs {
+		si := SessionInfo{
+			SessionID:   r.SessionID,
+			CLIType:     r.CLIType,
+			StartUnix:   r.FirstSeen,
+			LastUnix:    r.LastSeen,
+			DurationSec: r.LastSeen - r.FirstSeen,
+		}
+		if path, ok := ingest.SessionFilePath(r.CLIType, r.Cwd, r.SessionID); ok {
+			if _, statErr := os.Stat(path); statErr == nil {
+				si.MessageCount, si.Snippet = ingest.SessionStats(r.CLIType, path)
+			} else {
+				si.FileMissing = true
+			}
+		} else {
+			si.FileMissing = true
+		}
+		out = append(out, si)
+	}
+	return out
+}
+
+// CreateTerminalResume creates a terminal resuming a SPECIFIC past session
+// (resumeID), or fresh when resumeID is empty. Thin exported wrapper over the
+// Faz-1 internal createTerminal (#40 Faz-2). The resume picker calls this per agent.
+func (a *App) CreateTerminalResume(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID)
+}
