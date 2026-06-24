@@ -832,15 +832,31 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	var resumeWtDir, resumeWtRepo string
 	if resumeID != "" {
 		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && dirExists(rec.Cwd) {
-			configRepo := workDir // before override (= main repo for a worktree agent)
-			workDir = rec.Cwd
-			useWorktree = false
 			worktreesRoot := filepath.Join(a.dataDir, "worktrees")
+			recIsWorktree := false
 			if rel, err := filepath.Rel(worktreesRoot, rec.Cwd); err == nil && !strings.HasPrefix(rel, "..") {
-				resumeWtDir, resumeWtRepo = rec.Cwd, configRepo
+				recIsWorktree = true
 			}
-			if !a.agentConfigured(teamID, agentName) {
-				persistWorkDir = rec.Cwd // new history-only agent → save where the session lives
+			// A manager/observer MUST run in the main repo (role guard above). If the
+			// recorded cwd is a managed worktree — e.g. the agent ran as a worker before
+			// being promoted — ignore it rather than dragging a main-repo role into a
+			// stale isolated worktree (Codex P2). All other resumes take the override.
+			if recIsWorktree && (isManager || isObserver) {
+				log.Printf("[TEAM] resume: %s main-repo rolü, kayıtlı worktree cwd yok sayıldı", agentName)
+			} else {
+				configRepo := workDir // before override (= main repo for a worktree agent)
+				workDir = rec.Cwd
+				useWorktree = false
+				if recIsWorktree {
+					resumeWtDir, resumeWtRepo = rec.Cwd, configRepo
+				} else if !a.agentConfigured(teamID, agentName) {
+					// New history-only agent in a PLAIN dir → persist the recorded cwd so
+					// future fresh opens find the cwd-keyed session. A worktree cwd is NOT
+					// persisted (it is transient and would trip the worktree-path skip below,
+					// dropping the agent entirely) — leave persistWorkDir as the config value
+					// so the agent is still saved (Codex P2).
+					persistWorkDir = rec.Cwd
+				}
 			}
 		}
 	}
@@ -1099,10 +1115,12 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// extend it to quit time) (Codex P2). GetCLISessionID is "" until captured, so this
 		// no-ops for a too-early exit; CapturedSessionIDs skips already-dead sessions so the
 		// shutdown Touch can't re-extend this one.
-		if cli.ResumeSupported(ct) {
-			// nil-guard: SessionDone returns nil for an unknown session, and <-nil blocks
-			// forever (goroutine leak). The session was just created so it's non-nil, but
-			// guard defensively (Gemini).
+		if cli.ResumeSupported(ct) && a.sessionLog != nil {
+			// Skip the watcher entirely when the history store failed to init (nil) — the
+			// goroutine's only job is sessionLog.Touch, so it would do nothing but leak
+			// (Gemini). nil-guard on doneCh too: SessionDone returns nil for an unknown
+			// session, and <-nil blocks forever. The session was just created so it's
+			// non-nil, but guard defensively (Gemini).
 			if doneCh := a.ptyManager.SessionDone(sessionID); doneCh != nil {
 				go func(sid string, done <-chan struct{}) {
 					<-done

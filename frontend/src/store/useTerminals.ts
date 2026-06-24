@@ -141,10 +141,15 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   openTeamFromConfigResume: async (teamID, resumeIDs) => {
     const results = await OpenTeamFromConfigResume(teamID, resumeIDs);
     const existing = get().sessions[teamID] ?? [];
+    // The backend is idempotent per slot: a retry / overlapping batch returns the
+    // EXISTING session id for an already-open slot instead of spawning a new PTY. Skip
+    // ids already in the store so we don't append a duplicate row for one PTY (Codex P2).
+    const known = new Set(existing.map((s) => s.sessionID));
     const newSessions: TerminalSession[] = [];
 
     for (const row of results) {
-      if (row.error || !row.sessionID) continue;
+      if (row.error || !row.sessionID || known.has(row.sessionID)) continue;
+      known.add(row.sessionID);
       newSessions.push({
         sessionID: row.sessionID,
         teamID,

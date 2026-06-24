@@ -72,7 +72,11 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
       }
     })();
     return () => { alive = false; };
-  }, [teamID]); // eslint-disable-line
+    // Re-run when team transitions undefined→loaded: the early `if (!team) return`
+    // would otherwise strand the modal on "Yükleniyor…" if the team store hadn't
+    // populated yet on mount. team?.id is stable once set (=teamID), so this keys on
+    // "team available" without re-fetching on unrelated store churn (Gemini).
+  }, [teamID, team?.id]); // eslint-disable-line
 
   const applyMode = (m: Mode) => {
     setMode(m);
@@ -80,7 +84,10 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     setRows((rs) => rs.map((r) => ({
       ...r,
       open: false, // close any open dropdown so it can't show stale pre-mode state (Copilot)
-      selected: m === "fresh" ? undefined : m === "last" ? r.sessions[0] : r.selected,
+      // "Son oturumlardan": pick the newest session WHOSE transcript still exists — a
+      // fileMissing row would send a stale resume id that opens a dead/error terminal.
+      // When every session is missing, leave the row fresh (undefined) (Codex P2).
+      selected: m === "fresh" ? undefined : m === "last" ? r.sessions.find((s) => !s.fileMissing) : r.selected,
     })));
   };
 
