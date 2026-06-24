@@ -1709,6 +1709,35 @@ html, body, #root {
 }
 .room-delete:hover { opacity: 1; }
 
+.room-delete-modal {
+  max-width: 440px;
+}
+
+.room-delete-copy {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.room-delete-confirm {
+  background: var(--danger);
+  border: 1px solid var(--danger);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.room-delete-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.room-delete-confirm:hover:enabled {
+  filter: brightness(1.05);
+}
+
 /* Room Browser v2 — orphan→takım import diyaloğu (#18) */
 .import-modal { min-width: 360px; max-width: 90vw; }
 .import-rows { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
