@@ -471,6 +471,13 @@ func (a *App) shutdown(ctx context.Context) {
 	// before quit lands in the snapshot taken below. THEN stop ingestion (a bounded
 	// wait for those final drains to deliver) (#65 / Codex round-5).
 	if a.ptyManager != nil {
+		// #40 Faz-2: close each live session's history open-window (lastSeen) BEFORE
+		// CloseAll — quit bypasses closeTerminalInternal, which is where the per-terminal
+		// Touch normally fires, so without this the last run keeps lastSeen==firstSeen
+		// and correlation can't see it (Codex P2).
+		for _, cid := range a.ptyManager.CapturedSessionIDs() {
+			a.sessionLog.Touch(cid)
+		}
 		a.ptyManager.CloseAll()
 	}
 	a.ingestMgr.StopAll()
@@ -1139,6 +1146,21 @@ type OpenTeamResult struct {
 // A per-agent failure does NOT abort the batch: that agent is skipped and its
 // error is reported so the user keeps the remaining terminals.
 func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
+	return a.openTeamFromConfig(teamID, nil)
+}
+
+// OpenTeamFromConfigResume opens a team from config like OpenTeamFromConfig but
+// resumes each agent from a chosen past session (resumeIDs[agentName]) when present.
+// It reuses the SAME ordering/capacity/observer-phantom guards, so the resume picker
+// can't open over-capacity, duplicate-slot, or phantom agents the modal would
+// otherwise launch raw (#40 Faz-2, Codex P2). A nil/partial map or empty entry opens
+// that agent fresh. Per-agent failures are skipped (reported in results), so a retry
+// after partial success doesn't duplicate the agents that already opened (Codex P2).
+func (a *App) OpenTeamFromConfigResume(teamID string, resumeIDs map[string]string) ([]OpenTeamResult, error) {
+	return a.openTeamFromConfig(teamID, resumeIDs)
+}
+
+func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]OpenTeamResult, error) {
 	t, err := a.teamStore.Get(teamID)
 	if err != nil {
 		return nil, err
@@ -1173,7 +1195,9 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 			results = append(results, res)
 			continue
 		}
-		sessionID, err := a.CreateTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex)
+		// resumeIDs[cfg.Name] is "" for a nil/absent entry (fresh). The picker filters
+		// sessions to the agent's configured CLI, so the id always matches cfg.CLIType.
+		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name])
 		if err != nil {
 			res.Error = err.Error()
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
@@ -2487,7 +2511,9 @@ type SessionInfo struct {
 func (a *App) ListKnownAgents(teamID string) []string {
 	room := a.roomForTeam(teamID)
 	seen := map[string]bool{}
-	var out []string
+	// Non-nil: a nil slice marshals to JSON null across Wails, and SetupWizard does
+	// knownAgents.map(...) which throws on null (Copilot). Empty → [].
+	out := []string{}
 	for _, n := range a.sessionLog.ListAgents(room) {
 		if !seen[n] {
 			seen[n] = true

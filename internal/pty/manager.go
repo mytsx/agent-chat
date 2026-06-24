@@ -627,6 +627,23 @@ func (m *Manager) GetSessionsByTeam(teamID string) []*PTYSession {
 	return result
 }
 
+// CapturedSessionIDs returns the non-empty CLI session ids captured across all
+// live terminals. Used on app shutdown to close their session-history open-windows
+// (lastSeen): app quit calls CloseAll directly, bypassing closeTerminalInternal's
+// per-terminal Touch, so without this the last run's sessions stay lastSeen==
+// firstSeen and same-period correlation can't see them (#40 Faz-2, Codex P2).
+func (m *Manager) CapturedSessionIDs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for _, s := range m.sessions {
+		if p := s.cliSessionID.Load(); p != nil && *p != "" {
+			out = append(out, *p)
+		}
+	}
+	return out
+}
+
 // filterEnv removes specified keys from an environment variable slice.
 // Keys ending with "*" are treated as prefix filters (e.g. "VSCODE_*" removes
 // all variables starting with "VSCODE_").

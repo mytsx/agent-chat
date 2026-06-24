@@ -110,6 +110,10 @@ export function OpenTeamFromConfig(arg1) {
   return window['go']['main']['App']['OpenTeamFromConfig'](arg1);
 }
 
+export function OpenTeamFromConfigResume(arg1, arg2) {
+  return window['go']['main']['App']['OpenTeamFromConfigResume'](arg1, arg2);
+}
+
 export function RenderSummaryPrompt(arg1) {
   return window['go']['main']['App']['RenderSummaryPrompt'](arg1);
 }

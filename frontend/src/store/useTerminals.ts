@@ -15,6 +15,7 @@ import {
   BroadcastToTeam,
   DetectCLIs,
   OpenTeamFromConfig,
+  OpenTeamFromConfigResume,
 } from "../../wailsjs/go/main/App";
 
 interface TerminalsState {
@@ -40,6 +41,7 @@ interface TerminalsState {
     useWorktree?: boolean
   ) => Promise<string>;
   openTeamFromConfig: (teamID: string) => Promise<main.OpenTeamResult[]>;
+  openTeamFromConfigResume: (teamID: string, resumeIDs: Record<string, string>) => Promise<main.OpenTeamResult[]>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
@@ -132,7 +134,13 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   openTeamFromConfig: async (teamID) => {
-    const results = await OpenTeamFromConfig(teamID);
+    // Fresh open = resume with no selections (#40 Faz-2). Shares the same backend
+    // batch guards (ordering/capacity/phantom skip) and store-insert logic.
+    return get().openTeamFromConfigResume(teamID, {});
+  },
+
+  openTeamFromConfigResume: async (teamID, resumeIDs) => {
+    const results = await OpenTeamFromConfigResume(teamID, resumeIDs);
     const existing = get().sessions[teamID] ?? [];
     const newSessions: TerminalSession[] = [];
 

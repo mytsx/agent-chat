@@ -60,6 +60,8 @@ export function OpenDirectoryDialog():Promise<string>;
 
 export function OpenTeamFromConfig(arg1:string):Promise<Array<main.OpenTeamResult>>;
 
+export function OpenTeamFromConfigResume(arg1:string,arg2:Record<string, string>):Promise<Array<main.OpenTeamResult>>;
+
 export function RenderSummaryPrompt(arg1:string):Promise<string>;
 
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;

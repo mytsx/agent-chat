@@ -1,7 +1,6 @@
 package sessionlog
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -37,16 +36,41 @@ func TestRecordAndListSessions(t *testing.T) {
 	}
 }
 
-func TestRecordIdempotentPreservesFirstSeen(t *testing.T) {
+func TestRecordSameRunPreservesFirstSeen(t *testing.T) {
 	s := newTestStore(t)
 	clock := 100.0
 	s.now = func() float64 { return clock }
 	s.Record("sid", "r", "a", "claude", "/c")
-	clock = 500
-	s.Record("sid", "r", "a", "claude", "/c") // tekrar capture
+	clock = 100 + newWindowGapSec/2 // within the gap → same run
+	s.Record("sid", "r", "a", "claude", "/c")
 	got := s.ListSessions("r", "a")
-	if len(got) != 1 || got[0].FirstSeen != 100 || got[0].LastSeen != 500 {
-		t.Fatalf("entry = %+v, want firstSeen=100 lastSeen=500", got[0])
+	if len(got) != 1 || got[0].FirstSeen != 100 || got[0].LastSeen != clock {
+		t.Fatalf("same-run entry = %+v, want firstSeen=100 lastSeen=%v", got[0], clock)
+	}
+}
+
+func TestRecordNewRunStartsFreshWindow(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "r", "a", "copilot", "/c") // run 1
+	clock = 100 + newWindowGapSec + 10         // gap > threshold → new run (e.g. Copilot resume)
+	s.Record("sid", "r", "a", "copilot", "/c")
+	got := s.ListSessions("r", "a")
+	// FirstSeen RESETS to the new run's start so correlation uses the latest window,
+	// not one spanning the idle gap (Codex P2).
+	if len(got) != 1 || got[0].FirstSeen != clock || got[0].LastSeen != clock {
+		t.Fatalf("new-run entry = %+v, want firstSeen=lastSeen=%v", got[0], clock)
+	}
+}
+
+func TestNilStoreListsAreSafe(t *testing.T) {
+	var s *Store // nil (failed New)
+	if got := s.ListSessions("r", "a"); got != nil {
+		t.Fatalf("nil ListSessions = %v, want nil", got)
+	}
+	if got := s.ListAgents("r"); got != nil {
+		t.Fatalf("nil ListAgents = %v, want nil", got)
 	}
 }
 
@@ -99,5 +123,4 @@ func TestPersistAndReload(t *testing.T) {
 	if len(s2.ListSessions("r", "a")) != 1 {
 		t.Fatal("reload must restore persisted record")
 	}
-	_ = filepath.Join(dir, "session-history.json")
 }

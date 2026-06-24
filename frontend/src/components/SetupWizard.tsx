@@ -59,21 +59,27 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     });
   }, [workDir]);
 
-  // Fetch sessions when agentName changes (debounced via useEffect)
+  // Fetch this agent's resumable sessions when the name changes. NOT debounced —
+  // it fires per keystroke (local IPC). An `active` guard drops a stale response so
+  // a slow earlier fetch can't overwrite a newer name's sessions and let handleCreate
+  // submit a resumeID belonging to a different agent (Codex P2).
   useEffect(() => {
     const trimmed = agentName.trim();
+    setResumeID(""); // any in-flight pick is invalid once the name changes
     if (!trimmed) {
       setAgentSessions([]);
-      setResumeID("");
       return;
     }
+    let active = true;
     listAgentSessions(teamID, trimmed).then((sessions) => {
-      setAgentSessions(sessions);
-      setResumeID("");
+      // Only resumable-as-configured sessions: the picker resumes under selectedCLI,
+      // so a Claude session under a now-Codex selection can't be opened (Codex P2).
+      if (active) setAgentSessions(sessions.filter((s) => s.cliType === selectedCLI));
     }).catch(() => {
-      setAgentSessions([]);
+      if (active) setAgentSessions([]);
     });
-  }, [agentName, teamID]);
+    return () => { active = false; };
+  }, [agentName, teamID, selectedCLI]);
 
   const handleBrowse = async () => {
     try {

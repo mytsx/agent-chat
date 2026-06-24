@@ -33,7 +33,13 @@ type Store struct {
 	now      func() float64
 }
 
-func nowUnix() float64 { return float64(time.Now().Unix()) }
+// newWindowGapSec: a re-Record of an existing session id with a gap larger than
+// this (seconds) since LastSeen starts a fresh open-window rather than extending
+// the old one — so a resumed Copilot session (same id, days later) doesn't merge
+// into one interval that spans the idle gap (Codex P2).
+const newWindowGapSec = 120.0
+
+func nowUnix() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
 // New loads (or creates) the store under dataDir/session-history.json.
 func New(dataDir string) (*Store, error) {
@@ -64,6 +70,15 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 	defer s.mu.Unlock()
 	t := s.now()
 	if r, ok := s.records[sessionID]; ok {
+		// A re-Record of an existing id is a NEW run — Copilot keeps the same
+		// events.jsonl across resumes, so onSessionID records the same id again. Start
+		// a fresh open-window so "same period" correlation compares the latest run, not
+		// one interval spanning idle days between runs (Codex P2). A re-record within
+		// newWindowGapSec is treated as the same run (defensive against a double-fire)
+		// and only advances LastSeen.
+		if t-r.LastSeen > newWindowGapSec {
+			r.FirstSeen = t
+		}
 		r.LastSeen = t
 		s.records[sessionID] = r
 	} else {
@@ -89,8 +104,13 @@ func (s *Store) Touch(sessionID string) {
 	}
 }
 
-// ListSessions returns a room+agent's sessions, newest LastSeen first.
+// ListSessions returns a room+agent's sessions, newest LastSeen first. Nil-safe:
+// a failed New leaves the app's store nil, and the enumeration binding calls this
+// directly — returning nil (→ empty history) instead of panicking (Codex/Copilot).
 func (s *Store) ListSessions(room, agent string) []Record {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Record
@@ -104,7 +124,11 @@ func (s *Store) ListSessions(room, agent string) []Record {
 }
 
 // ListAgents returns distinct agent names seen in a room, newest activity first.
+// Nil-safe (see ListSessions).
 func (s *Store) ListAgents(room string) []string {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	last := map[string]float64{}

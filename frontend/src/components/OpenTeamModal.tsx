@@ -32,7 +32,7 @@ function dur(sec: number): string {
 
 export default function OpenTeamModal({ teamID, onClose }: Props) {
   const team = useTeams((s) => s.teams.find((t) => t.id === teamID));
-  const { listAgentSessions, createTerminalResume } = useTerminals();
+  const { listAgentSessions, openTeamFromConfigResume } = useTerminals();
   const [rows, setRows] = useState<Row[]>([]);
   const [mode, setMode] = useState<Mode>("custom");
   const [opening, setOpening] = useState(false);
@@ -44,10 +44,15 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     (async () => {
       const loaded: Row[] = [];
       for (const ag of team.agents ?? []) {
-        const sessions = await listAgentSessions(teamID, ag.name);
+        const cli = (ag.cli_type || "shell") as CLIType;
+        // Only the agent's CURRENT-CLI sessions are resumable as configured — a Claude
+        // session can't be resumed under a now-Codex agent (`codex resume <claude-id>`
+        // would fail/open the wrong conversation). Filter so the resume always uses the
+        // matching CLI (Codex P2).
+        const sessions = (await listAgentSessions(teamID, ag.name)).filter((s) => s.cliType === cli);
         loaded.push({
           agentName: ag.name,
-          cliType: (ag.cli_type || "shell") as CLIType,
+          cliType: cli,
           workDir: ag.work_dir || "",
           promptID: ag.prompt_id || "",
           useWorktree: !!ag.use_worktree,
@@ -92,10 +97,22 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     if (opening) return;
     setOpening(true);
     try {
+      // One backend batch call: reuses OpenTeamFromConfig's ordering/capacity/phantom
+      // guards (the raw per-row loop bypassed them) and skips per-agent failures, so a
+      // partial failure leaves no duplicates on retry (Codex P2). resumeIDs carries
+      // only agents with a pick; the rest open fresh.
+      const resumeIDs: Record<string, string> = {};
       for (const r of rows) {
-        await createTerminalResume(teamID, r.agentName, r.workDir, r.cliType, r.promptID, r.slotIndex, r.useWorktree, r.selected?.sessionID ?? "");
+        if (r.selected) resumeIDs[r.agentName] = r.selected.sessionID;
       }
+      const results = await openTeamFromConfigResume(teamID, resumeIDs);
+      const failed = results.filter((r) => r.error);
+      // Close regardless: the successful terminals are already in the store, so
+      // reopening the modal and pressing Aç again must not re-create them.
       onClose();
+      if (failed.length > 0) {
+        alert(`Bazı agent'lar açılamadı:\n\n${failed.map((r) => `${r.agentName}: ${r.error}`).join("\n")}`);
+      }
     } catch (e) {
       console.error("[OpenTeamModal] open failed:", e);
       alert(`Açılırken hata: ${e instanceof Error ? e.message : String(e)}`);
