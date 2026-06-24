@@ -818,6 +818,22 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		useWorktree = false
 	}
 
+	// #40 Faz-2: if the recorded cwd is GONE (e.g. an auto worktree cleaned up on a prior
+	// close) and won't be recreated at the SAME path below, drop the resume entirely — the
+	// transcript may still exist so the picker offered this row, but resuming is cwd-keyed,
+	// so launching --resume in any other dir opens the wrong/fresh conversation. A worktree
+	// agent whose deterministic path still equals the recorded cwd (no team rename) keeps
+	// the resume — the normal worktree path recreates it there (Codex P2).
+	if resumeID != "" {
+		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && !dirExists(rec.Cwd) {
+			wouldBeWt := filepath.Join(a.dataDir, "worktrees", git.Slug(teamName), git.Slug(agentName))
+			if !(useWorktree && wouldBeWt == rec.Cwd) {
+				log.Printf("[TEAM] resume: kayıtlı cwd %s yok, aynı path'e yaratılamıyor — taze başlatılıyor (agent=%s)", rec.Cwd, agentName)
+				resumeID = ""
+			}
+		}
+	}
+
 	// #40 Faz-2: resume LAUNCHES in the directory the session was recorded in — a CLI's
 	// session file is cwd-keyed, so resuming under the wizard/config workDir (often blank
 	// or changed, and after a team rename the worktree slug differs) would start in the
@@ -1852,24 +1868,15 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 		}
 	}
 
-	// #40 Faz-2: close the history open-window (lastSeen) for a UI-close of a STILL-LIVE
-	// terminal here — Close deletes the session from the map, after which the PTY-death
-	// watcher's GetCLISessionID would return "" and never Touch (Gemini). Guard on
-	// already-exited: if session.done is closed, the watcher already Touched at the real
-	// exit time, so skip to avoid moving lastSeen forward to UI-cleanup time (Codex P2).
-	// (A self-exited session lingers in the map, so its done-watcher CAN read the id.)
-	alreadyExited := false
-	if doneCh := a.ptyManager.SessionDone(sessionID); doneCh != nil {
-		select {
-		case <-doneCh:
-			alreadyExited = true
-		default:
-		}
-	}
-	if !alreadyExited {
-		if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
-			a.sessionLog.Touch(cid)
-		}
+	// #40 Faz-2: close the history open-window (lastSeen) here, BEFORE Close deletes the
+	// session from the map (after which the PTY-death watcher's GetCLISessionID returns ""
+	// and never Touch). Touch UNCONDITIONALLY — even a just-self-exited session must be
+	// touched here: its done-watcher goroutine may not have been scheduled yet, and Close
+	// would then race ahead and delete the id, leaving the window at firstSeen==lastSeen
+	// and breaking same-period matching (Codex P2). A later redundant watcher Touch is
+	// harmless — Touch is idempotent and the timestamps are within seconds.
+	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
+		a.sessionLog.Touch(cid)
 	}
 
 	// Close PTY (terminates process).

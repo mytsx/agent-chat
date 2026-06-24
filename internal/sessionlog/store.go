@@ -156,13 +156,18 @@ func (s *Store) ListAgents(room string) []string {
 			display[key] = r.AgentName
 		}
 	}
-	names := make([]string, 0, len(last))
+	// Sort the already-lowercased keys by last-seen, THEN map to display names — sorting
+	// display names directly would re-ToLower each one O(N log N) times in the comparator
+	// (Gemini).
+	keys := make([]string, 0, len(last))
 	for key := range last {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return last[keys[i]] > last[keys[j]] })
+	names := make([]string, 0, len(keys))
+	for _, key := range keys {
 		names = append(names, display[key])
 	}
-	sort.Slice(names, func(i, j int) bool {
-		return last[strings.ToLower(names[i])] > last[strings.ToLower(names[j])]
-	})
 	return names
 }
 
