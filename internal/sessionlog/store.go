@@ -54,8 +54,10 @@ func New(dataDir string) (*Store, error) {
 		now:      nowUnix,
 	}
 	if data, err := os.ReadFile(s.filePath); err == nil {
-		_ = json.Unmarshal(data, &s.records) // corrupt/empty → start empty
-		if s.records == nil {
+		// A corrupt/invalid history file must not leave a partially-filled map — reset to
+		// empty on any unmarshal error so the store starts clean rather than half-loaded
+		// (Gemini).
+		if err := json.Unmarshal(data, &s.records); err != nil || s.records == nil {
 			s.records = make(map[string]Record)
 		}
 	}

@@ -757,6 +757,26 @@ func dirExists(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// agentConfigured reports whether agentName already exists in the team's saved
+// config (case-insensitive). Used on resume to decide whether to persist the
+// recorded cwd for a brand-new history-only agent vs preserve an existing config
+// (#40 Faz-2).
+func (a *App) agentConfigured(teamID, agentName string) bool {
+	if teamID == "" {
+		return false
+	}
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return false
+	}
+	for _, ag := range t.Agents {
+		if strings.EqualFold(ag.Name, agentName) {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateTerminal creates a new terminal and returns its session ID. Exported
 // signature is unchanged (Wails binding stable); it delegates to createTerminal
 // with no resume ID (fresh launch).
@@ -800,17 +820,28 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 
 	// #40 Faz-2: resume LAUNCHES in the directory the session was recorded in — a CLI's
 	// session file is cwd-keyed, so resuming under the wizard/config workDir (often blank
-	// or changed) would start in the wrong dir and fail to find its session (Codex P2).
-	// Only for NON-worktree agents: a worktree agent's recorded cwd IS its generated
-	// worktree, and the normal worktree path below recreates that exact deterministic
-	// path WITH its WorktreeDir/Repo metadata (so Close/Restart still clean it up) — so
-	// leave worktree agents to that path and redirect only plain-dir agents. Applied only
-	// when the recorded cwd still exists. persistWorkDir keeps the config dir so the
-	// transient launch cwd isn't written back to the team template (Codex P2).
-	persistWorkDir := workDir
-	if resumeID != "" && !useWorktree {
+	// or changed, and after a team rename the worktree slug differs) would start in the
+	// wrong dir and fail to find its session (Codex P2). Override to the recorded cwd when
+	// it still exists; if that cwd is a managed worktree, reconstruct its WorktreeDir/Repo
+	// metadata (WorktreeRepo = the config repo) so Close/Restart can still clean it up.
+	// persistWorkDir/persistUseWorktree keep the role-adjusted config values so the
+	// transient launch override isn't written back — EXCEPT for a brand-new history-only
+	// agent (SetupWizard pick, no existing config), where the recorded cwd IS persisted so
+	// future fresh opens find the cwd-keyed session (Codex P2).
+	persistWorkDir, persistUseWorktree := workDir, useWorktree
+	var resumeWtDir, resumeWtRepo string
+	if resumeID != "" {
 		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && dirExists(rec.Cwd) {
+			configRepo := workDir // before override (= main repo for a worktree agent)
 			workDir = rec.Cwd
+			useWorktree = false
+			worktreesRoot := filepath.Join(a.dataDir, "worktrees")
+			if rel, err := filepath.Rel(worktreesRoot, rec.Cwd); err == nil && !strings.HasPrefix(rel, "..") {
+				resumeWtDir, resumeWtRepo = rec.Cwd, configRepo
+			}
+			if !a.agentConfigured(teamID, agentName) {
+				persistWorkDir = rec.Cwd // new history-only agent → save where the session lives
+			}
 		}
 	}
 
@@ -932,6 +963,11 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		if wtDir != "" {
 			s.WorktreeDir = wtDir
 			s.WorktreeRepo = origWorkDir
+		} else if resumeWtDir != "" {
+			// #40 Faz-2: resuming directly into a managed worktree (no fresh creation) —
+			// restore its metadata so Close/Restart can still clean it up (Codex P2).
+			s.WorktreeDir = resumeWtDir
+			s.WorktreeRepo = resumeWtRepo
 		}
 	}
 
@@ -971,7 +1007,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			WorkDir:     cfgWorkDir,
 			CLIType:     cliType,
 			SlotIndex:   slotIndex,
-			UseWorktree: useWorktree,
+			UseWorktree: persistUseWorktree,
 		}); err != nil {
 			log.Printf("[TEAM] UpsertAgent failed for agent=%s team=%s: %v", agentName, teamID, err)
 		}
@@ -1240,6 +1276,22 @@ func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]
 		if capacity >= 0 && cfg.SlotIndex >= capacity {
 			res.Error = fmt.Sprintf("slot %d, %s grid kapasitesini (%d) aşıyor — atlandı", cfg.SlotIndex, t.GridLayout, capacity)
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s slot=%d > capacity=%d (%s), atlandı", cfg.Name, cfg.SlotIndex, capacity, t.GridLayout)
+			results = append(results, res)
+			continue
+		}
+		// Idempotent per slot: if a terminal already occupies this agent's slot (e.g. a
+		// retry after a partial-failure batch), return the existing one instead of
+		// spawning a duplicate — making the documented "no-duplicate on retry" behavior
+		// real, not just UI-enforced by the modal closing (Gemini).
+		existingID := ""
+		for _, s := range a.ptyManager.GetSessionsByTeam(teamID) {
+			if s.SlotIndex == cfg.SlotIndex {
+				existingID = s.ID
+				break
+			}
+		}
+		if existingID != "" {
+			res.SessionID = existingID
 			results = append(results, res)
 			continue
 		}
