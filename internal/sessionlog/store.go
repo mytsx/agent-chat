@@ -5,6 +5,7 @@ package sessionlog
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -198,18 +199,24 @@ func (s *Store) Get(sessionID string) (Record, bool) {
 	return r, ok
 }
 
-// save writes records atomically (temp+rename). Called under mu.
+// save writes records atomically (temp+rename). Called under mu. Record/Touch are
+// void, so a persist failure can't be returned — but it must not be SILENT (the user
+// would lose resume history with no trace), so each failure is logged, mirroring how
+// team.Store surfaces its persistence errors (Copilot).
 func (s *Store) save() {
 	data, err := json.MarshalIndent(s.records, "", "  ")
 	if err != nil {
+		log.Printf("[SESSIONLOG] marshal failed: %v", err)
 		return
 	}
 	tmp := s.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[SESSIONLOG] write %s failed: %v", tmp, err)
 		os.Remove(tmp)
 		return
 	}
 	if err := os.Rename(tmp, s.filePath); err != nil {
+		log.Printf("[SESSIONLOG] rename %s -> %s failed: %v", tmp, s.filePath, err)
 		os.Remove(tmp)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSessionFilePath(t *testing.T) {
@@ -69,4 +70,45 @@ func TestSessionStatsUnknownCLI(t *testing.T) {
 	if c, s := SessionStats("shell", "/nope"); c != 0 || s != "" {
 		t.Fatalf("unknown cli = %d,%q", c, s)
 	}
+}
+
+func TestSessionFilePathRoot_CodexDayWindow(t *testing.T) {
+	root := t.TempDir()
+	const id = "019ef58c-27d5-7e43-9902-8a02b5517bf1"
+	start := time.Date(2026, 6, 23, 20, 34, 23, 0, time.Local)
+
+	writeRollout := func(day time.Time) string {
+		dir := filepath.Join(root, ".codex", "sessions", day.Format("2006"), day.Format("01"), day.Format("02"))
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "rollout-2026-06-23T20-34-23-"+id+".jsonl")
+		if err := os.WriteFile(p, []byte("{}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("same day", func(t *testing.T) {
+		want := writeRollout(start)
+		got, ok := sessionFilePathRoot(root, "codex", "/x", id, float64(start.Unix()))
+		if !ok || got != want {
+			t.Fatalf("got %q ok=%v, want %q", got, ok, want)
+		}
+		os.RemoveAll(filepath.Join(root, ".codex"))
+	})
+	t.Run("adjacent day (start is next day, file in prior day)", func(t *testing.T) {
+		want := writeRollout(start)
+		// Pass a startUnix one day LATER; the ±1-day window still finds the prior-day file.
+		got, ok := sessionFilePathRoot(root, "codex", "/x", id, float64(start.AddDate(0, 0, 1).Unix()))
+		if !ok || got != want {
+			t.Fatalf("adjacent: got %q ok=%v, want %q", got, ok, want)
+		}
+		os.RemoveAll(filepath.Join(root, ".codex"))
+	})
+	t.Run("not found", func(t *testing.T) {
+		if got, ok := sessionFilePathRoot(root, "codex", "/x", "no-such-id", float64(start.Unix())); ok {
+			t.Fatalf("not found: got %q, want false", got)
+		}
+	})
 }

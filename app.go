@@ -931,7 +931,13 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// user-selected ORIGINAL repo dir (origWorkDir) instead so reopening doesn't
 	// nest a worktree inside a worktree. Role is intentionally omitted — UpsertAgent
 	// preserves any Role the user set earlier.
-	if teamID != "" {
+	//
+	// #40 Faz-2: a RESUME (resumeID set) is a transient action — it overrode workDir to
+	// the session's recorded cwd + useWorktree=false above, which must NOT be written
+	// back to the saved config (it would make the next fresh "Config ile Aç" start in
+	// the historical repo). Skip persistence on resume; the config was already captured
+	// on the original create (Codex P2).
+	if teamID != "" && resumeID == "" {
 		cfgWorkDir := workDir
 		if origWorkDir != "" {
 			cfgWorkDir = origWorkDir
@@ -1757,11 +1763,27 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 		}
 	}
 
-	// Close PTY (terminates process). The session's history open-window (lastSeen) is
-	// closed by the PTY-death watcher (started in createTerminal) when Close fires
-	// session.done — NOT here. Touching here too would re-touch an already-exited
-	// (in-CLI /exit) session at UI-cleanup time and wrongly move lastSeen past its real
-	// exit, falsely correlating sessions that weren't running together (#40, Codex P2).
+	// #40 Faz-2: close the history open-window (lastSeen) for a UI-close of a STILL-LIVE
+	// terminal here — Close deletes the session from the map, after which the PTY-death
+	// watcher's GetCLISessionID would return "" and never Touch (Gemini). Guard on
+	// already-exited: if session.done is closed, the watcher already Touched at the real
+	// exit time, so skip to avoid moving lastSeen forward to UI-cleanup time (Codex P2).
+	// (A self-exited session lingers in the map, so its done-watcher CAN read the id.)
+	alreadyExited := false
+	if doneCh := a.ptyManager.SessionDone(sessionID); doneCh != nil {
+		select {
+		case <-doneCh:
+			alreadyExited = true
+		default:
+		}
+	}
+	if !alreadyExited {
+		if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
+			a.sessionLog.Touch(cid)
+		}
+	}
+
+	// Close PTY (terminates process).
 	if err := a.ptyManager.Close(sessionID); err != nil {
 		return err
 	}

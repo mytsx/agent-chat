@@ -16,11 +16,17 @@ import (
 // loop, so a whole-tree glob per session is a real I/O cost (Gemini). startUnix<=0
 // falls back to the full-tree glob.
 func SessionFilePath(cliType, cwd, sessionID string, startUnix float64) (string, bool) {
-	if sessionID == "" {
-		return "", false
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return "", false
+	}
+	return sessionFilePathRoot(home, cliType, cwd, sessionID, startUnix)
+}
+
+// sessionFilePathRoot is SessionFilePath with the home root injected, so tests can
+// point the Codex glob at a t.TempDir() instead of the real ~/.codex (Copilot).
+func sessionFilePathRoot(home, cliType, cwd, sessionID string, startUnix float64) (string, bool) {
+	if sessionID == "" {
 		return "", false
 	}
 	switch cliType {
