@@ -130,7 +130,9 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
                     <div className="ot-opt" onClick={() => pick(i, undefined)}>✨ Yeni (taze başlat)</div>
                     {r.sessions.length === 0 && <div className="ot-empty">Geçmiş oturum yok</div>}
                     {r.sessions.map((s) => {
-                      const same = driver && s !== driver && overlaps(driver, s);
+                      // Correlation highlights only OTHER agents' overlapping sessions —
+                      // never the driver agent's own row (r.selected === driver) (#40 Faz-2).
+                      const same = driver && r.selected !== driver && overlaps(driver, s);
                       return (
                         <div key={s.sessionID} className={`ot-opt ${r.selected === s ? "sel" : ""} ${same ? "same-period" : ""}`} onClick={() => pick(i, s)}>
                           <div>{fmt(s.startUnix)} · {dur(s.durationSec)} · {s.messageCount} mesaj{same ? " 🟢" : ""}{s.fileMissing ? " ⚠️" : ""}</div>

@@ -144,7 +144,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
                 <option value="">✨ Yeni (taze)</option>
                 {agentSessions.map((s) => (
                   <option key={s.sessionID} value={s.sessionID}>
-                    {new Date(s.startUnix * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {s.messageCount} mesaj
+                    {new Date(s.startUnix * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {s.messageCount} mesaj{s.fileMissing ? " ⚠️ dosya yok" : ""}
                   </option>
                 ))}
               </select>
