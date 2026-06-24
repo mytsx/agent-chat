@@ -8,6 +8,7 @@ import TerminalPane from "./TerminalPane";
 import SetupWizard from "./SetupWizard";
 import GridSelector from "./GridSelector";
 import RoomSummaryModal from "./RoomSummaryModal";
+import OpenTeamModal from "./OpenTeamModal";
 import { useSummaries, useSummaryFor } from "../store/useSummaries";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -116,6 +117,7 @@ export default function TerminalGrid() {
   const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal, openTeamFromConfig } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
   const [openingFromConfig, setOpeningFromConfig] = useState(false);
+  const [openModal, setOpenModal] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   const loadSummary = useSummaries((s) => s.loadSummary);
   const [customLayouts, setCustomLayouts] = useState<Record<string, LayoutItem[]>>(() =>
@@ -405,11 +407,10 @@ export default function TerminalGrid() {
             <button
               type="button"
               className="btn-sm"
-              onClick={handleOpenFromConfig}
-              disabled={openingFromConfig}
+              onClick={() => setOpenModal(true)}
               title="Kayıtlı agent yapılandırmasıyla tüm terminalleri aç"
             >
-              {openingFromConfig ? "Açılıyor..." : "Config ile Aç"}
+              Config ile Aç
             </button>
           )}
           {(team.agents?.length ?? 0) > 0 && teamSessions.length === 0 && roomSummary?.exists && (
@@ -453,6 +454,9 @@ export default function TerminalGrid() {
 
       {showSummary && roomName && (
         <RoomSummaryModal room={roomName} onClose={() => setShowSummary(false)} />
+      )}
+      {openModal && team && (
+        <OpenTeamModal teamID={team.id} onClose={() => setOpenModal(false)} />
       )}
     </div>
   );
