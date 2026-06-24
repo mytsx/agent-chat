@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { CLIType } from "../lib/types";
+import { CLIType, SessionInfo } from "../lib/types";
 import { useTerminals } from "../store/useTerminals";
 import { usePrompts } from "../store/usePrompts";
 import { useTeams } from "../store/useTeams";
@@ -13,7 +13,7 @@ interface Props {
 }
 
 export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
-  const { availableCLIs, addTerminal } = useTerminals();
+  const { availableCLIs, addTerminal, listKnownAgents, listAgentSessions, createTerminalResume } = useTerminals();
   const setTeamManager = useTeams((s) => s.setTeamManager);
   const setTeamObserver = useTeams((s) => s.setTeamObserver);
   const prompts = usePrompts((s) => s.prompts);
@@ -26,6 +26,14 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const [useWorktree, setUseWorktree] = useState(false);
   const [isGitRepoDir, setIsGitRepoDir] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [knownAgents, setKnownAgents] = useState<string[]>([]);
+  const [agentSessions, setAgentSessions] = useState<SessionInfo[]>([]);
+  const [resumeID, setResumeID] = useState("");
+
+  // Load known agents on mount for autocomplete
+  useEffect(() => {
+    listKnownAgents(teamID).then(setKnownAgents).catch(() => {});
+  }, [teamID]);
 
   // Set default CLI to first available AI CLI
   useEffect(() => {
@@ -51,6 +59,22 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     });
   }, [workDir]);
 
+  // Fetch sessions when agentName changes (debounced via useEffect)
+  useEffect(() => {
+    const trimmed = agentName.trim();
+    if (!trimmed) {
+      setAgentSessions([]);
+      setResumeID("");
+      return;
+    }
+    listAgentSessions(teamID, trimmed).then((sessions) => {
+      setAgentSessions(sessions);
+      setResumeID("");
+    }).catch(() => {
+      setAgentSessions([]);
+    });
+  }, [agentName, teamID]);
+
   const handleBrowse = async () => {
     try {
       const dir = await OpenDirectoryDialog();
@@ -73,7 +97,12 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       } else if (setAsObserver) {
         await setTeamObserver(teamID, name);
       }
-      const sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex, useWorktree);
+      let sessionID: string;
+      if (resumeID) {
+        sessionID = await createTerminalResume(teamID, name, workDir, selectedCLI, promptID, slotIndex, useWorktree, resumeID);
+      } else {
+        sessionID = await addTerminal(teamID, name, workDir, selectedCLI, promptID, slotIndex, useWorktree);
+      }
       onCreated(sessionID);
     } catch (e) {
       console.error("Failed to create terminal:", e);
@@ -96,11 +125,31 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               value={agentName}
               onChange={(e) => setAgentName(e.target.value)}
               placeholder={`agent-${slotIndex + 1}`}
+              list="agent-history"
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleCreate();
               }}
             />
+            <datalist id="agent-history">
+              {knownAgents.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
           </div>
+
+          {agentSessions.length > 0 && (
+            <div className="wizard-field">
+              <label>Oturum <span className="wizard-optional">(geçmişten devam)</span></label>
+              <select value={resumeID} onChange={(e) => setResumeID(e.target.value)}>
+                <option value="">✨ Yeni (taze)</option>
+                {agentSessions.map((s) => (
+                  <option key={s.sessionID} value={s.sessionID}>
+                    {new Date(s.startUnix * 1000).toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {s.messageCount} mesaj
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="wizard-field">
             <label>CLI Type</label>
