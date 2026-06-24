@@ -47,24 +47,25 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     if (!team) return;
     let alive = true;
     (async () => {
-      const out: Row[] = [];
-      for (const ag of team.agents ?? []) {
+      // Fetch every agent's history in PARALLEL — sequential awaits made the modal
+      // open slowly for multi-agent teams (each call stats+parses transcripts) (Gemini).
+      const out = await Promise.all((team.agents ?? []).map(async (ag, idx) => {
         const cli = (ag.cli_type || "shell") as CLIType;
         // Only the agent's CURRENT-CLI sessions are resumable as configured — a Claude
         // session can't be resumed under a now-Codex agent (`codex resume <claude-id>`
         // would fail/open the wrong conversation). Filter so the resume always uses the
         // matching CLI (Codex P2).
         const sessions = (await listAgentSessions(teamID, ag.name)).filter((s) => s.cliType === cli);
-        out.push({
+        return {
           agentName: ag.name,
           cliType: cli,
           workDir: ag.work_dir || "",
           promptID: ag.prompt_id || "",
           useWorktree: !!ag.use_worktree,
-          slotIndex: ag.slot_index ?? out.length,
+          slotIndex: ag.slot_index ?? idx,
           sessions, open: false,
-        });
-      }
+        } as Row;
+      }));
       if (alive) {
         setRows(out);
         setLoaded(true);
@@ -78,6 +79,7 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
     setDriver(undefined); // bulk modes have no single explicit driver
     setRows((rs) => rs.map((r) => ({
       ...r,
+      open: false, // close any open dropdown so it can't show stale pre-mode state (Copilot)
       selected: m === "fresh" ? undefined : m === "last" ? r.sessions[0] : r.selected,
     })));
   };
@@ -90,11 +92,20 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
   const toggleOpen = (i: number) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, open: !r.open } : { ...r, open: false })));
 
+  // Make a clickable option keyboard-activatable (Enter/Space) for a11y (Copilot).
+  const onKeyActivate = (fn: () => void) => (e: { key: string; preventDefault: () => void }) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      fn();
+    }
+  };
+
   // Set every OTHER agent to its best same-period session relative to `driver`.
   const setAllSamePeriod = () => {
     if (!driver) return;
     setRows((rs) => rs.map((r) => {
-      if (r.selected === driver) return r;
+      // Compare by sessionID, not object identity — state updates clone rows (Gemini).
+      if (r.selected?.sessionID === driver.sessionID) return r;
       const m = bestMatch(driver, r.sessions);
       return m ? { ...r, selected: m } : r;
     }));
@@ -151,14 +162,15 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
                 </button>
                 {r.open && (
                   <div className="ot-dropdown">
-                    <div className="ot-opt" onClick={() => pick(i, undefined)}>✨ Yeni (taze başlat)</div>
+                    <div className="ot-opt" role="button" tabIndex={0} onClick={() => pick(i, undefined)} onKeyDown={onKeyActivate(() => pick(i, undefined))}>✨ Yeni (taze başlat)</div>
                     {r.sessions.length === 0 && <div className="ot-empty">Geçmiş oturum yok</div>}
                     {r.sessions.map((s) => {
                       // Correlation highlights only OTHER agents' overlapping sessions —
-                      // never the driver agent's own row (r.selected === driver) (#40 Faz-2).
-                      const same = driver && r.selected !== driver && overlaps(driver, s);
+                      // never the driver agent's own row (#40 Faz-2). Compare by sessionID
+                      // (object refs are unstable across state clones — Gemini).
+                      const same = driver && r.selected?.sessionID !== driver.sessionID && overlaps(driver, s);
                       return (
-                        <div key={s.sessionID} className={`ot-opt ${r.selected === s ? "sel" : ""} ${same ? "same-period" : ""}`} onClick={() => pick(i, s)}>
+                        <div key={s.sessionID} role="button" tabIndex={0} className={`ot-opt ${r.selected?.sessionID === s.sessionID ? "sel" : ""} ${same ? "same-period" : ""}`} onClick={() => pick(i, s)} onKeyDown={onKeyActivate(() => pick(i, s))}>
                           <div>{fmt(s.startUnix)} · {dur(s.durationSec)} · {s.messageCount} mesaj{same ? " 🟢" : ""}{s.fileMissing ? " ⚠️" : ""}</div>
                           {s.snippet && <div className="ot-snippet">{s.snippet}</div>}
                         </div>

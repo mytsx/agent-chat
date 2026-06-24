@@ -1028,6 +1028,20 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			// the startup prompt via sendStartupPrompt, which records it there.
 			a.ingestMgr.RecordInjection(sessionID, copilotComposed)
 		}
+		// #40 Faz-2: close this session's history open-window when its PTY dies, INCLUDING
+		// an in-CLI /exit or crash that never routes through closeTerminalInternal. Without
+		// it the window stays at discovery time (and a later app-quit Touch would wrongly
+		// extend it to quit time) (Codex P2). GetCLISessionID is "" until captured, so this
+		// no-ops for a too-early exit; CapturedSessionIDs skips already-dead sessions so the
+		// shutdown Touch can't re-extend this one.
+		if cli.ResumeSupported(ct) {
+			go func(sid string, doneCh <-chan struct{}) {
+				<-doneCh
+				if cid := a.ptyManager.GetCLISessionID(sid); cid != "" {
+					a.sessionLog.Touch(cid)
+				}
+			}(sessionID, a.ptyManager.SessionDone(sessionID))
+		}
 	}
 
 	// Send startup prompt in background
@@ -2510,20 +2524,24 @@ type SessionInfo struct {
 // any config-only names (#40 Faz-2).
 func (a *App) ListKnownAgents(teamID string) []string {
 	room := a.roomForTeam(teamID)
+	// Dedup case-insensitively: history may store "alice" while the team config has
+	// "Alice" — they're the same agent app-wide, so they must not both appear (Gemini).
 	seen := map[string]bool{}
 	// Non-nil: a nil slice marshals to JSON null across Wails, and SetupWizard does
 	// knownAgents.map(...) which throws on null (Copilot). Empty → [].
 	out := []string{}
 	for _, n := range a.sessionLog.ListAgents(room) {
-		if !seen[n] {
-			seen[n] = true
+		key := strings.ToLower(n)
+		if !seen[key] {
+			seen[key] = true
 			out = append(out, n)
 		}
 	}
 	if t, err := a.teamStore.Get(teamID); err == nil {
 		for _, ag := range t.Agents {
-			if ag.Name != "" && !seen[ag.Name] {
-				seen[ag.Name] = true
+			key := strings.ToLower(ag.Name)
+			if ag.Name != "" && !seen[key] {
+				seen[key] = true
 				out = append(out, ag.Name)
 			}
 		}

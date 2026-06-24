@@ -131,12 +131,14 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
               value={agentName}
               onChange={(e) => setAgentName(e.target.value)}
               placeholder={`agent-${slotIndex + 1}`}
-              list="agent-history"
+              list={`agent-history-${teamID}-${slotIndex}`}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleCreate();
               }}
             />
-            <datalist id="agent-history">
+            {/* Per-instance id: SetupWizard renders once per empty slot, so a fixed
+                datalist id would collide and drop suggestions in the duplicates (Copilot). */}
+            <datalist id={`agent-history-${teamID}-${slotIndex}`}>
               {knownAgents.map((n) => (
                 <option key={n} value={n} />
               ))}

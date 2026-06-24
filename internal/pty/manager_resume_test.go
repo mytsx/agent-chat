@@ -33,6 +33,12 @@ func TestCapturedSessionIDs(t *testing.T) {
 	m.sessions["c"] = &PTYSession{ID: "c"} // never captured → nil → skipped
 	m.sessions["d"] = &PTYSession{ID: "d"}
 	m.SetCLISessionID("d", "") // empty → skipped
+	// A dead-but-lingering session (in-CLI /exit) must be skipped so shutdown can't
+	// re-extend its already-closed history window (#40 Faz-2).
+	dead := &PTYSession{ID: "e", done: make(chan struct{})}
+	close(dead.done)
+	m.sessions["e"] = dead
+	m.SetCLISessionID("e", "id-e")
 
 	got := m.CapturedSessionIDs()
 	set := map[string]bool{}

@@ -637,6 +637,14 @@ func (m *Manager) CapturedSessionIDs() []string {
 	defer m.mu.RUnlock()
 	var out []string
 	for _, s := range m.sessions {
+		// Skip an already-exited (in-CLI /exit/crash) session still lingering in the
+		// map: its history window was closed at its real exit time, so the shutdown
+		// Touch must not re-extend it to app-quit time (#40 Faz-2, Codex P2).
+		select {
+		case <-s.done:
+			continue
+		default:
+		}
 		if p := s.cliSessionID.Load(); p != nil && *p != "" {
 			out = append(out, *p)
 		}
