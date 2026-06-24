@@ -28,6 +28,8 @@ export function DetectCLIs():Promise<Array<cli.CLIInfo>>;
 
 export function GetAgents(arg1:string):Promise<Record<string, types.Agent>>;
 
+export function GetDeferralEnabled():Promise<boolean>;
+
 export function GetGlobalPrompt():Promise<string>;
 
 export function GetMessages(arg1:string):Promise<Array<types.Message>>;
@@ -41,6 +43,8 @@ export function GetRoomTranscript(arg1:string):Promise<string>;
 export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
+
+export function GetDeferralEnabled():Promise<boolean>;
 
 export function GetVoiceStatus():Promise<main.VoiceStatus>;
 
@@ -78,11 +82,15 @@ export function SendPromptToAgent(arg1:string,arg2:string,arg3:Record<string, st
 
 export function SetCustomPrompt(arg1:string,arg2:string):Promise<team.Team>;
 
+export function SetDeferralEnabled(arg1:boolean):Promise<void>;
+
 export function SetGlobalPrompt(arg1:string):Promise<void>;
 
 export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;
 
 export function SetTeamObserver(arg1:string,arg2:string):Promise<team.Team>;
+
+export function SetDeferralEnabled(arg1:boolean):Promise<void>;
 
 export function SetVoiceConfig(arg1:string):Promise<void>;
 

@@ -142,6 +142,10 @@ func (a *App) startup(ctx context.Context) {
 		})
 	})
 
+	// Apply persisted settings to the orchestrator (default: deferral disabled).
+	settings := a.loadAppSettings()
+	a.orchestrator.SetDeferralEnabled(settings.DeferralEnabled)
+
 	// Voice seam defaults (#16). Tests replace these; production uses ffmpeg +
 	// Whisper + the real PTY injection and Wails event bus.
 	a.newVoiceRecorder = func() (voice.Recorder, error) {
@@ -2636,6 +2640,58 @@ type VoiceStatus struct {
 	HasKey      bool   `json:"hasKey"`
 	KeyHint     string `json:"keyHint"`
 	FFmpegFound bool   `json:"ffmpegFound"`
+}
+
+// appSettings holds feature flags persisted to ~/.agent-chat/settings.json.
+type appSettings struct {
+	// DeferralEnabled activates the pending-input check in the orchestrator:
+	// when true, notifications are held back while the user is typing in a
+	// terminal. Default false (inject immediately, never interrupt).
+	DeferralEnabled bool `json:"deferral_enabled"`
+}
+
+func (a *App) loadAppSettings() appSettings {
+	path := filepath.Join(a.dataDir, "settings.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return appSettings{} // defaults
+	}
+	var s appSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return appSettings{}
+	}
+	return s
+}
+
+func (a *App) saveAppSettings(s appSettings) error {
+	path := filepath.Join(a.dataDir, "settings.json")
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// GetDeferralEnabled reports whether the pending-input deferral check is active.
+func (a *App) GetDeferralEnabled() bool {
+	return a.loadAppSettings().DeferralEnabled
+}
+
+// SetDeferralEnabled persists and immediately applies the deferral toggle.
+func (a *App) SetDeferralEnabled(enabled bool) error {
+	s := a.loadAppSettings()
+	s.DeferralEnabled = enabled
+	if err := a.saveAppSettings(s); err != nil {
+		return err
+	}
+	if o := a.orchestrator; o != nil {
+		o.SetDeferralEnabled(enabled)
+	}
+	return nil
 }
 
 // GetVoiceStatus reports voice config state for the Settings panel (no raw key).

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { GetVoiceStatus, SetVoiceConfig } from "../../wailsjs/go/main/App";
+import { GetVoiceStatus, SetVoiceConfig, GetDeferralEnabled, SetDeferralEnabled } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
 
 interface SettingsModalProps {
@@ -15,10 +15,22 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [deferralEnabled, setDeferralEnabled] = useState(false);
 
   useEffect(() => {
     GetVoiceStatus().then(setStatus).catch((e) => setError(String(e)));
+    GetDeferralEnabled().then(setDeferralEnabled).catch(() => {});
   }, []);
+
+  const handleDeferralToggle = async (checked: boolean) => {
+    setDeferralEnabled(checked);
+    try {
+      await SetDeferralEnabled(checked);
+    } catch (e) {
+      setError(String(e));
+      setDeferralEnabled(!checked); // geri al
+    }
+  };
 
   const handleSave = async () => {
     // Mirror the Save button's disabled state here too: pressing Enter on the empty,
@@ -44,10 +56,27 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>⚙️ Ayarlar — Sesli Prompt</h3>
+        <h3>⚙️ Ayarlar</h3>
 
         <div className="form-group">
-          <label>OpenAI API Anahtarı</label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={deferralEnabled}
+              onChange={(e) => handleDeferralToggle(e.target.checked)}
+              style={{ width: "auto", accentColor: "var(--accent)" }}
+            />
+            Yazarken bildirimleri ertele
+          </label>
+          <span className="form-hint">
+            {deferralEnabled
+              ? "✅ Aktif — terminalde yazı yazarken gelen bildirimler 12 saniyeye kadar beklenir; süre dolarsa ekranda gösterilir."
+              : "ℹ️ Pasif (varsayılan) — bildirimler hemen terminale iletilir."}
+          </span>
+        </div>
+
+        <div className="form-group" style={{ borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
+          <label>OpenAI API Anahtarı (Sesli Prompt)</label>
           <input
             type="password"
             autoFocus

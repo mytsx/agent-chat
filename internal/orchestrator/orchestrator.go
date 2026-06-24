@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -146,6 +147,12 @@ type Orchestrator struct {
 	// rather than injected into the PTY (where it would corrupt the user's input).
 	onDeferredToUI func(sessionID, agentName, prompt string)
 
+	// deferralEnabled gates the pending-input check. When false (default) the
+	// orchestrator never defers notifications — inject happens immediately
+	// regardless of what the user has typed in the terminal. Toggle via
+	// SetDeferralEnabled (wired from the Settings panel).
+	deferralEnabled atomic.Bool
+
 	// injectFunc overrides the real PTY injection for testing. If nil, the real
 	// PTY path is used.
 	injectFunc func(sessionID, text string)
@@ -190,6 +197,14 @@ func (o *Orchestrator) SetDeferredHandler(fn func(sessionID, agentName, prompt s
 	o.onDeferredToUI = fn
 }
 
+// SetDeferralEnabled toggles the pending-input deferral check. When disabled
+// (the default) notifications are injected immediately without inspecting the
+// terminal's input buffer. Enable only when you want the "don't interrupt
+// typing" protection.
+func (o *Orchestrator) SetDeferralEnabled(enabled bool) {
+	o.deferralEnabled.Store(enabled)
+}
+
 // hasPendingInput reports whether the user has an unsubmitted input line in the
 // session (anything typed since the last Enter). Injecting into such a line
 // would corrupt it, so notifications are deferred while it is true.
@@ -197,6 +212,10 @@ func (o *Orchestrator) SetDeferredHandler(fn func(sessionID, agentName, prompt s
 // invoke it OUTSIDE o.mu to preserve lock ordering (never hold o.mu while
 // locking pty.Manager.mu).
 func (o *Orchestrator) hasPendingInput(sessionID string) bool {
+	// Deferral feature is disabled (default) — never block on pending input.
+	if !o.deferralEnabled.Load() {
+		return false
+	}
 	if o.pendingInputFunc != nil {
 		return o.pendingInputFunc(sessionID)
 	}

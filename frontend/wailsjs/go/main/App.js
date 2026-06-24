@@ -46,6 +46,10 @@ export function GetAgents(arg1) {
   return window['go']['main']['App']['GetAgents'](arg1);
 }
 
+export function GetDeferralEnabled() {
+  return window['go']['main']['App']['GetDeferralEnabled']();
+}
+
 export function GetGlobalPrompt() {
   return window['go']['main']['App']['GetGlobalPrompt']();
 }
@@ -144,6 +148,10 @@ export function SendPromptToAgent(arg1, arg2, arg3) {
 
 export function SetCustomPrompt(arg1, arg2) {
   return window['go']['main']['App']['SetCustomPrompt'](arg1, arg2);
+}
+
+export function SetDeferralEnabled(arg1) {
+  return window['go']['main']['App']['SetDeferralEnabled'](arg1);
 }
 
 export function SetGlobalPrompt(arg1) {
