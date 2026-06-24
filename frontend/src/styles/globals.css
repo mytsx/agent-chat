@@ -1798,3 +1798,164 @@ html, body, #root {
 .app-settings-btn:hover {
   opacity: 1;
 }
+
+/* ============ OpenTeamModal (#40 Faz-2) ============ */
+.open-team-modal {
+  width: 560px;
+  max-width: 94vw;
+}
+
+/* Mode toggle segmented control */
+.open-team-modes {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.mode-seg {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.mode-seg:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.mode-seg.active {
+  background: #1f6feb22;
+  border-color: #1f6feb;
+  color: #58a6ff;
+}
+
+/* Agent rows */
+.open-team-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.open-team-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.ot-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 90px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding-top: 4px;
+}
+.ot-cli {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Picker dropdown */
+.ot-picker {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+.ot-current {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 5px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  gap: 6px;
+  text-align: left;
+}
+.ot-current:hover {
+  border-color: var(--accent);
+}
+.ot-dropdown {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  background: #161b22;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  z-index: 200;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.ot-opt {
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+}
+.ot-opt:last-child {
+  border-bottom: none;
+}
+.ot-opt:hover {
+  background: var(--bg-hover);
+}
+.ot-opt.sel {
+  background: #1f6feb22;
+  border-color: #1f6feb;
+  color: #58a6ff;
+}
+.ot-opt.same-period {
+  background: #3fb95022;
+  border-color: #3fb950;
+  color: #3fb950;
+}
+.ot-snippet {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ot-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* "Set all to same period" link-button */
+.ot-setall {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 10px;
+  cursor: pointer;
+  margin-bottom: 10px;
+  text-align: left;
+  transition: border-color 0.12s, color 0.12s;
+}
+.ot-setall:hover {
+  border-color: #3fb950;
+  color: #3fb950;
+}

@@ -19,6 +19,56 @@ func TestCLISessionID_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestCapturedSessionIDs(t *testing.T) {
+	m := NewManager(nil)
+	if got := m.CapturedSessionIDs(); len(got) != 0 {
+		t.Fatalf("empty manager = %v, want none", got)
+	}
+	// Two sessions captured an id, one never captured (nil pointer), one captured
+	// then cleared to "" — only the two non-empty ids must be returned (#40 Faz-2).
+	m.sessions["a"] = &PTYSession{ID: "a"}
+	m.SetCLISessionID("a", "id-a")
+	m.sessions["b"] = &PTYSession{ID: "b"}
+	m.SetCLISessionID("b", "id-b")
+	m.sessions["c"] = &PTYSession{ID: "c"} // never captured → nil → skipped
+	m.sessions["d"] = &PTYSession{ID: "d"}
+	m.SetCLISessionID("d", "") // empty → skipped
+	// A dead-but-lingering session (in-CLI /exit) must be skipped so shutdown can't
+	// re-extend its already-closed history window (#40 Faz-2).
+	dead := &PTYSession{ID: "e", done: make(chan struct{})}
+	close(dead.done)
+	m.sessions["e"] = dead
+	m.SetCLISessionID("e", "id-e")
+
+	got := m.CapturedSessionIDs()
+	set := map[string]bool{}
+	for _, id := range got {
+		set[id] = true
+	}
+	if len(got) != 2 || !set["id-a"] || !set["id-b"] {
+		t.Fatalf("CapturedSessionIDs = %v, want exactly {id-a, id-b}", got)
+	}
+}
+
+func TestSessionExitedAt(t *testing.T) {
+	m := NewManager(nil)
+	if at, ok := m.SessionExitedAt("nope"); ok || at != 0 {
+		t.Fatalf("unknown = %v,%v, want 0,false", at, ok)
+	}
+	// Still-running session (exitedAtNano==0) → not exited.
+	m.sessions["live"] = &PTYSession{ID: "live"}
+	if at, ok := m.SessionExitedAt("live"); ok || at != 0 {
+		t.Fatalf("live = %v,%v, want 0,false", at, ok)
+	}
+	// Exited session → exit time in unix seconds. 2e18 ns == 2e9 s exactly.
+	exited := &PTYSession{ID: "dead"}
+	exited.exitedAtNano.Store(2_000_000_000_000_000_000)
+	m.sessions["dead"] = exited
+	if at, ok := m.SessionExitedAt("dead"); !ok || at != 2_000_000_000 {
+		t.Fatalf("dead = %v,%v, want 2e9,true", at, ok)
+	}
+}
+
 func TestCLISessionID_UnknownSession(t *testing.T) {
 	m := NewManager(nil)
 	m.SetCLISessionID("ghost", "x") // must not panic

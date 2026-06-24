@@ -16,6 +16,8 @@ export function CreateTeam(arg1:string,arg2:string,arg3:Array<team.AgentConfig>)
 
 export function CreateTerminal(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:boolean,arg7:number):Promise<string>;
 
+export function CreateTerminalResume(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:boolean,arg7:number,arg8:string):Promise<string>;
+
 export function DeletePrompt(arg1:string):Promise<void>;
 
 export function DeleteRoom(arg1:string):Promise<void>;
@@ -44,6 +46,10 @@ export function GetVoiceStatus():Promise<main.VoiceStatus>;
 
 export function IsGitRepo(arg1:string):Promise<boolean>;
 
+export function ListAgentSessions(arg1:string,arg2:string):Promise<Array<main.SessionInfo>>;
+
+export function ListKnownAgents(arg1:string):Promise<Array<string>>;
+
 export function ListPrompts():Promise<Array<prompt.Prompt>>;
 
 export function ListRooms():Promise<Array<types.RoomSummary>>;
@@ -53,6 +59,8 @@ export function ListTeams():Promise<Array<team.Team>>;
 export function OpenDirectoryDialog():Promise<string>;
 
 export function OpenTeamFromConfig(arg1:string):Promise<Array<main.OpenTeamResult>>;
+
+export function OpenTeamFromConfigResume(arg1:string,arg2:Record<string, string>):Promise<Array<main.OpenTeamResult>>;
 
 export function RenderSummaryPrompt(arg1:string):Promise<string>;
 

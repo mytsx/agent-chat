@@ -22,6 +22,10 @@ export function CreateTerminal(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
   return window['go']['main']['App']['CreateTerminal'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
 }
 
+export function CreateTerminalResume(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8) {
+  return window['go']['main']['App']['CreateTerminalResume'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+}
+
 export function DeletePrompt(arg1) {
   return window['go']['main']['App']['DeletePrompt'](arg1);
 }
@@ -78,6 +82,14 @@ export function IsGitRepo(arg1) {
   return window['go']['main']['App']['IsGitRepo'](arg1);
 }
 
+export function ListAgentSessions(arg1, arg2) {
+  return window['go']['main']['App']['ListAgentSessions'](arg1, arg2);
+}
+
+export function ListKnownAgents(arg1) {
+  return window['go']['main']['App']['ListKnownAgents'](arg1);
+}
+
 export function ListPrompts() {
   return window['go']['main']['App']['ListPrompts']();
 }
@@ -96,6 +108,10 @@ export function OpenDirectoryDialog() {
 
 export function OpenTeamFromConfig(arg1) {
   return window['go']['main']['App']['OpenTeamFromConfig'](arg1);
+}
+
+export function OpenTeamFromConfigResume(arg1, arg2) {
+  return window['go']['main']['App']['OpenTeamFromConfigResume'](arg1, arg2);
 }
 
 export function RenderSummaryPrompt(arg1) {

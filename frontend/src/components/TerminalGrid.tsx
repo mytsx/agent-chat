@@ -8,6 +8,7 @@ import TerminalPane from "./TerminalPane";
 import SetupWizard from "./SetupWizard";
 import GridSelector from "./GridSelector";
 import RoomSummaryModal from "./RoomSummaryModal";
+import OpenTeamModal from "./OpenTeamModal";
 import { useSummaries, useSummaryFor } from "../store/useSummaries";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -113,9 +114,9 @@ function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal, openTeamFromConfig } = useTerminals();
+  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
-  const [openingFromConfig, setOpeningFromConfig] = useState(false);
+  const [openModal, setOpenModal] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   const loadSummary = useSummaries((s) => s.loadSummary);
   const [customLayouts, setCustomLayouts] = useState<Record<string, LayoutItem[]>>(() =>
@@ -199,29 +200,6 @@ export default function TerminalGrid() {
         [team.id]: layout.map((item) => normalizeLayout(item)),
       };
     });
-  };
-
-  const handleOpenFromConfig = async () => {
-    if (!team || openingFromConfig) return;
-    setOpeningFromConfig(true);
-    try {
-      const results = await openTeamFromConfig(team.id);
-      const failed = results.filter((r) => r.error);
-      if (failed.length > 0) {
-        const detail = failed.map((r) => `${r.agentName}: ${r.error}`).join("\n");
-        console.error(`[openTeamFromConfig] ${failed.length} agent açılamadı:`, detail);
-        // No notification component exists in the app, so surface batch-open
-        // failures (e.g. over-capacity slots, worktree errors) to the user here.
-        alert(`Bazı agent'lar başlatılamadı:\n\n${detail}`);
-      }
-    } catch (err) {
-      console.error("[openTeamFromConfig] failed:", err);
-      alert(
-        `Takım yapılandırması açılırken hata oluştu:\n\n${err instanceof Error ? err.message : String(err)}`
-      );
-    } finally {
-      setOpeningFromConfig(false);
-    }
   };
 
   if (!team) return <div className="terminal-grid-empty">No team selected</div>;
@@ -405,11 +383,10 @@ export default function TerminalGrid() {
             <button
               type="button"
               className="btn-sm"
-              onClick={handleOpenFromConfig}
-              disabled={openingFromConfig}
+              onClick={() => setOpenModal(true)}
               title="Kayıtlı agent yapılandırmasıyla tüm terminalleri aç"
             >
-              {openingFromConfig ? "Açılıyor..." : "Config ile Aç"}
+              Config ile Aç
             </button>
           )}
           {(team.agents?.length ?? 0) > 0 && teamSessions.length === 0 && roomSummary?.exists && (
@@ -453,6 +430,9 @@ export default function TerminalGrid() {
 
       {showSummary && roomName && (
         <RoomSummaryModal room={roomName} onClose={() => setShowSummary(false)} />
+      )}
+      {openModal && team && (
+        <OpenTeamModal teamID={team.id} onClose={() => setOpenModal(false)} />
       )}
     </div>
   );

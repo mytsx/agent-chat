@@ -80,6 +80,17 @@ export interface RoomSummaryInfo {
   exists: boolean;
 }
 
+export interface SessionInfo {
+  sessionID: string;
+  cliType: CLIType;
+  startUnix: number;
+  lastUnix: number;
+  durationSec: number;
+  messageCount: number;
+  snippet: string;
+  fileMissing: boolean;
+}
+
 export interface TerminalSession {
   sessionID: string;
   teamID: string;

@@ -27,6 +27,7 @@ import (
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/sanitize"
+	"desktop/internal/sessionlog"
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
@@ -67,6 +68,7 @@ type App struct {
 	// hand-constructed test Apps leave it nil, and the Manager's methods no-op on a
 	// nil receiver.
 	ingestMgr     *ingest.Manager
+	sessionLog    *sessionlog.Store
 	promptStore   *prompt.Store
 	teamStore     *team.Store
 	dataDir       string
@@ -123,6 +125,12 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize session-file ingestion (#65): logs messages the user types
 	// directly into an AI terminal by reading the CLI's own session file.
 	a.ingestMgr = ingest.New()
+	// #40 Faz-2: persistent per-agent session history for the resume picker.
+	if sl, err := sessionlog.New(a.dataDir); err != nil {
+		log.Printf("[SESSIONLOG] init failed: %v", err)
+	} else {
+		a.sessionLog = sl
+	}
 	// UI fallback: when a notification can't be safely injected (the user kept
 	// typing past the deferral cap), surface it in the frontend instead of
 	// corrupting the user's input line.
@@ -463,6 +471,13 @@ func (a *App) shutdown(ctx context.Context) {
 	// before quit lands in the snapshot taken below. THEN stop ingestion (a bounded
 	// wait for those final drains to deliver) (#65 / Codex round-5).
 	if a.ptyManager != nil {
+		// #40 Faz-2: close each live session's history open-window (lastSeen) BEFORE
+		// CloseAll — quit bypasses closeTerminalInternal, which is where the per-terminal
+		// Touch normally fires, so without this the last run keeps lastSeen==firstSeen
+		// and correlation can't see it (Codex P2).
+		for _, cid := range a.ptyManager.CapturedSessionIDs() {
+			a.sessionLog.Touch(cid)
+		}
 		a.ptyManager.CloseAll()
 	}
 	a.ingestMgr.StopAll()
@@ -735,6 +750,33 @@ func (a *App) isObserverAgent(teamID, agentName string) bool {
 	return false
 }
 
+// dirExists reports whether p is an existing directory (#40 Faz-2: a recorded
+// worktree cwd may have been cleaned up since the session ran).
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// agentConfigured reports whether agentName already exists in the team's saved
+// config (case-insensitive). Used on resume to decide whether to persist the
+// recorded cwd for a brand-new history-only agent vs preserve an existing config
+// (#40 Faz-2).
+func (a *App) agentConfigured(teamID, agentName string) bool {
+	if teamID == "" {
+		return false
+	}
+	t, err := a.teamStore.Get(teamID)
+	if err != nil {
+		return false
+	}
+	for _, ag := range t.Agents {
+		if strings.EqualFold(ag.Name, agentName) {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateTerminal creates a new terminal and returns its session ID. Exported
 // signature is unchanged (Wails binding stable); it delegates to createTerminal
 // with no resume ID (fresh launch).
@@ -774,6 +816,80 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// isolated worktree (manager routes; observer only watches). Backend guard.
 	if isManager || isObserver {
 		useWorktree = false
+	}
+
+	// #40 Faz-2: if the recorded cwd is GONE (e.g. an auto worktree cleaned up on a prior
+	// close) and won't be recreated at the SAME path below, drop the resume entirely — the
+	// transcript may still exist so the picker offered this row, but resuming is cwd-keyed,
+	// so launching --resume in any other dir opens the wrong/fresh conversation. A worktree
+	// agent whose deterministic path still equals the recorded cwd (no team rename) keeps
+	// the resume — the normal worktree path recreates it there (Codex P2).
+	if resumeID != "" {
+		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && !dirExists(rec.Cwd) {
+			wouldBeWt := filepath.Join(a.dataDir, "worktrees", git.Slug(teamName), git.Slug(agentName))
+			if !(useWorktree && wouldBeWt == rec.Cwd) {
+				log.Printf("[TEAM] resume: kayıtlı cwd %s yok, aynı path'e yaratılamıyor — taze başlatılıyor (agent=%s)", rec.Cwd, agentName)
+				resumeID = ""
+			}
+		}
+	}
+
+	// #40 Faz-2: resume LAUNCHES in the directory the session was recorded in — a CLI's
+	// session file is cwd-keyed, so resuming under the wizard/config workDir (often blank
+	// or changed, and after a team rename the worktree slug differs) would start in the
+	// wrong dir and fail to find its session (Codex P2). Override to the recorded cwd when
+	// it still exists; if that cwd is a managed worktree, reconstruct its WorktreeDir/Repo
+	// metadata (WorktreeRepo = the config repo) so Close/Restart can still clean it up.
+	// persistWorkDir/persistUseWorktree keep the role-adjusted config values so the
+	// transient launch override isn't written back — EXCEPT for a brand-new history-only
+	// agent (SetupWizard pick, no existing config), where the recorded cwd IS persisted so
+	// future fresh opens find the cwd-keyed session (Codex P2).
+	persistWorkDir, persistUseWorktree := workDir, useWorktree
+	var resumeWtDir, resumeWtRepo string
+	if resumeID != "" {
+		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" && dirExists(rec.Cwd) {
+			worktreesRoot := filepath.Join(a.dataDir, "worktrees")
+			recIsWorktree := false
+			if rel, err := filepath.Rel(worktreesRoot, rec.Cwd); err == nil && !strings.HasPrefix(rel, "..") {
+				recIsWorktree = true
+			}
+			// A manager/observer MUST run in the main repo (role guard above). If the
+			// recorded cwd is a managed worktree — e.g. the agent ran as a worker before
+			// being promoted — ignore it rather than dragging a main-repo role into a
+			// stale isolated worktree (Codex P2). All other resumes take the override.
+			if recIsWorktree && (isManager || isObserver) {
+				// Refusing the worktree cwd means we run in the main repo — but the recorded
+				// transcript is cwd-keyed to that worktree, so passing --resume <id> here
+				// would open the wrong/fresh conversation. Drop the resume and start clean
+				// (Codex P2).
+				log.Printf("[TEAM] resume: %s main-repo rolü, kayıtlı worktree cwd yok sayıldı — taze başlatılıyor", agentName)
+				resumeID = ""
+			} else {
+				configRepo := workDir // before override (= main repo for a worktree agent)
+				workDir = rec.Cwd
+				useWorktree = false
+				if recIsWorktree {
+					resumeWtDir = rec.Cwd
+					// Derive the OWNING repo from the worktree itself — the close path runs
+					// `git worktree remove <repo> <wt>` and configRepo can be blank (a
+					// history-only SetupWizard agent) or point at a different repo after a
+					// config change, which would leak the worktree (Codex P2). Fall back to
+					// configRepo only if git can't resolve it.
+					if owner, oerr := git.WorktreeOwnerRepo(rec.Cwd); oerr == nil {
+						resumeWtRepo = owner
+					} else {
+						resumeWtRepo = configRepo
+					}
+				} else if !a.agentConfigured(teamID, agentName) {
+					// New history-only agent in a PLAIN dir → persist the recorded cwd so
+					// future fresh opens find the cwd-keyed session. A worktree cwd is NOT
+					// persisted (it is transient and would trip the worktree-path skip below,
+					// dropping the agent entirely) — leave persistWorkDir as the config value
+					// so the agent is still saved (Codex P2).
+					persistWorkDir = rec.Cwd
+				}
+			}
+		}
 	}
 
 	// Worktree setup
@@ -894,6 +1010,11 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		if wtDir != "" {
 			s.WorktreeDir = wtDir
 			s.WorktreeRepo = origWorkDir
+		} else if resumeWtDir != "" {
+			// #40 Faz-2: resuming directly into a managed worktree (no fresh creation) —
+			// restore its metadata so Close/Restart can still clean it up (Codex P2).
+			s.WorktreeDir = resumeWtDir
+			s.WorktreeRepo = resumeWtRepo
 		}
 	}
 
@@ -902,8 +1023,14 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// user-selected ORIGINAL repo dir (origWorkDir) instead so reopening doesn't
 	// nest a worktree inside a worktree. Role is intentionally omitted — UpsertAgent
 	// preserves any Role the user set earlier.
+	//
+	// #40 Faz-2: persist the config workDir (persistWorkDir), NOT the resume launch
+	// override — so resuming an EXISTING agent doesn't rewrite its config to the
+	// historical cwd, while a history-only agent the user just picked in SetupWizard (no
+	// existing config) STILL gets saved to the team. useWorktree here is the role-adjusted
+	// value (resume only touched workDir, never the worktree flag) (Codex P2).
 	if teamID != "" {
-		cfgWorkDir := workDir
+		cfgWorkDir := persistWorkDir
 		if origWorkDir != "" {
 			cfgWorkDir = origWorkDir
 		}
@@ -927,7 +1054,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			WorkDir:     cfgWorkDir,
 			CLIType:     cliType,
 			SlotIndex:   slotIndex,
-			UseWorktree: useWorktree,
+			UseWorktree: persistUseWorktree,
 		}); err != nil {
 			log.Printf("[TEAM] UpsertAgent failed for agent=%s team=%s: %v", agentName, teamID, err)
 		}
@@ -994,6 +1121,10 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				return
 			}
 			a.ptyManager.SetCLISessionID(sessionID, id)
+			// #40 Faz-2: also log to the persistent history so this session can be
+			// resumed/correlated later (room/agent/cliType/cwd from the enclosing
+			// createTerminal scope).
+			a.sessionLog.Record(id, room, agentName, cliType, ingestCwd)
 			runtime.EventsEmit(a.ctx, "terminal:resume-available", map[string]string{
 				"sessionID":    sessionID,
 				"cliSessionID": id,
@@ -1008,6 +1139,33 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 			// message); record it so ingestion suppresses the CLI's copy. Other CLIs get
 			// the startup prompt via sendStartupPrompt, which records it there.
 			a.ingestMgr.RecordInjection(sessionID, copilotComposed)
+		}
+		// #40 Faz-2: close this session's history open-window when its PTY dies, INCLUDING
+		// an in-CLI /exit or crash that never routes through closeTerminalInternal. Without
+		// it the window stays at discovery time (and a later app-quit Touch would wrongly
+		// extend it to quit time) (Codex P2). GetCLISessionID is "" until captured, so this
+		// no-ops for a too-early exit; CapturedSessionIDs skips already-dead sessions so the
+		// shutdown Touch can't re-extend this one.
+		if cli.ResumeSupported(ct) && a.sessionLog != nil {
+			// Skip the watcher entirely when the history store failed to init (nil) — the
+			// goroutine's only job is sessionLog.Touch, so it would do nothing but leak
+			// (Gemini). nil-guard on doneCh too: SessionDone returns nil for an unknown
+			// session, and <-nil blocks forever. The session was just created so it's
+			// non-nil, but guard defensively (Gemini).
+			if doneCh := a.ptyManager.SessionDone(sessionID); doneCh != nil {
+				go func(sid string, done <-chan struct{}) {
+					<-done
+					if cid := a.ptyManager.GetCLISessionID(sid); cid != "" {
+						// Pin to the exit time (just stamped before done closed), so it matches
+						// what a later UI-close records and the window can't drift (Codex P2).
+						if exitedAt, exited := a.ptyManager.SessionExitedAt(sid); exited {
+							a.sessionLog.TouchAt(cid, exitedAt)
+						} else {
+							a.sessionLog.Touch(cid)
+						}
+					}
+				}(sessionID, doneCh)
+			}
 		}
 	}
 
@@ -1127,6 +1285,21 @@ type OpenTeamResult struct {
 // A per-agent failure does NOT abort the batch: that agent is skipped and its
 // error is reported so the user keeps the remaining terminals.
 func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
+	return a.openTeamFromConfig(teamID, nil)
+}
+
+// OpenTeamFromConfigResume opens a team from config like OpenTeamFromConfig but
+// resumes each agent from a chosen past session (resumeIDs[agentName]) when present.
+// It reuses the SAME ordering/capacity/observer-phantom guards, so the resume picker
+// can't open over-capacity, duplicate-slot, or phantom agents the modal would
+// otherwise launch raw (#40 Faz-2, Codex P2). A nil/partial map or empty entry opens
+// that agent fresh. Per-agent failures are skipped (reported in results), so a retry
+// after partial success doesn't duplicate the agents that already opened (Codex P2).
+func (a *App) OpenTeamFromConfigResume(teamID string, resumeIDs map[string]string) ([]OpenTeamResult, error) {
+	return a.openTeamFromConfig(teamID, resumeIDs)
+}
+
+func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]OpenTeamResult, error) {
 	t, err := a.teamStore.Get(teamID)
 	if err != nil {
 		return nil, err
@@ -1161,7 +1334,25 @@ func (a *App) OpenTeamFromConfig(teamID string) ([]OpenTeamResult, error) {
 			results = append(results, res)
 			continue
 		}
-		sessionID, err := a.CreateTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex)
+		// Idempotent per slot: if a terminal already occupies this agent's slot (e.g. a
+		// retry after a partial-failure batch), return the existing one instead of
+		// spawning a duplicate — making the documented "no-duplicate on retry" behavior
+		// real, not just UI-enforced by the modal closing (Gemini).
+		existingID := ""
+		for _, s := range a.ptyManager.GetSessionsByTeam(teamID) {
+			if s.SlotIndex == cfg.SlotIndex {
+				existingID = s.ID
+				break
+			}
+		}
+		if existingID != "" {
+			res.SessionID = existingID
+			results = append(results, res)
+			continue
+		}
+		// resumeIDs[cfg.Name] is "" for a nil/absent entry (fresh). The picker filters
+		// sessions to the agent's configured CLI, so the id always matches cfg.CLIType.
+		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name])
 		if err != nil {
 			res.Error = err.Error()
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
@@ -1688,7 +1879,23 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 		}
 	}
 
-	// Close PTY (terminates process)
+	// #40 Faz-2: close the history open-window (lastSeen) here, BEFORE Close deletes the
+	// session from the map (after which the PTY-death watcher's GetCLISessionID returns ""
+	// and never touches). For a session that ALREADY self-exited (in-CLI /exit or crash),
+	// pin lastSeen to the REAL exit time — a dead pane the user closes minutes or hours
+	// later must NOT stretch the window forward to close time (Codex P2). TouchAt only
+	// advances if newer, so this is idempotent with the done-watcher and also recovers the
+	// case where that watcher raced behind an immediate close and missed the id. A still-
+	// live terminal is touched at now() — the UI-close IS the end of its window.
+	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
+		if exitedAt, exited := a.ptyManager.SessionExitedAt(sessionID); exited {
+			a.sessionLog.TouchAt(cid, exitedAt)
+		} else {
+			a.sessionLog.Touch(cid)
+		}
+	}
+
+	// Close PTY (terminates process).
 	if err := a.ptyManager.Close(sessionID); err != nil {
 		return err
 	}
@@ -1827,6 +2034,9 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 	if prevRoom != newRoom {
 		a.syncHubManager(prevRoom, "")
 		a.syncHubObservers(prevRoom, nil)
+		// #40 Faz-2: re-index session history to the new room name so the resume picker
+		// (queries by current room) still shows the team's past sessions (Codex P2).
+		a.sessionLog.RenameRoom(prevRoom, newRoom)
 	}
 	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
 	a.syncHubObservers(newRoom, observerNames(updated))
@@ -2449,4 +2659,83 @@ func (a *App) GetVoiceStatus() (VoiceStatus, error) {
 // SetVoiceConfig persists the OpenAI API key (set-only). An empty string clears it.
 func (a *App) SetVoiceConfig(apiKey string) error {
 	return voice.SaveConfig(a.dataDir, voice.Config{OpenAIAPIKey: strings.TrimSpace(apiKey)})
+}
+
+// SessionInfo is one past CLI session of an agent, enriched for the resume picker
+// (#40 Faz-2). Times are unix seconds. Wails generates the TS interface from this.
+type SessionInfo struct {
+	SessionID    string  `json:"sessionID"`
+	CLIType      string  `json:"cliType"`
+	StartUnix    float64 `json:"startUnix"`
+	LastUnix     float64 `json:"lastUnix"`
+	DurationSec  float64 `json:"durationSec"`
+	MessageCount int     `json:"messageCount"`
+	Snippet      string  `json:"snippet"`
+	FileMissing  bool    `json:"fileMissing"`
+}
+
+// ListKnownAgents returns agent names previously seen in the team's room (session
+// history) unioned with the team's configured agents — newest-activity first, then
+// any config-only names (#40 Faz-2).
+func (a *App) ListKnownAgents(teamID string) []string {
+	room := a.roomForTeam(teamID)
+	// Dedup case-insensitively: history may store "alice" while the team config has
+	// "Alice" — they're the same agent app-wide, so they must not both appear (Gemini).
+	seen := map[string]bool{}
+	// Non-nil: a nil slice marshals to JSON null across Wails, and SetupWizard does
+	// knownAgents.map(...) which throws on null (Copilot). Empty → [].
+	out := []string{}
+	for _, n := range a.sessionLog.ListAgents(room) {
+		key := strings.ToLower(n)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, n)
+		}
+	}
+	if t, err := a.teamStore.Get(teamID); err == nil {
+		for _, ag := range t.Agents {
+			key := strings.ToLower(ag.Name)
+			if ag.Name != "" && !seen[key] {
+				seen[key] = true
+				out = append(out, ag.Name)
+			}
+		}
+	}
+	return out
+}
+
+// ListAgentSessions returns an agent's past sessions in the team's room, newest
+// first, enriched with duration + message count + first-message snippet read live
+// from each CLI transcript (#40 Faz-2). A pruned transcript yields FileMissing.
+func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
+	room := a.roomForTeam(teamID)
+	recs := a.sessionLog.ListSessions(room, agentName)
+	out := make([]SessionInfo, 0, len(recs))
+	for _, r := range recs {
+		si := SessionInfo{
+			SessionID:   r.SessionID,
+			CLIType:     r.CLIType,
+			StartUnix:   r.FirstSeen,
+			LastUnix:    r.LastSeen,
+			DurationSec: r.LastSeen - r.FirstSeen,
+		}
+		if path, ok := ingest.SessionFilePath(r.CLIType, r.Cwd, r.SessionID, r.FirstSeen); ok {
+			if _, statErr := os.Stat(path); statErr == nil {
+				si.MessageCount, si.Snippet = ingest.SessionStats(r.CLIType, path)
+			} else {
+				si.FileMissing = true
+			}
+		} else {
+			si.FileMissing = true
+		}
+		out = append(out, si)
+	}
+	return out
+}
+
+// CreateTerminalResume creates a terminal resuming a SPECIFIC past session
+// (resumeID), or fresh when resumeID is empty. Thin exported wrapper over the
+// Faz-1 internal createTerminal (#40 Faz-2). The resume picker calls this per agent.
+func (a *App) CreateTerminalResume(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID)
 }

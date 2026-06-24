@@ -1,0 +1,114 @@
+package ingest
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestSessionFilePath(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	tests := []struct {
+		name, cliType, cwd, id, wantSuffix string
+		wantOK                             bool
+	}{
+		{"claude", "claude", "/x/y", "uuid-1", filepath.Join(".claude", "projects", "-x-y", "uuid-1.jsonl"), true},
+		{"copilot", "copilot", "/ignored", "uuid-2", filepath.Join(".copilot", "session-state", "uuid-2", "events.jsonl"), true},
+		{"gemini unsupported", "gemini", "/x", "uuid", "", false},
+		{"shell", "shell", "/x", "uuid", "", false},
+		{"empty id", "claude", "/x", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := SessionFilePath(tt.cliType, tt.cwd, tt.id, 0)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if tt.wantOK && got != filepath.Join(home, tt.wantSuffix) {
+				t.Fatalf("path = %q, want suffix %q", got, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestSessionStats(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	// msg[0] is the app bootstrap/join prompt (always first) → skipped. The two real
+	// user messages remain: count=2, snippet="ilk gerçek mesaj".
+	body := `{"type":"user","message":{"role":"user","content":"BOOTSTRAP join prompt"}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":"ilk gerçek mesaj"}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"x"}]}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":"ikinci"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	count, snippet := SessionStats("claude", path)
+	if count != 2 {
+		t.Fatalf("count = %d, want 2 (bootstrap skipped)", count)
+	}
+	if snippet != "ilk gerçek mesaj" {
+		t.Fatalf("snippet = %q, want first real message (bootstrap skipped)", snippet)
+	}
+}
+
+func TestSessionStatsOnlyBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "b.jsonl")
+	// Only the bootstrap prompt → no real user message yet → 0 / "".
+	body := `{"type":"user","message":{"role":"user","content":"BOOTSTRAP only"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if c, s := SessionStats("claude", path); c != 0 || s != "" {
+		t.Fatalf("only-bootstrap = %d,%q, want 0,\"\"", c, s)
+	}
+}
+
+func TestSessionStatsUnknownCLI(t *testing.T) {
+	if c, s := SessionStats("shell", "/nope"); c != 0 || s != "" {
+		t.Fatalf("unknown cli = %d,%q", c, s)
+	}
+}
+
+func TestSessionFilePathRoot_CodexDayWindow(t *testing.T) {
+	root := t.TempDir()
+	const id = "019ef58c-27d5-7e43-9902-8a02b5517bf1"
+	start := time.Date(2026, 6, 23, 20, 34, 23, 0, time.Local)
+
+	writeRollout := func(day time.Time) string {
+		dir := filepath.Join(root, ".codex", "sessions", day.Format("2006"), day.Format("01"), day.Format("02"))
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "rollout-2026-06-23T20-34-23-"+id+".jsonl")
+		if err := os.WriteFile(p, []byte("{}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("same day", func(t *testing.T) {
+		want := writeRollout(start)
+		got, ok := sessionFilePathRoot(root, "codex", "/x", id, float64(start.Unix()))
+		if !ok || got != want {
+			t.Fatalf("got %q ok=%v, want %q", got, ok, want)
+		}
+		os.RemoveAll(filepath.Join(root, ".codex"))
+	})
+	t.Run("adjacent day (start is next day, file in prior day)", func(t *testing.T) {
+		want := writeRollout(start)
+		// Pass a startUnix one day LATER; the ±1-day window still finds the prior-day file.
+		got, ok := sessionFilePathRoot(root, "codex", "/x", id, float64(start.AddDate(0, 0, 1).Unix()))
+		if !ok || got != want {
+			t.Fatalf("adjacent: got %q ok=%v, want %q", got, ok, want)
+		}
+		os.RemoveAll(filepath.Join(root, ".codex"))
+	})
+	t.Run("not found", func(t *testing.T) {
+		if got, ok := sessionFilePathRoot(root, "codex", "/x", "no-such-id", float64(start.Unix())); ok {
+			t.Fatalf("not found: got %q, want false", got)
+		}
+	})
+}

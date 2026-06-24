@@ -178,6 +178,26 @@ func TestRemoveWorktree(t *testing.T) {
 	}
 }
 
+func TestWorktreeOwnerRepo(t *testing.T) {
+	repo := initTestRepo(t)
+	wtPath := filepath.Join(t.TempDir(), "wt-owner")
+	if _, err := CreateWorktree(repo, wtPath, "owner-branch"); err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	owner, err := WorktreeOwnerRepo(wtPath)
+	if err != nil {
+		t.Fatalf("WorktreeOwnerRepo: %v", err)
+	}
+	// Compare against the git-resolved toplevel (handles macOS /var→/private symlinks).
+	want, err := toplevelDir(repo)
+	if err != nil {
+		t.Fatalf("toplevelDir: %v", err)
+	}
+	if owner != want {
+		t.Fatalf("owner = %q, want %q", owner, want)
+	}
+}
+
 func TestIsDirty(t *testing.T) {
 	t.Run("clean repo", func(t *testing.T) {
 		repo := initTestRepo(t)

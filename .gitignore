@@ -46,3 +46,6 @@ dist/
 # Temp files
 *.log
 *.tmp
+
+# Superpowers brainstorm + SDD scratch
+.superpowers/

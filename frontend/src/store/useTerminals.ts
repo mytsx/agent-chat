@@ -1,9 +1,12 @@
 import { create } from "zustand";
-import { CLIInfo, CLIType, TerminalSession } from "../lib/types";
+import { CLIInfo, CLIType, TerminalSession, SessionInfo } from "../lib/types";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
 import {
   CreateTerminal,
+  CreateTerminalResume,
+  ListKnownAgents,
+  ListAgentSessions,
   CloseTerminal,
   RestartTerminal,
   ResumeTerminal,
@@ -11,7 +14,7 @@ import {
   WriteToTerminal,
   BroadcastToTeam,
   DetectCLIs,
-  OpenTeamFromConfig,
+  OpenTeamFromConfigResume,
 } from "../../wailsjs/go/main/App";
 
 interface TerminalsState {
@@ -36,7 +39,7 @@ interface TerminalsState {
     slotIndex?: number,
     useWorktree?: boolean
   ) => Promise<string>;
-  openTeamFromConfig: (teamID: string) => Promise<main.OpenTeamResult[]>;
+  openTeamFromConfigResume: (teamID: string, resumeIDs: Record<string, string>) => Promise<main.OpenTeamResult[]>;
   removeTerminal: (teamID: string, sessionID: string) => Promise<void>;
   removeAllForTeam: (teamID: string) => Promise<void>;
   writeToTerminal: (sessionID: string, data: string) => Promise<void>;
@@ -54,6 +57,9 @@ interface TerminalsState {
   resumeTerminal: (teamID: string, sessionID: string) => Promise<string>;
   setCLISessionID: (sessionID: string, cliSessionID: string) => void;
   getTeamSessions: (teamID: string) => TerminalSession[];
+  createTerminalResume: (teamID: string, agentName: string, workDir: string, cliType: CLIType, promptId: string, slotIndex: number, useWorktree: boolean, resumeID: string) => Promise<string>;
+  listKnownAgents: (teamID: string) => Promise<string[]>;
+  listAgentSessions: (teamID: string, agentName: string) => Promise<SessionInfo[]>;
 }
 
 export const useTerminals = create<TerminalsState>((set, get) => ({
@@ -125,13 +131,18 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     return sessionID;
   },
 
-  openTeamFromConfig: async (teamID) => {
-    const results = await OpenTeamFromConfig(teamID);
+  openTeamFromConfigResume: async (teamID, resumeIDs) => {
+    const results = await OpenTeamFromConfigResume(teamID, resumeIDs);
     const existing = get().sessions[teamID] ?? [];
+    // The backend is idempotent per slot: a retry / overlapping batch returns the
+    // EXISTING session id for an already-open slot instead of spawning a new PTY. Skip
+    // ids already in the store so we don't append a duplicate row for one PTY (Codex P2).
+    const known = new Set(existing.map((s) => s.sessionID));
     const newSessions: TerminalSession[] = [];
 
     for (const row of results) {
-      if (row.error || !row.sessionID) continue;
+      if (row.error || !row.sessionID || known.has(row.sessionID)) continue;
+      known.add(row.sessionID);
       newSessions.push({
         sessionID: row.sessionID,
         teamID,
@@ -170,7 +181,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     try {
       await useTeams.getState().refreshTeam(teamID);
     } catch (e) {
-      console.error("[openTeamFromConfig] refreshTeam failed:", e);
+      console.error("[openTeamFromConfigResume] refreshTeam failed:", e);
     }
 
     return results;
@@ -334,5 +345,55 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   getTeamSessions: (teamID) => {
     return get().sessions[teamID] ?? [];
+  },
+
+  createTerminalResume: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree, resumeID) => {
+    const currentSessions = get().sessions[teamID] ?? [];
+    const sessionID = await CreateTerminalResume(teamID, agentName, workDir, cliType, promptId, useWorktree, slotIndex, resumeID);
+    set((s) => {
+      const pendingID = s.pendingCLISessionIDs[sessionID];
+      const session: TerminalSession = {
+        sessionID,
+        teamID,
+        agentName,
+        cliType,
+        index: currentSessions.length,
+        slotIndex,
+        ...(pendingID !== undefined ? { cliSessionID: pendingID } : {}),
+      };
+      const pending = { ...s.pendingCLISessionIDs };
+      delete pending[sessionID];
+      return {
+        sessions: {
+          ...s.sessions,
+          [teamID]: [...(s.sessions[teamID] ?? []), session],
+        },
+        pendingCLISessionIDs: pending,
+      };
+    });
+    try {
+      await useTeams.getState().refreshTeam(teamID);
+    } catch (e) {
+      console.error("[createTerminalResume] refreshTeam:", e);
+    }
+    return sessionID;
+  },
+
+  listKnownAgents: async (teamID) => {
+    try {
+      return await ListKnownAgents(teamID);
+    } catch (e) {
+      console.error("[listKnownAgents]", e);
+      return [];
+    }
+  },
+
+  listAgentSessions: async (teamID, agentName) => {
+    try {
+      return (await ListAgentSessions(teamID, agentName)) as unknown as SessionInfo[];
+    } catch (e) {
+      console.error("[listAgentSessions]", e);
+      return [];
+    }
   },
 }));
