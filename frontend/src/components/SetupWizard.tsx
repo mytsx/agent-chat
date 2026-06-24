@@ -59,9 +59,10 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     });
   }, [workDir]);
 
-  // Fetch this agent's resumable sessions when the name changes. NOT debounced —
-  // it fires per keystroke (local IPC). An `active` guard drops a stale response so
-  // a slow earlier fetch can't overwrite a newer name's sessions and let handleCreate
+  // Fetch this agent's resumable sessions when the name settles. DEBOUNCED (300ms):
+  // ListAgentSessions stats+parses transcript files, so firing per keystroke would
+  // thrash disk I/O and the UI (Gemini). An `active` guard drops a stale response so a
+  // slow earlier fetch can't overwrite a newer name's sessions and let handleCreate
   // submit a resumeID belonging to a different agent (Codex P2).
   useEffect(() => {
     const trimmed = agentName.trim();
@@ -71,14 +72,22 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       return;
     }
     let active = true;
-    listAgentSessions(teamID, trimmed).then((sessions) => {
-      // Only resumable-as-configured sessions: the picker resumes under selectedCLI,
-      // so a Claude session under a now-Codex selection can't be opened (Codex P2).
-      if (active) setAgentSessions(sessions.filter((s) => s.cliType === selectedCLI));
-    }).catch(() => {
-      if (active) setAgentSessions([]);
-    });
-    return () => { active = false; };
+    const timer = setTimeout(() => {
+      listAgentSessions(teamID, trimmed).then((sessions) => {
+        // Only resumable-as-configured sessions: the picker resumes under selectedCLI,
+        // so a Claude session under a now-Codex selection can't be opened (Codex P2).
+        if (active) setAgentSessions(sessions.filter((s) => s.cliType === selectedCLI));
+      }).catch((err) => {
+        // Background autocomplete: log but don't alert per-keystroke (would spam); an
+        // empty list degrades gracefully to "no past sessions".
+        console.error("[SetupWizard] listAgentSessions failed:", err);
+        if (active) setAgentSessions([]);
+      });
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [agentName, teamID, selectedCLI]);
 
   const handleBrowse = async () => {

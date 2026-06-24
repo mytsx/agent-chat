@@ -20,7 +20,7 @@ func TestSessionFilePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := SessionFilePath(tt.cliType, tt.cwd, tt.id)
+			got, ok := SessionFilePath(tt.cliType, tt.cwd, tt.id, 0)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

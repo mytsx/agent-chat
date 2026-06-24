@@ -766,6 +766,20 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
 
+	// #40 Faz-2: resume in the EXACT directory the session was recorded in. A CLI's
+	// session file is cwd-keyed (Claude's project slug, Gemini's sha256, Copilot/Codex
+	// metadata), and the conversation assumes that repo — so resuming under the wizard/
+	// config workDir (often blank, or changed since) would start in the wrong dir and the
+	// resume could fail to find its session or run tools against the wrong repo (Codex
+	// P2). The recorded cwd is already the effective dir (worktree included), so run in
+	// it directly without re-creating a worktree.
+	if resumeID != "" {
+		if rec, ok := a.sessionLog.Get(resumeID); ok && rec.Cwd != "" {
+			workDir = rec.Cwd
+			useWorktree = false
+		}
+	}
+
 	// Get team info for room name
 	var teamName string
 	if teamID != "" {
@@ -1035,12 +1049,17 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 		// no-ops for a too-early exit; CapturedSessionIDs skips already-dead sessions so the
 		// shutdown Touch can't re-extend this one.
 		if cli.ResumeSupported(ct) {
-			go func(sid string, doneCh <-chan struct{}) {
-				<-doneCh
-				if cid := a.ptyManager.GetCLISessionID(sid); cid != "" {
-					a.sessionLog.Touch(cid)
-				}
-			}(sessionID, a.ptyManager.SessionDone(sessionID))
+			// nil-guard: SessionDone returns nil for an unknown session, and <-nil blocks
+			// forever (goroutine leak). The session was just created so it's non-nil, but
+			// guard defensively (Gemini).
+			if doneCh := a.ptyManager.SessionDone(sessionID); doneCh != nil {
+				go func(sid string, done <-chan struct{}) {
+					<-done
+					if cid := a.ptyManager.GetCLISessionID(sid); cid != "" {
+						a.sessionLog.Touch(cid)
+					}
+				}(sessionID, doneCh)
+			}
 		}
 	}
 
@@ -1738,12 +1757,11 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 		}
 	}
 
-	// #40 Faz-2: close the session's open-window (lastSeen) in the history log.
-	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
-		a.sessionLog.Touch(cid)
-	}
-
-	// Close PTY (terminates process)
+	// Close PTY (terminates process). The session's history open-window (lastSeen) is
+	// closed by the PTY-death watcher (started in createTerminal) when Close fires
+	// session.done — NOT here. Touching here too would re-touch an already-exited
+	// (in-CLI /exit) session at UI-cleanup time and wrongly move lastSeen past its real
+	// exit, falsely correlating sessions that weren't running together (#40, Codex P2).
 	if err := a.ptyManager.Close(sessionID); err != nil {
 		return err
 	}
@@ -1882,6 +1900,9 @@ func (a *App) UpdateTeam(id, name, gridLayout string, agents []team.AgentConfig)
 	if prevRoom != newRoom {
 		a.syncHubManager(prevRoom, "")
 		a.syncHubObservers(prevRoom, nil)
+		// #40 Faz-2: re-index session history to the new room name so the resume picker
+		// (queries by current room) still shows the team's past sessions (Codex P2).
+		a.sessionLog.RenameRoom(prevRoom, newRoom)
 	}
 	a.syncHubManager(newRoom, strings.TrimSpace(updated.ManagerAgent))
 	a.syncHubObservers(newRoom, observerNames(updated))
@@ -2564,7 +2585,7 @@ func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
 			LastUnix:    r.LastSeen,
 			DurationSec: r.LastSeen - r.FirstSeen,
 		}
-		if path, ok := ingest.SessionFilePath(r.CLIType, r.Cwd, r.SessionID); ok {
+		if path, ok := ingest.SessionFilePath(r.CLIType, r.Cwd, r.SessionID, r.FirstSeen); ok {
 			if _, statErr := os.Stat(path); statErr == nil {
 				si.MessageCount, si.Snippet = ingest.SessionStats(r.CLIType, path)
 			} else {

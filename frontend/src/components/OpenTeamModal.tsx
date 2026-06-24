@@ -147,7 +147,7 @@ export default function OpenTeamModal({ teamID, onClose }: Props) {
 
         <div className="open-team-modes">
           {([["fresh", "✨ Hepsi taze"], ["last", "⏯ Son oturumlardan"], ["custom", "🎛 Özel seçim"]] as [Mode, string][]).map(([m, label]) => (
-            <button key={m} className={`mode-seg ${mode === m ? "active" : ""}`} onClick={() => applyMode(m)}>{label}</button>
+            <button key={m} className={`mode-seg ${mode === m ? "active" : ""}`} onClick={() => applyMode(m)} disabled={!loaded}>{label}</button>
           ))}
         </div>
 

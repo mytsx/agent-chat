@@ -96,6 +96,31 @@ func TestReRecordRefreshesMetadataOnNewWindow(t *testing.T) {
 	}
 }
 
+func TestRenameRoomReindexesHistory(t *testing.T) {
+	s := newTestStore(t)
+	s.Record("sid", "old-room", "alice", "claude", "/c")
+	s.RenameRoom("OLD-ROOM", "new-room") // case-insensitive match
+	if got := s.ListSessions("old-room", "alice"); len(got) != 0 {
+		t.Fatalf("old-room still has records: %v", got)
+	}
+	if got := s.ListSessions("new-room", "alice"); len(got) != 1 {
+		t.Fatalf("new-room ListSessions = %d, want 1", len(got))
+	}
+	s.RenameRoom("x", "x") // no-op, no panic
+}
+
+func TestGetReturnsRecordedCwd(t *testing.T) {
+	s := newTestStore(t)
+	s.Record("sid", "r", "a", "claude", "/recorded/cwd")
+	r, ok := s.Get("sid")
+	if !ok || r.Cwd != "/recorded/cwd" {
+		t.Fatalf("Get = %+v ok=%v, want cwd=/recorded/cwd", r, ok)
+	}
+	if _, ok := s.Get("unknown"); ok {
+		t.Fatal("Get(unknown) must be false")
+	}
+}
+
 func TestNilStoreListsAreSafe(t *testing.T) {
 	var s *Store // nil (failed New)
 	if got := s.ListSessions("r", "a"); got != nil {
@@ -104,6 +129,10 @@ func TestNilStoreListsAreSafe(t *testing.T) {
 	if got := s.ListAgents("r"); got != nil {
 		t.Fatalf("nil ListAgents = %v, want nil", got)
 	}
+	if _, ok := s.Get("x"); ok {
+		t.Fatal("nil Get must be false")
+	}
+	s.RenameRoom("a", "b") // nil, must not panic
 }
 
 func TestTouch(t *testing.T) {

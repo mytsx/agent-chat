@@ -163,6 +163,41 @@ func (s *Store) ListAgents(room string) []string {
 	return names
 }
 
+// RenameRoom re-indexes every history record from oldRoom to newRoom, so a team
+// rename doesn't hide its past sessions from the resume picker (which queries by the
+// team's CURRENT room name). Matched case-insensitively; no-op if unchanged or the
+// store is nil (#40 Faz-2, Codex P2).
+func (s *Store) RenameRoom(oldRoom, newRoom string) {
+	if s == nil || oldRoom == "" || strings.EqualFold(oldRoom, newRoom) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for id, r := range s.records {
+		if strings.EqualFold(r.Room, oldRoom) {
+			r.Room = newRoom
+			s.records[id] = r
+			changed = true
+		}
+	}
+	if changed {
+		s.save()
+	}
+}
+
+// Get returns the record for a session id (the resume target's recorded metadata,
+// e.g. its cwd), or false if unknown. Nil-safe (#40 Faz-2, Codex P2).
+func (s *Store) Get(sessionID string) (Record, bool) {
+	if s == nil {
+		return Record{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.records[sessionID]
+	return r, ok
+}
+
 // save writes records atomically (temp+rename). Called under mu.
 func (s *Store) save() {
 	data, err := json.MarshalIndent(s.records, "", "  ")

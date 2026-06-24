@@ -8,8 +8,70 @@ import (
 
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
+	"desktop/internal/sessionlog"
 	"desktop/internal/team"
 )
+
+func TestListKnownAgents_UnionAndCaseInsensitiveDedup(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm, err := store.Create("MyTeam", "2x2", []team.AgentConfig{
+		{Name: "Alice", CLIType: "claude"}, // same agent as history's "alice"
+		{Name: "carol", CLIType: "codex"},  // config-only
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl, err := sessionlog.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{teamStore: store, sessionLog: sl}
+	sl.Record("sid-a", "MyTeam", "alice", "claude", "/nope") // history, lower-case
+	sl.Record("sid-b", "MyTeam", "bob", "codex", "/nope")    // history-only
+
+	known := a.ListKnownAgents(tm.ID)
+	// "alice"/"Alice" collapse case-insensitively → {alice, bob, carol} (3 distinct).
+	if len(known) != 3 {
+		t.Fatalf("ListKnownAgents = %v, want 3 distinct (alice/bob/carol)", known)
+	}
+	seen := map[string]bool{}
+	for _, n := range known {
+		seen[strings.ToLower(n)] = true
+	}
+	if !seen["alice"] || !seen["bob"] || !seen["carol"] {
+		t.Fatalf("ListKnownAgents = %v, missing one of alice/bob/carol", known)
+	}
+}
+
+func TestListAgentSessions_CaseInsensitiveAndFileMissing(t *testing.T) {
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm, err := store.Create("MyTeam", "2x2", []team.AgentConfig{{Name: "Alice", CLIType: "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl, err := sessionlog.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{teamStore: store, sessionLog: sl}
+	sl.Record("sid-a", "MyTeam", "alice", "claude", "/nonexistent") // lower-case launch name
+
+	// Query with the config casing ("Alice") — must still find the "alice" record, and
+	// since the transcript file doesn't exist, FileMissing must be true.
+	got := a.ListAgentSessions(tm.ID, "Alice")
+	if len(got) != 1 {
+		t.Fatalf("ListAgentSessions = %d, want 1 (case-insensitive)", len(got))
+	}
+	if got[0].SessionID != "sid-a" || !got[0].FileMissing {
+		t.Fatalf("session = %+v, want sid-a with FileMissing=true", got[0])
+	}
+}
 
 // recordingInject returns an inject func that records every call and optionally
 // fails for specific session IDs. broadcastToSessions injects concurrently, so
