@@ -12,6 +12,7 @@ import (
 // must be queued (deferred) instead of injected.
 func TestNotifyAgent_DefersWhilePendingInput(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
 
@@ -40,6 +41,36 @@ func TestNotifyAgent_DefersWhilePendingInput(t *testing.T) {
 	}
 }
 
+// Deferral defaults to OFF (issue #15 toggle): even with pending input, an
+// out-of-cooldown notification is injected immediately when the feature is not
+// explicitly enabled — hasPendingInput short-circuits to false.
+func TestNotifyAgent_InjectsWhenDeferralDisabled(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	// SetDeferralEnabled intentionally NOT called → default off.
+	o.pendingInputFunc = func(string) bool { return true }
+	key := "/rooms/t:agent-1"
+
+	o.notifyAgent("/rooms/t", "agent-1", "sess-1", "agent-2", false)
+
+	o.mu.Lock()
+	pending := len(o.pendingMsgs[key])
+	_, hasTimer := o.pendingTimers[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if len(*sent) != 1 {
+		t.Errorf("deferral disabled: notification must be injected immediately despite pending input, got %d", len(*sent))
+	}
+	if pending != 0 {
+		t.Errorf("deferral disabled: nothing should be queued, got %d", pending)
+	}
+	if hasTimer {
+		t.Error("deferral disabled: no deferral timer should be armed")
+	}
+}
+
 // With no pending input, behaviour is unchanged: inject immediately.
 func TestNotifyAgent_ImmediateWhenNoPending(t *testing.T) {
 	o, sent := newTestOrchestrator()
@@ -59,6 +90,7 @@ func TestNotifyAgent_ImmediateWhenNoPending(t *testing.T) {
 // input — the last-line-of-defence against corrupting a half-typed line.
 func TestTryInject_SkipsWhenPending(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	o.pendingInputFunc = func(string) bool { return true }
 
 	if o.tryInject("sess-1", "[agent-chat] hi") {
@@ -85,6 +117,7 @@ func TestTryInject_InjectsWhenNoPending(t *testing.T) {
 // maxDeferral, the single timer slot must be RE-ARMED (not a second timer).
 func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
@@ -120,6 +153,7 @@ func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 // lock, flush must NOT re-arm a stale timer even if input is pending.
 func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	o.pendingInputFunc = func(string) bool { return true }
 	key := "/rooms/t:agent-1"
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-1")
@@ -155,6 +189,7 @@ func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
 // notification is routed to the UI fallback instead of the PTY.
 func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	o.pendingInputFunc = func(string) bool { return true }
 	var uiPrompts []string
 	o.SetDeferredHandler(func(sessionID, agentName, prompt string) {
@@ -267,6 +302,7 @@ func TestFlushPending_StaleSessionDropped(t *testing.T) {
 // maxDeferral still eventually fires — review G3).
 func TestFlushPending_RaceReDefersPreservingOrderAndCap(t *testing.T) {
 	o, sent := newTestOrchestrator()
+	o.SetDeferralEnabled(true)
 	calls := 0
 	// First call (flushPending's outside check) → not pending → proceed to flush.
 	// Second call (tryInject's atomic pre-check) → pending → tryInject returns false.
