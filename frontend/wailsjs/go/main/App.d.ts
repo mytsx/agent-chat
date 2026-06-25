@@ -90,7 +90,11 @@ export function SetTeamObserver(arg1:string,arg2:string):Promise<team.Team>;
 
 export function SetVoiceConfig(arg1:string):Promise<void>;
 
+export function StartBroadcastVoiceCapture():Promise<void>;
+
 export function StartVoiceCapture(arg1:string):Promise<void>;
+
+export function StopBroadcastVoiceCapture():Promise<string>;
 
 export function StopVoiceCapture(arg1:string):Promise<void>;
 

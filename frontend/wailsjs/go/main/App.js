@@ -170,8 +170,16 @@ export function SetVoiceConfig(arg1) {
   return window['go']['main']['App']['SetVoiceConfig'](arg1);
 }
 
+export function StartBroadcastVoiceCapture() {
+  return window['go']['main']['App']['StartBroadcastVoiceCapture']();
+}
+
 export function StartVoiceCapture(arg1) {
   return window['go']['main']['App']['StartVoiceCapture'](arg1);
+}
+
+export function StopBroadcastVoiceCapture() {
+  return window['go']['main']['App']['StopBroadcastVoiceCapture']();
 }
 
 export function StopVoiceCapture(arg1) {

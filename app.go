@@ -2545,6 +2545,13 @@ func (a *App) StartVoiceCapture(sessionID string) error {
 	return nil
 }
 
+const broadcastVoiceSessionID = "__broadcast__"
+
+// StartBroadcastVoiceCapture begins mic recording for the broadcast composer.
+func (a *App) StartBroadcastVoiceCapture() error {
+	return a.StartVoiceCapture(broadcastVoiceSessionID)
+}
+
 // StopVoiceCapture ends recording for a session (push-to-talk up), transcribes the
 // audio, and injects the transcript into that session's PTY input line WITHOUT
 // submitting (autosubmit off — the user reviews and presses Enter). A Stop for a
@@ -2552,12 +2559,26 @@ func (a *App) StartVoiceCapture(sessionID string) error {
 // detached under the lock and released before the network call, so another panel
 // may start recording while this transcript uploads.
 func (a *App) StopVoiceCapture(sessionID string) error {
+	_, err := a.stopVoiceCaptureInternal(sessionID, true)
+	return err
+}
+
+// StopBroadcastVoiceCapture ends recording and returns the transcript text for the
+// broadcast composer. It does not inject into any terminal.
+func (a *App) StopBroadcastVoiceCapture() (string, error) {
+	return a.stopVoiceCaptureInternal(broadcastVoiceSessionID, false)
+}
+
+// stopVoiceCaptureInternal completes a voice capture and transcription. When inject
+// is true, transcript is written into the terminal input line; when false, text is
+// returned to the caller (e.g. broadcast composer).
+func (a *App) stopVoiceCaptureInternal(sessionID string, inject bool) (string, error) {
 	log.Printf("[VOICE] StopVoiceCapture session=%s", sessionID)
 	a.voiceMu.Lock()
 	if a.activeRecorder == nil || a.activeVoiceSession != sessionID {
 		a.voiceMu.Unlock()
 		log.Printf("[VOICE] StopVoiceCapture no-op (aktif kayıt yok ya da farklı session) session=%s active=%s", sessionID, a.activeVoiceSession)
-		return nil
+		return "", nil
 	}
 	rec := a.activeRecorder
 	// Keep activeRecorder set (so a concurrent Start from another panel is rejected)
@@ -2590,7 +2611,7 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if err != nil {
 		log.Printf("[VOICE] kayıt durdurma/okuma hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", "⚠️ Kayıt okunamadı: "+err.Error())
-		return err
+		return "", err
 	}
 	log.Printf("[VOICE] kayıt durdu session=%s wavBytes=%d", sessionID, len(wav))
 
@@ -2600,7 +2621,7 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if silent, db := voice.IsLikelySilent(wav); silent {
 		log.Printf("[VOICE] sessiz kayıt, transkripsiyon atlandı session=%s dBFS=%.1f", sessionID, db)
 		a.emitVoiceState(sessionID, "idle", "")
-		return nil
+		return "", nil
 	}
 
 	a.emitVoiceState(sessionID, "transcribing", "")
@@ -2614,7 +2635,7 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if err != nil {
 		log.Printf("[VOICE] transkripsiyon hatası session=%s err=%v", sessionID, err)
 		a.emitVoiceState(sessionID, "error", err.Error())
-		return err
+		return "", err
 	}
 	log.Printf("[VOICE] transkript session=%s len=%d", sessionID, len(text))
 	// Drop empty results and known no-speech hallucinations that slipped past the
@@ -2622,15 +2643,17 @@ func (a *App) StopVoiceCapture(sessionID string) error {
 	if strings.TrimSpace(text) == "" || voice.IsHallucination(text) {
 		log.Printf("[VOICE] boş/halüsinasyon transkript atlandı session=%s text=%q", sessionID, text)
 		a.emitVoiceState(sessionID, "idle", "")
-		return nil
+		return "", nil
 	}
-	if err := a.voiceInject(sessionID, text, false); err != nil {
-		a.emitVoiceState(sessionID, "error", "⚠️ Enjeksiyon hatası: "+err.Error())
-		return err
+	if inject {
+		if err := a.voiceInject(sessionID, text, false); err != nil {
+			a.emitVoiceState(sessionID, "error", "⚠️ Enjeksiyon hatası: "+err.Error())
+			return "", err
+		}
+		a.voiceEmit("voice:transcript:"+sessionID, text)
 	}
-	a.voiceEmit("voice:transcript:"+sessionID, text)
 	a.emitVoiceState(sessionID, "idle", "")
-	return nil
+	return text, nil
 }
 
 // VoiceStatus is the Settings-panel view of voice config. The real API key never

@@ -1469,6 +1469,13 @@ html, body, #root {
   cursor: not-allowed;
 }
 
+.broadcast-bar-voice {
+  min-width: 26px;
+  height: 24px;
+  border-radius: 12px;
+  padding: 0 6px;
+}
+
 .broadcast-bar-error {
   font-size: 11px;
   color: var(--danger);
