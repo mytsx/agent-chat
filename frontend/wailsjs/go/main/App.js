@@ -46,6 +46,10 @@ export function GetAgents(arg1) {
   return window['go']['main']['App']['GetAgents'](arg1);
 }
 
+export function GetDeferralEnabled() {
+  return window['go']['main']['App']['GetDeferralEnabled']();
+}
+
 export function GetGlobalPrompt() {
   return window['go']['main']['App']['GetGlobalPrompt']();
 }
@@ -146,6 +150,10 @@ export function SetCustomPrompt(arg1, arg2) {
   return window['go']['main']['App']['SetCustomPrompt'](arg1, arg2);
 }
 
+export function SetDeferralEnabled(arg1) {
+  return window['go']['main']['App']['SetDeferralEnabled'](arg1);
+}
+
 export function SetGlobalPrompt(arg1) {
   return window['go']['main']['App']['SetGlobalPrompt'](arg1);
 }
@@ -162,8 +170,16 @@ export function SetVoiceConfig(arg1) {
   return window['go']['main']['App']['SetVoiceConfig'](arg1);
 }
 
+export function StartBroadcastVoiceCapture() {
+  return window['go']['main']['App']['StartBroadcastVoiceCapture']();
+}
+
 export function StartVoiceCapture(arg1) {
   return window['go']['main']['App']['StartVoiceCapture'](arg1);
+}
+
+export function StopBroadcastVoiceCapture() {
+  return window['go']['main']['App']['StopBroadcastVoiceCapture']();
 }
 
 export function StopVoiceCapture(arg1) {

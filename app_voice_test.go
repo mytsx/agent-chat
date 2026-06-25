@@ -119,6 +119,33 @@ func TestStopVoiceCaptureInjectsTranscriptNoSubmitToRightSession(t *testing.T) {
 	}
 }
 
+// The broadcast composer path (inject=false) must RETURN the transcript to the
+// caller and never inject into any terminal — the inverse of StopVoiceCapture.
+func TestStopBroadcastVoiceCaptureReturnsTextWithoutInjecting(t *testing.T) {
+	a := newVoiceTestApp()
+	a.voiceTranscribe = func(ctx context.Context, wav []byte) (string, error) { return "yayın metni", nil }
+	var injectN int
+	a.voiceInject = func(sessionID, text string, submit bool) error { injectN++; return nil }
+
+	if err := a.StartBroadcastVoiceCapture(); err != nil {
+		t.Fatal(err)
+	}
+	text, err := a.StopBroadcastVoiceCapture()
+	if err != nil {
+		t.Fatalf("StopBroadcastVoiceCapture: %v", err)
+	}
+	if text != "yayın metni" {
+		t.Errorf("returned text = %q, want %q", text, "yayın metni")
+	}
+	if injectN != 0 {
+		t.Errorf("broadcast capture must not inject into any session; got %d", injectN)
+	}
+	// The mic lock must be released afterwards so a new capture can start.
+	if err := a.StartBroadcastVoiceCapture(); err != nil {
+		t.Errorf("mic should be free after a broadcast capture completes: %v", err)
+	}
+}
+
 func TestStopVoiceCaptureWrongSessionIsNoop(t *testing.T) {
 	a := newVoiceTestApp()
 	var n int
