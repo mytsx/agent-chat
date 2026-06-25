@@ -2693,10 +2693,19 @@ func (a *App) saveAppSettings(s appSettings) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	// settings.json holds only the non-secret deferral_enabled flag, so it uses
+	// the 0644 state-file convention (0600 is reserved for secrets like
+	// voice.json). Clean up the temp file if either step fails to avoid leaving
+	// a stale settings.json.tmp behind — matches internal/team/store.go.
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // GetDeferralEnabled reports whether the pending-input deferral check is active.
