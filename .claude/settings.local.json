@@ -5,5 +5,9 @@
       "mcp__agent-chat__read_messages",
       "mcp__agent-chat__send_message"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "coolify"
+  ],
+  "enableAllProjectMcpServers": true
 }
