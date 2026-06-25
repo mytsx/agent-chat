@@ -44,8 +44,6 @@ export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
 
-export function GetDeferralEnabled():Promise<boolean>;
-
 export function GetVoiceStatus():Promise<main.VoiceStatus>;
 
 export function IsGitRepo(arg1:string):Promise<boolean>;
@@ -89,8 +87,6 @@ export function SetGlobalPrompt(arg1:string):Promise<void>;
 export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;
 
 export function SetTeamObserver(arg1:string,arg2:string):Promise<team.Team>;
-
-export function SetDeferralEnabled(arg1:boolean):Promise<void>;
 
 export function SetVoiceConfig(arg1:string):Promise<void>;
 

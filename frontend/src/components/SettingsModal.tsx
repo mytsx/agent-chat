@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
-import { GetVoiceStatus, SetVoiceConfig, GetDeferralEnabled, SetDeferralEnabled } from "../../wailsjs/go/main/App";
+import {
+  GetVoiceStatus,
+  SetVoiceConfig,
+  GetDeferralEnabled,
+  SetDeferralEnabled,
+} from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
 
 interface SettingsModalProps {
@@ -18,8 +23,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [deferralEnabled, setDeferralEnabled] = useState(false);
 
   useEffect(() => {
-    GetVoiceStatus().then(setStatus).catch((e) => setError(String(e)));
-    GetDeferralEnabled().then(setDeferralEnabled).catch(() => {});
+    GetVoiceStatus()
+      .then(setStatus)
+      .catch((e) => setError(String(e)));
+    GetDeferralEnabled()
+      .then(setDeferralEnabled)
+      .catch(() => {});
   }, []);
 
   const handleDeferralToggle = async (checked: boolean) => {
@@ -59,7 +68,14 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         <h3>⚙️ Ayarlar</h3>
 
         <div className="form-group">
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              cursor: "pointer",
+            }}
+          >
             <input
               type="checkbox"
               checked={deferralEnabled}
@@ -75,7 +91,14 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           </span>
         </div>
 
-        <div className="form-group" style={{ borderTop: "1px solid var(--border)", paddingTop: 12, marginTop: 4 }}>
+        <div
+          className="form-group"
+          style={{
+            borderTop: "1px solid var(--border)",
+            paddingTop: 12,
+            marginTop: 4,
+          }}
+        >
           <label>OpenAI API Anahtarı (Sesli Prompt)</label>
           <input
             type="password"
@@ -86,7 +109,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
               if (e.key === "Enter") handleSave();
               if (e.key === "Escape") onClose();
             }}
-            placeholder={status?.hasKey ? `Kayıtlı: ${status.keyHint}` : "sk-..."}
+            placeholder={
+              status?.hasKey ? `Kayıtlı: ${status.keyHint}` : "sk-..."
+            }
           />
           <span className="form-hint">
             {status?.hasKey
@@ -104,7 +129,11 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         {saved && <div className="form-hint">✅ Kaydedildi.</div>}
 
         <div className="modal-actions">
-          <button className="btn" onClick={handleSave} disabled={saving || apiKey.trim() === ""}>
+          <button
+            className="btn"
+            onClick={handleSave}
+            disabled={saving || apiKey.trim() === ""}
+          >
             Kaydet
           </button>
           <button className="btn btn-secondary" onClick={onClose}>
