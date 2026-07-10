@@ -291,17 +291,19 @@ export default function TerminalGrid() {
     );
   };
 
+  const renderSetupWizard = (slotIndex: number, onCreated: () => void = () => {}) => (
+    <SetupWizard
+      slotIndex={slotIndex}
+      teamID={team.id}
+      onCreated={onCreated}
+    />
+  );
+
   const renderSlot = (slot: GridSlot) => {
     if (slot.type === "terminal") {
       return renderTerminalPane(slot.session);
     }
-    return (
-      <SetupWizard
-        slotIndex={slot.slotIndex}
-        teamID={team.id}
-        onCreated={() => {}}
-      />
-    );
+    return renderSetupWizard(slot.slotIndex);
   };
 
   const renderCustomMode = () => {
@@ -311,11 +313,7 @@ export default function TerminalGrid() {
       return (
         <div className="custom-layout-shell">
           <div className="custom-layout-empty">
-            <SetupWizard
-              slotIndex={nextSlotIndex}
-              teamID={team.id}
-              onCreated={() => setShowCustomSetup(false)}
-            />
+            {renderSetupWizard(nextSlotIndex, () => setShowCustomSetup(false))}
           </div>
         </div>
       );
@@ -353,11 +351,7 @@ export default function TerminalGrid() {
         </div>
         {showCustomSetup && (
           <div className="custom-setup-drawer">
-            <SetupWizard
-              slotIndex={nextSlotIndex}
-              teamID={team.id}
-              onCreated={() => setShowCustomSetup(false)}
-            />
+            {renderSetupWizard(nextSlotIndex, () => setShowCustomSetup(false))}
           </div>
         )}
       </div>
