@@ -61,7 +61,17 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.filePath, data, 0644)
+
+	tmpPath := s.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, s.filePath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // List returns all prompts
@@ -105,6 +115,7 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 
 	s.prompts = append(s.prompts, p)
 	if err := s.save(); err != nil {
+		s.prompts = s.prompts[:len(s.prompts)-1]
 		return Prompt{}, err
 	}
 	return p, nil
@@ -117,6 +128,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 
 	for i, p := range s.prompts {
 		if p.ID == id {
+			prev := s.prompts[i]
 			s.prompts[i].Name = name
 			s.prompts[i].Content = content
 			s.prompts[i].Category = category
@@ -125,6 +137,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 			s.prompts[i].UpdatedAt = time.Now().Format(time.RFC3339)
 
 			if err := s.save(); err != nil {
+				s.prompts[i] = prev
 				return Prompt{}, err
 			}
 			return s.prompts[i], nil
@@ -140,8 +153,13 @@ func (s *Store) Delete(id string) error {
 
 	for i, p := range s.prompts {
 		if p.ID == id {
+			prev := append([]Prompt(nil), s.prompts...)
 			s.prompts = append(s.prompts[:i], s.prompts[i+1:]...)
-			return s.save()
+			if err := s.save(); err != nil {
+				s.prompts = prev
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("prompt not found: %s", id)

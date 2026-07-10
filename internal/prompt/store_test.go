@@ -67,3 +67,44 @@ func TestSeedIfMissingByName_RunsEvenWhenStoreNonEmpty(t *testing.T) {
 		t.Fatal("expected SeedIfMissingByName to seed even when the store is non-empty")
 	}
 }
+
+func TestSaveFailuresRollbackInMemoryState(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, err := s.Create("Existing", "original", "system", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Point filePath at a directory so the temp write can succeed but the atomic
+	// rename fails. Mutators must roll their in-memory changes back when disk
+	// persistence fails, otherwise future saves would silently include failed edits.
+	s.filePath = t.TempDir()
+
+	if _, err := s.Create("New", "content", "task", nil); err == nil {
+		t.Fatal("expected Create to fail")
+	}
+	if prompts := s.List(); len(prompts) != 1 || prompts[0].ID != existing.ID {
+		t.Fatalf("Create rollback left prompts = %#v", prompts)
+	}
+
+	if _, err := s.Update(existing.ID, "Changed", "changed", "task", []string{"x"}); err == nil {
+		t.Fatal("expected Update to fail")
+	}
+	got, err := s.Get(existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Existing" || got.Content != "original" || got.Category != "system" || len(got.Tags) != 0 {
+		t.Fatalf("Update rollback left prompt = %#v", got)
+	}
+
+	if err := s.Delete(existing.ID); err == nil {
+		t.Fatal("expected Delete to fail")
+	}
+	if prompts := s.List(); len(prompts) != 1 || prompts[0].ID != existing.ID {
+		t.Fatalf("Delete rollback left prompts = %#v", prompts)
+	}
+}
