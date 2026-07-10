@@ -101,31 +101,41 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.writeWebSocketMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if c.writeTextMessage(message) != nil || c.drainQueuedTextMessages() != nil {
 				return
-			}
-
-			// Drain queued messages — each as its own WebSocket frame
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				if err := c.conn.WriteMessage(websocket.TextMessage, <-c.send); err != nil {
-					return
-				}
 			}
 
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if c.writeWebSocketMessage(websocket.PingMessage, nil) != nil {
 				return
 			}
 		}
 	}
+}
+
+func (c *Client) writeTextMessage(message []byte) error {
+	return c.writeWebSocketMessage(websocket.TextMessage, message)
+}
+
+func (c *Client) writeWebSocketMessage(messageType int, payload []byte) error {
+	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.conn.WriteMessage(messageType, payload)
+}
+
+func (c *Client) drainQueuedTextMessages() error {
+	// Drain queued messages — each as its own WebSocket frame.
+	n := len(c.send)
+	for i := 0; i < n; i++ {
+		if err := c.writeTextMessage(<-c.send); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendJSON sends a JSON-encoded message to this client.
