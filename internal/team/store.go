@@ -55,7 +55,11 @@ func (t Team) IsManagerAgent(name string) bool {
 	if mgr == "" {
 		return false
 	}
-	return strings.EqualFold(mgr, strings.TrimSpace(name))
+	return sameAgentName(mgr, name)
+}
+
+func sameAgentName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // Store manages team/tab persistence
@@ -231,7 +235,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		}
 		prev := t.Agents // keep the old slice for rollback
 		for j, existing := range t.Agents {
-			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
+			if sameAgentName(existing.Name, cfg.Name) {
 				// Match is case-insensitive, but keep the stored Name's original
 				// casing: Team.ManagerAgent holds that spelling and resolveManagerIntent
 				// compares it case-sensitively, so a case-only re-create must not
@@ -299,7 +303,7 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 			// the shared Agents slice don't race.
 			if managerAgent != "" {
 				for j, a := range t.Agents {
-					if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(managerAgent)) {
+					if sameAgentName(a.Name, managerAgent) {
 						if strings.EqualFold(strings.TrimSpace(a.Role), RoleObserver) {
 							updated := make([]AgentConfig, len(prevAgents))
 							copy(updated, prevAgents)
@@ -345,7 +349,7 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 		copy(updated, prevAgents)
 		found := false
 		for j, a := range updated {
-			if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(name)) {
+			if sameAgentName(a.Name, name) {
 				updated[j].Role = RoleObserver
 				found = true
 				break
