@@ -83,6 +83,19 @@ function attachPendingCLISessionID(
   return [cliSessionID === undefined ? session : { ...session, cliSessionID }, pending];
 }
 
+function replaceSessionID(
+  list: TerminalSession[],
+  oldSessionID: string,
+  newSessionID: string,
+  cliSessionID: string | undefined
+): TerminalSession[] {
+  return list.map((terminal) =>
+    terminal.sessionID === oldSessionID
+      ? { ...terminal, sessionID: newSessionID, cliSessionID }
+      : terminal
+  );
+}
+
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   pendingCLISessionIDs: {},
@@ -276,10 +289,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       return {
         sessions: {
           ...s.sessions,
-          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-            t.sessionID === sessionID
-              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
-              : t
+          [teamID]: replaceSessionID(
+            s.sessions[teamID] ?? [],
+            sessionID,
+            newSessionID,
+            captured
           ),
         },
         pendingCLISessionIDs: pending,
@@ -309,10 +323,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       return {
         sessions: {
           ...s.sessions,
-          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-            t.sessionID === sessionID
-              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
-              : t
+          [teamID]: replaceSessionID(
+            s.sessions[teamID] ?? [],
+            sessionID,
+            newSessionID,
+            captured
           ),
         },
         pendingCLISessionIDs: pending,
