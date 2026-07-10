@@ -85,6 +85,40 @@ function syncLayoutWithSessions(layout: LayoutItem[], sessions: TerminalSession[
   return existing;
 }
 
+function buildFixedGridSlotRows(
+  sessions: TerminalSession[],
+  capacity: number,
+  cols: number,
+  rows: number
+): GridSlot[][] {
+  const slotMap = new Map<number, TerminalSession>();
+  for (const session of sessions) {
+    slotMap.set(session.slotIndex, session);
+  }
+
+  const slots: GridSlot[] = [];
+  for (let i = 0; i < capacity; i++) {
+    const session = slotMap.get(i);
+    slots.push(session ? { type: "terminal", session } : { type: "wizard", slotIndex: i });
+  }
+
+  const slotRows: GridSlot[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row = slots.slice(r * cols, (r + 1) * cols);
+    if (row.length > 0) {
+      slotRows.push(row);
+    }
+  }
+
+  return slotRows;
+}
+
+function nextCustomSlotIndex(sessions: TerminalSession[]): number {
+  return sessions.length > 0
+    ? Math.max(...sessions.map((session) => session.slotIndex)) + 1
+    : 0;
+}
+
 function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
   if (typeof window === "undefined") {
     return {};
@@ -204,29 +238,9 @@ export default function TerminalGrid() {
 
   if (!team) return <div className="terminal-grid-empty">No team selected</div>;
 
-  // Build slot array for fixed grids (skip for custom mode — capacity is Infinity)
-  const slots: GridSlot[] = [];
-  const slotRows: GridSlot[][] = [];
-  if (!isCustomLayout(team.grid_layout)) {
-    const slotMap = new Map<number, TerminalSession>();
-    for (const s of teamSessions) {
-      slotMap.set(s.slotIndex, s);
-    }
-    for (let i = 0; i < capacity; i++) {
-      const session = slotMap.get(i);
-      if (session) {
-        slots.push({ type: "terminal", session });
-      } else {
-        slots.push({ type: "wizard", slotIndex: i });
-      }
-    }
-    for (let r = 0; r < rows; r++) {
-      const row = slots.slice(r * cols, (r + 1) * cols);
-      if (row.length > 0) {
-        slotRows.push(row);
-      }
-    }
-  }
+  const slotRows = isCustomMode
+    ? []
+    : buildFixedGridSlotRows(teamSessions, capacity, cols, rows);
 
   const renderTerminalPane = (
     session: TerminalSession,
@@ -291,9 +305,7 @@ export default function TerminalGrid() {
   };
 
   const renderCustomMode = () => {
-    const nextSlotIndex = teamSessions.length > 0
-      ? Math.max(...teamSessions.map((s) => s.slotIndex)) + 1
-      : 0;
+    const nextSlotIndex = nextCustomSlotIndex(teamSessions);
 
     if (teamSessions.length === 0) {
       return (
