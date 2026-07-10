@@ -125,6 +125,23 @@ function replaceRestartedSessionState(
   };
 }
 
+function appendSessionState(
+  state: TerminalsState,
+  session: TerminalSession
+): Partial<TerminalsState> {
+  const [attached, pending] = attachPendingCLISessionID(
+    session,
+    state.pendingCLISessionIDs
+  );
+  return {
+    sessions: {
+      ...state.sessions,
+      [session.teamID]: [...(state.sessions[session.teamID] ?? []), attached],
+    },
+    pendingCLISessionIDs: pending,
+  };
+}
+
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   pendingCLISessionIDs: {},
@@ -159,24 +176,14 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       useWorktree,
       resolvedSlotIndex
     );
-    set((s) => {
-      // Apply any resume id captured before this row existed (#40, Codex P2).
-      const [session, pending] = attachPendingCLISessionID({
-        sessionID,
-        teamID,
-        agentName,
-        cliType,
-        index: currentSessions.length,
-        slotIndex: resolvedSlotIndex,
-      }, s.pendingCLISessionIDs);
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: [...(s.sessions[teamID] ?? []), session],
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
+    set((s) => appendSessionState(s, {
+      sessionID,
+      teamID,
+      agentName,
+      cliType,
+      index: currentSessions.length,
+      slotIndex: resolvedSlotIndex,
+    }));
 
     // Backend persisted this agent into the team via UpsertAgent; re-pull the
     // team so later grid updates don't echo a stale agents array. The PTY is
@@ -375,23 +382,14 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   createTerminalResume: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree, resumeID) => {
     const currentSessions = get().sessions[teamID] ?? [];
     const sessionID = await CreateTerminalResume(teamID, agentName, workDir, cliType, promptId, useWorktree, slotIndex, resumeID);
-    set((s) => {
-      const [session, pending] = attachPendingCLISessionID({
-        sessionID,
-        teamID,
-        agentName,
-        cliType,
-        index: currentSessions.length,
-        slotIndex,
-      }, s.pendingCLISessionIDs);
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: [...(s.sessions[teamID] ?? []), session],
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
+    set((s) => appendSessionState(s, {
+      sessionID,
+      teamID,
+      agentName,
+      cliType,
+      index: currentSessions.length,
+      slotIndex,
+    }));
     await refreshTeamAfterTerminalChange(teamID, "[createTerminalResume] refreshTeam:");
     return sessionID;
   },
