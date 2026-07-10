@@ -130,7 +130,50 @@ func TestAnalyzeMessage_EmptyContent(t *testing.T) {
 	msg := types.Message{Content: "", Type: "direct", ExpectsReply: false}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
-		t.Errorf("empty content should default to notify, got %s", r.Action)
+		t.Errorf("empty content should notify, got %s", r.Action)
+	}
+}
+
+func TestNotificationPromptsPreserveText(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "direct single",
+			got:  buildPrompt(false, "backend", "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "broadcast single",
+			got:  buildPrompt(true, "backend", "frontend"),
+			want: `[agent-chat] Broadcast from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched single",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched multiple",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+				{from: "mobile"},
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] 3 new messages from backend, mobile. read_messages("frontend") to read and respond.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("prompt mismatch\nwant: %s\n got: %s", tt.want, tt.got)
+			}
+		})
 	}
 }
 

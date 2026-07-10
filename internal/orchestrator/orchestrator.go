@@ -349,10 +349,15 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 
 // buildPrompt builds the single-message notification text.
 func buildPrompt(isBroadcast bool, fromAgent, agentName string) string {
+	kind := "New message"
 	if isBroadcast {
-		return fmt.Sprintf("[agent-chat] Broadcast from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+		kind = "Broadcast"
 	}
-	return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+	return formatSingleNotificationPrompt(kind, fromAgent, agentName)
+}
+
+func formatSingleNotificationPrompt(kind, fromAgent, agentName string) string {
+	return fmt.Sprintf("[agent-chat] %s from %s. read_messages(\"%s\") to read and respond.", kind, fromAgent, agentName)
 }
 
 // buildBatchedPrompt builds the notification text for a batch of pending msgs,
@@ -368,8 +373,7 @@ func buildBatchedPrompt(pending []pendingNotification, agentName string) string 
 		senders = append(senders, p.from)
 	}
 	if len(pending) == 1 {
-		return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.",
-			senders[0], agentName)
+		return formatSingleNotificationPrompt("New message", senders[0], agentName)
 	}
 	return fmt.Sprintf("[agent-chat] %d new messages from %s. read_messages(\"%s\") to read and respond.",
 		len(pending), strings.Join(senders, ", "), agentName)
