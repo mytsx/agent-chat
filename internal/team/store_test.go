@@ -219,6 +219,35 @@ func TestAgentConfigSerializationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsCaseInsensitiveDuplicateTeamName(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Create("Alpha", "2x2", nil); err != nil {
+		t.Fatalf("Create Alpha failed: %v", err)
+	}
+	if _, err := s.Create("alpha", "2x2", nil); err == nil {
+		t.Fatal("expected case-insensitive duplicate team name error, got nil")
+	}
+}
+
+func TestUpdateAllowsSameTeamNameAndRejectsOtherCaseDuplicate(t *testing.T) {
+	s := newTestStore(t)
+	alpha, err := s.Create("Alpha", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create Alpha failed: %v", err)
+	}
+	beta, err := s.Create("Beta", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create Beta failed: %v", err)
+	}
+
+	if _, err := s.Update(alpha.ID, "alpha", "2x3", nil); err != nil {
+		t.Fatalf("Update should allow a case-only rename of the same team: %v", err)
+	}
+	if _, err := s.Update(beta.ID, "ALPHA", "2x2", nil); err == nil {
+		t.Fatal("expected update to reject another team's case-insensitive name collision")
+	}
+}
+
 func jsonHasKey(raw []byte, key string) bool {
 	var arr []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err != nil {

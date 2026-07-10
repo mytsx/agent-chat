@@ -62,6 +62,15 @@ func sameAgentName(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
+func hasTeamNameCollision(teams []Team, name, excludeID string) bool {
+	for _, team := range teams {
+		if team.ID != excludeID && strings.EqualFold(team.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Store manages team/tab persistence
 type Store struct {
 	mu       sync.RWMutex
@@ -149,10 +158,8 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	// EqualFold: team names become room filenames; on case-insensitive filesystems
 	// (macOS/Windows) "Alpha" and "alpha" collide on the same file, so reject names that
 	// differ only by case to prevent data-losing collisions.
-	for _, existing := range s.teams {
-		if strings.EqualFold(existing.Name, name) {
-			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
-		}
+	if hasTeamNameCollision(s.teams, name, "") {
+		return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
 	}
 
 	id := uuid.New().String()
@@ -193,10 +200,8 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 	// Same filesystem-collision guard as Create, but excluding the team being renamed:
 	// a rename that case-insensitively matches a DIFFERENT team would map both to the
 	// same room file on macOS/Windows.
-	for _, t := range s.teams {
-		if t.ID != id && strings.EqualFold(t.Name, name) {
-			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
-		}
+	if hasTeamNameCollision(s.teams, name, id) {
+		return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
 	}
 
 	for i, t := range s.teams {
