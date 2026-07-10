@@ -69,6 +69,17 @@ function nextActiveTeamID(
   return currentActiveID === removedID ? (teams[0]?.id ?? null) : currentActiveID;
 }
 
+function removeTeamState(
+  state: TeamsState,
+  id: string
+): Pick<TeamsState, "teams" | "activeTeamID"> {
+  const teams = removeTeam(state.teams, id);
+  return {
+    teams,
+    activeTeamID: nextActiveTeamID(teams, state.activeTeamID, id),
+  };
+}
+
 export const useTeams = create<TeamsState>((set, get) => ({
   teams: [],
   activeTeamID: null,
@@ -147,21 +158,8 @@ export const useTeams = create<TeamsState>((set, get) => ({
 
   deleteTeam: async (id) => {
     await DeleteTeam(id);
-    set((s) => {
-      const teams = removeTeam(s.teams, id);
-      return {
-        teams,
-        activeTeamID: nextActiveTeamID(teams, s.activeTeamID, id),
-      };
-    });
+    set((s) => removeTeamState(s, id));
   },
 
-  removeTeamLocal: (id) =>
-    set((s) => {
-      const teams = removeTeam(s.teams, id);
-      return {
-        teams,
-        activeTeamID: nextActiveTeamID(teams, s.activeTeamID, id),
-      };
-    }),
+  removeTeamLocal: (id) => set((s) => removeTeamState(s, id)),
 }));
