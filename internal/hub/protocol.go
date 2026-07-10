@@ -322,8 +322,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		text = fmt.Sprintf("\u2705 '%s' olarak '%s' odasına katıldın. Şu an odada başka agent yok.", data.AgentName, room)
 	}
 
-	respData, _ := json.Marshal(map[string]any{"text": text, "agents": agents})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"text": text, "agents": agents})
 
 	// Broadcast events
 	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})
@@ -435,8 +434,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		text = fmt.Sprintf("\U0001f4e4 Mesaj '%s' agent'ına gönderildi (ID: %d)", data.To, msg.ID)
 	}
 
-	respData, _ := json.Marshal(map[string]any{"text": text, "message_id": msg.ID})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"text": text, "message_id": msg.ID})
 
 	// Broadcast event
 	h.broadcastEvent(room, "message_new", map[string]any{"message": msg})
@@ -477,8 +475,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
 	if len(filtered) == 0 {
-		respData, _ := json.Marshal(map[string]string{"text": "\U0001f4ed Yeni mesaj yok."})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
 		return
 	}
 
@@ -504,8 +501,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
 
-	respData, _ := json.Marshal(map[string]string{"text": sb.String()})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, sb.String())
 }
 
 func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
@@ -553,8 +549,7 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
 
 	if len(filtered) == 0 {
-		respData, _ := json.Marshal(map[string]string{"text": "\U0001f4ed Yeni mesaj yok."})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
 		return
 	}
 
@@ -584,8 +579,7 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		sb.WriteString("\n")
 	}
 
-	respData, _ := json.Marshal(map[string]string{"text": sb.String()})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, sb.String())
 }
 
 func (h *Hub) handleListAgents(c *Client, req types.Request) {
@@ -602,8 +596,7 @@ func (h *Hub) handleListAgents(c *Client, req types.Request) {
 	agents := roomState.ListAgents(data.AgentName)
 
 	if len(agents) == 0 {
-		respData, _ := json.Marshal(map[string]string{"text": "\U0001f465 Odada kimse yok."})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, "\U0001f465 Odada kimse yok.")
 		return
 	}
 
@@ -622,8 +615,7 @@ func (h *Hub) handleListAgents(c *Client, req types.Request) {
 		fmt.Fprintf(&sb, "\n    Katılım: %s\n", joined)
 	}
 
-	respData, _ := json.Marshal(map[string]string{"text": sb.String()})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, sb.String())
 }
 
 func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
@@ -655,13 +647,11 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 	sysMsg, found := roomState.Leave(data.AgentName)
 
 	if !found {
-		respData, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("\u26a0\ufe0f '%s' zaten odada değil.", data.AgentName)})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, fmt.Sprintf("\u26a0\ufe0f '%s' zaten odada değil.", data.AgentName))
 		return
 	}
 
-	respData, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName)})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName))
 	c.agentName = ""
 	c.joinedRoom = ""
 
@@ -755,8 +745,7 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 	}
 
 	text := fmt.Sprintf("\U0001f4e6 '%s' odası arşivlendi (%d mesaj).", room, len(msgs))
-	respData, _ := json.Marshal(map[string]any{"text": text, "archived": len(msgs)})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"text": text, "archived": len(msgs)})
 }
 
 // handleSaveSession writes an immutable per-session snapshot of the room's full
@@ -786,8 +775,7 @@ func (h *Hub) handleSaveSession(c *Client, req types.Request) {
 	if saved {
 		text = fmt.Sprintf("\U0001f4be '%s' odası session olarak kaydedildi (%d mesaj).", room, count)
 	}
-	respData, _ := json.Marshal(map[string]any{"text": text, "saved": saved, "count": count})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"text": text, "saved": saved, "count": count})
 }
 
 // handleLogMessage records an out-of-band human→agent prompt in the room
@@ -838,8 +826,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 	roomState := h.getOrCreateRoom(room)
 	msg := roomState.LogUserPrompt(types.UserPromptFrom, data.To, content, data.Timestamp)
 
-	respData, _ := json.Marshal(map[string]any{"ok": true, "message_id": msg.ID})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"ok": true, "message_id": msg.ID})
 
 	h.broadcastEvent(room, "message_new", map[string]any{"message": msg})
 }
@@ -880,8 +867,7 @@ func (h *Hub) handleReadSummary(c *Client, req types.Request) {
 		return
 	}
 	if !ok {
-		respData, _ := json.Marshal(map[string]string{"text": "\U0001f4ed Bu oda için henüz özet yok."})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, "\U0001f4ed Bu oda için henüz özet yok.")
 		return
 	}
 
@@ -923,8 +909,7 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 	}
 	lastID := roomState.GetLastMessageID(agentForQuery)
 
-	respData, _ := json.Marshal(map[string]any{"last_id": lastID})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"last_id": lastID})
 }
 
 // handleGetAgents returns raw agent data for a room (used by desktop app).
@@ -941,8 +926,7 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 		agents = roomState.GetAgents()
 	}
 
-	respData, _ := json.Marshal(map[string]any{"agents": agents})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"agents": agents})
 }
 
 // handleGetMessagesRaw returns raw message data for a room (used by desktop app).
@@ -959,8 +943,7 @@ func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
 		messages = roomState.GetMessages()
 	}
 
-	respData, _ := json.Marshal(map[string]any{"messages": messages})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"messages": messages})
 }
 
 func (h *Hub) handleListRooms(c *Client, req types.Request) {
@@ -970,8 +953,7 @@ func (h *Hub) handleListRooms(c *Client, req types.Request) {
 	h.mu.RUnlock()
 
 	if len(infos) == 0 {
-		respData, _ := json.Marshal(map[string]string{"text": "\U0001f4ad Henüz hiç oda yok."})
-		c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+		c.sendText(req.ID, req.Type, "\U0001f4ad Henüz hiç oda yok.")
 		return
 	}
 
@@ -985,8 +967,7 @@ func (h *Hub) handleListRooms(c *Client, req types.Request) {
 		fmt.Fprintf(&sb, "  \u2022 %s%s - %d agent, %d mesaj\n", r.Name, defaultMarker, r.Agents, r.Messages)
 	}
 
-	respData, _ := json.Marshal(map[string]string{"text": sb.String()})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, sb.String())
 }
 
 // handleListRoomsDetailed returns structured room summaries for the desktop room
@@ -1002,8 +983,7 @@ func (h *Hub) handleListRoomsDetailed(c *Client, req types.Request) {
 	summaries := ListRoomSummaries(h.rooms, h.defaultRoom)
 	h.mu.RUnlock()
 
-	respData, _ := json.Marshal(map[string]any{"rooms": summaries})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"rooms": summaries})
 }
 
 // handleDeleteRoom removes an orphan room's live state + persisted state file. Only the
