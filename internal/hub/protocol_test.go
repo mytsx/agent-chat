@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -605,5 +606,127 @@ func TestHandleSetManager_RequiresDesktopAuth(t *testing.T) {
 	}
 	if got := h.getConfiguredManager("r1"); got != "manager" {
 		t.Fatalf("expected configured manager to be manager, got %q", got)
+	}
+}
+
+func TestWriteAgentMessageLineFormatsExistingCases(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  types.Message
+		want string
+	}{
+		{
+			name: "system",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				Type:      "system",
+				Content:   "joined",
+			},
+			want: "[01:02:03] joined\n",
+		},
+		{
+			name: "broadcast",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "all",
+				Content:   "hello",
+			},
+			want: "[01:02:03] alice → HERKESE: hello\n",
+		},
+		{
+			name: "routed",
+			msg: types.Message{
+				Timestamp:  "2026-07-11T01:02:03.000000",
+				From:       "alice",
+				To:         "manager",
+				OriginalTo: "bob",
+				Content:    "please check",
+			},
+			want: "[01:02:03] alice → manager (orijinal: bob): please check\n",
+		},
+		{
+			name: "direct",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "bob",
+				Content:   "hello",
+			},
+			want: "[01:02:03] alice → bob: hello\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			writeAgentMessageLine(&sb, tt.msg)
+			if got := sb.String(); got != tt.want {
+				t.Fatalf("formatted line mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteAllMessagesLineFormatsExistingCases(t *testing.T) {
+	longContent := strings.Repeat("x", 101)
+	tests := []struct {
+		name string
+		msg  types.Message
+		want string
+	}{
+		{
+			name: "system",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				Type:      "system",
+				Content:   "joined",
+			},
+			want: "[01:02:03] SYSTEM: joined\n",
+		},
+		{
+			name: "routed",
+			msg: types.Message{
+				ID:         42,
+				Timestamp:  "2026-07-11T01:02:03.000000",
+				From:       "alice",
+				To:         "manager",
+				OriginalTo: "bob",
+				Content:    longContent,
+			},
+			want: "[01:02:03] #42 alice → manager (orijinal: bob): " + strings.Repeat("x", 100) + "\n",
+		},
+		{
+			name: "broadcast",
+			msg: types.Message{
+				ID:        8,
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "all",
+				Content:   "hello all",
+			},
+			want: "[01:02:03] #8 alice → all: hello all\n",
+		},
+		{
+			name: "direct",
+			msg: types.Message{
+				ID:        7,
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "bob",
+				Content:   "hello",
+			},
+			want: "[01:02:03] #7 alice → bob: hello\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			writeAllMessagesLine(&sb, tt.msg)
+			if got := sb.String(); got != tt.want {
+				t.Fatalf("formatted line mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+		})
 	}
 }

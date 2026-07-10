@@ -493,17 +493,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	}
 
 	for _, msg := range filtered {
-		ts := parseTimestamp(msg.Timestamp)
-		if msg.Type == "system" {
-			fmt.Fprintf(&sb, "[%s] %s\n", ts, sanitize(msg.Content))
-		} else if msg.To == "all" {
-			fmt.Fprintf(&sb, "[%s] %s \u2192 HERKESE: %s\n", ts, sanitize(msg.From), sanitize(msg.Content))
-		} else if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
-			fmt.Fprintf(&sb, "[%s] %s \u2192 %s (orijinal: %s): %s\n",
-				ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(msg.Content))
-		} else {
-			fmt.Fprintf(&sb, "[%s] %s \u2192 %s: %s\n", ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.Content))
-		}
+		writeAgentMessageLine(&sb, msg)
 		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
 
@@ -567,25 +557,47 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	}
 
 	for _, msg := range filtered {
-		ts := parseTimestamp(msg.Timestamp)
-		if msg.Type == "system" {
-			fmt.Fprintf(&sb, "[%s] SYSTEM: %s\n", ts, sanitize(msg.Content))
-		} else {
-			contentPreview := msg.Content
-			if len(contentPreview) > 100 {
-				contentPreview = contentPreview[:100]
-			}
-			if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
-				fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s (orijinal: %s): %s\n",
-					ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(contentPreview))
-			} else {
-				fmt.Fprintf(&sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
-			}
-		}
+		writeAllMessagesLine(&sb, msg)
 		sb.WriteString("\n")
 	}
 
 	c.sendText(req.ID, req.Type, sb.String())
+}
+
+func writeAgentMessageLine(sb *strings.Builder, msg types.Message) {
+	ts := parseTimestamp(msg.Timestamp)
+	if msg.Type == "system" {
+		fmt.Fprintf(sb, "[%s] %s\n", ts, sanitize(msg.Content))
+		return
+	}
+	if msg.To == "all" {
+		fmt.Fprintf(sb, "[%s] %s \u2192 HERKESE: %s\n", ts, sanitize(msg.From), sanitize(msg.Content))
+		return
+	}
+	if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
+		fmt.Fprintf(sb, "[%s] %s \u2192 %s (orijinal: %s): %s\n",
+			ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(msg.Content))
+		return
+	}
+	fmt.Fprintf(sb, "[%s] %s \u2192 %s: %s\n", ts, sanitize(msg.From), sanitize(msg.To), sanitize(msg.Content))
+}
+
+func writeAllMessagesLine(sb *strings.Builder, msg types.Message) {
+	ts := parseTimestamp(msg.Timestamp)
+	if msg.Type == "system" {
+		fmt.Fprintf(sb, "[%s] SYSTEM: %s\n", ts, sanitize(msg.Content))
+		return
+	}
+	contentPreview := msg.Content
+	if len(contentPreview) > 100 {
+		contentPreview = contentPreview[:100]
+	}
+	if msg.OriginalTo != "" && msg.OriginalTo != msg.To {
+		fmt.Fprintf(sb, "[%s] #%d %s \u2192 %s (orijinal: %s): %s\n",
+			ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(msg.OriginalTo), sanitize(contentPreview))
+		return
+	}
+	fmt.Fprintf(sb, "[%s] #%d %s \u2192 %s: %s\n", ts, msg.ID, sanitize(msg.From), sanitize(msg.To), sanitize(contentPreview))
 }
 
 func (h *Hub) handleListAgents(c *Client, req types.Request) {
