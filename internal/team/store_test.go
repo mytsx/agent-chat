@@ -900,6 +900,57 @@ func TestUpdateRollsBackOnSaveFailure(t *testing.T) {
 	}
 }
 
+func TestCreateRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.Create("TeamA", "2x2", nil); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	if got := s.List(); len(got) != 0 {
+		t.Fatalf("Create did not roll back in memory: %+v", got)
+	}
+}
+
+func TestDeleteRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	a, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create TeamA failed: %v", err)
+	}
+	b, err := s.Create("TeamB", "1x1", nil)
+	if err != nil {
+		t.Fatalf("create TeamB failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if err := s.Delete(a.ID); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	if _, err := s.Get(a.ID); err != nil {
+		t.Fatalf("Delete did not roll back removed team in memory: %v", err)
+	}
+	if _, err := s.Get(b.ID); err != nil {
+		t.Fatalf("Delete rollback lost unaffected team: %v", err)
+	}
+}
+
 func TestCreate_RejectsDuplicateName(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.Create("Alpha", "2x2", nil); err != nil {

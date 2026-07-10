@@ -168,8 +168,10 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 		CreatedAt:  time.Now().Format(time.RFC3339),
 	}
 
+	prev := s.teams
 	s.teams = append(s.teams, t)
 	if err := s.save(); err != nil {
+		s.teams = prev // roll back so memory matches disk
 		return Team{}, err
 	}
 
@@ -462,8 +464,16 @@ func (s *Store) Delete(id string) error {
 
 	for i, t := range s.teams {
 		if t.ID == id {
-			s.teams = append(s.teams[:i], s.teams[i+1:]...)
-			return s.save()
+			prev := s.teams
+			updated := make([]Team, 0, len(prev)-1)
+			updated = append(updated, prev[:i]...)
+			updated = append(updated, prev[i+1:]...)
+			s.teams = updated
+			if err := s.save(); err != nil {
+				s.teams = prev // roll back so memory matches disk
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("team not found: %s", id)
