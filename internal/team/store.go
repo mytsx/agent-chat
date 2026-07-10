@@ -199,11 +199,13 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 
 	for i, t := range s.teams {
 		if t.ID == id {
+			prev := s.teams[i]
 			s.teams[i].Name = name
 			s.teams[i].GridLayout = gridLayout
 			s.teams[i].Agents = agents
 
 			if err := s.save(); err != nil {
+				s.teams[i] = prev // roll back so memory matches disk
 				return Team{}, err
 			}
 			return s.teams[i], nil

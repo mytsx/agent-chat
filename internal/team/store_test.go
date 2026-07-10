@@ -881,6 +881,25 @@ func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
 	}
 }
 
+func TestUpdateRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{{Name: "agent-a", SlotIndex: 1}})
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.Update(tm.ID, "TeamB", "1x1", []AgentConfig{{Name: "agent-b", SlotIndex: 2}}); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	got, _ := s.Get(tm.ID)
+	if got.Name != "TeamA" || got.GridLayout != "2x2" || len(got.Agents) != 1 || got.Agents[0].Name != "agent-a" {
+		t.Fatalf("Update did not roll back in memory: %+v", got)
+	}
+}
+
 func TestCreate_RejectsDuplicateName(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.Create("Alpha", "2x2", nil); err != nil {
