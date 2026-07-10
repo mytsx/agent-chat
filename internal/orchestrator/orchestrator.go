@@ -299,40 +299,8 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	content := msg.Content
 	contentLower := strings.ToLower(content)
 	expectsReply := msg.ExpectsReply
-
-	// Is it a question?
-	isQuestion := false
-	for _, p := range questionPatterns {
-		if strings.Contains(contentLower, p) {
-			isQuestion = true
-			break
-		}
-	}
-
-	// Is it a short acknowledgment? Sorular zaten notify edilir ve ack olamaz
-	// (isAck = isShort && hasAck && !isQuestion), bu yüzden soru ise ack taramasını
-	// tamamen atla.
-	// isShort: mesaj ack olacak kadar kısa mı? Rune sayımı O(N), byte uzunluğu
-	// O(1). UTF-8'de her rune 1..4 byte olduğundan byte uzunluğu çoğu durumu
-	// kesin belirler: byteLen<AckMsgMaxLength ise rune sayısı da kesin küçüktür;
-	// byteLen>=AckMsgMaxLength*UTFMax ise kesin büyüktür. Yalnız bu iki sınır
-	// arasındaki gri bölgede gerçek rune sayımı gerekir — böylece kısa (yaygın)
-	// ve uzun mesajlarda tam tarama atlanır. (utf8.RuneCountInString < ... ile
-	// birebir aynı sonucu verir; eşdeğerlik testle doğrulandı.)
-	isAck := false
-	if !isQuestion {
-		byteLen := len(content)
-		isShort := byteLen < AckMsgMaxLength ||
-			(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
-		if isShort {
-			for _, p := range ackPatterns {
-				if matchesAckPattern(contentLower, p) {
-					isAck = true
-					break
-				}
-			}
-		}
-	}
+	isQuestion := containsQuestionPattern(contentLower)
+	isAck := !isQuestion && isShortContent(content) && containsAckPattern(contentLower)
 
 	// Decision
 	if isAck && !expectsReply {
@@ -345,6 +313,35 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 		return AnalysisResult{Action: "notify", Reason: "Response expected", IsQuestion: false}
 	}
 	return AnalysisResult{Action: "notify", Reason: "Informational", IsQuestion: false}
+}
+
+func containsQuestionPattern(contentLower string) bool {
+	for _, p := range questionPatterns {
+		if strings.Contains(contentLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAckPattern(contentLower string) bool {
+	for _, p := range ackPatterns {
+		if matchesAckPattern(contentLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isShortContent reports whether a message is short enough to be considered an
+// acknowledgment. Rune counting is O(N), while byte length is O(1). In UTF-8,
+// every rune is 1..4 bytes, so byteLen<AckMsgMaxLength is definitely short and
+// byteLen>=AckMsgMaxLength*UTFMax is definitely long. Only the gray zone needs
+// a full rune count. This preserves the previous utf8.RuneCountInString result.
+func isShortContent(content string) bool {
+	byteLen := len(content)
+	return byteLen < AckMsgMaxLength ||
+		(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
 }
 
 // buildPrompt builds the single-message notification text.
