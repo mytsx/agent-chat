@@ -42,6 +42,23 @@ func optionalAgentNameArg() mcp.ToolOption {
 	)
 }
 
+func nonDestructiveToolOptions(description string, opts ...mcp.ToolOption) []mcp.ToolOption {
+	return annotatedToolOptions(description, false, opts...)
+}
+
+func readOnlyToolOptions(description string, opts ...mcp.ToolOption) []mcp.ToolOption {
+	return annotatedToolOptions(description, true, opts...)
+}
+
+func annotatedToolOptions(description string, readOnly bool, opts ...mcp.ToolOption) []mcp.ToolOption {
+	options := []mcp.ToolOption{mcp.WithDescription(description)}
+	if readOnly {
+		options = append(options, mcp.WithReadOnlyHintAnnotation(true))
+	}
+	options = append(options, mcp.WithDestructiveHintAnnotation(false))
+	return append(options, opts...)
+}
+
 // NewMCPServerApp creates a new MCP server application backed by a hub client.
 func NewMCPServerApp(client *hubclient.HubClient, defaultRoom string, logger *log.Logger) *MCPServerApp {
 	s := server.NewMCPServer(
@@ -79,8 +96,7 @@ func (app *MCPServerApp) registerTools() {
 	h := newToolHandlers(app.storage, app.logger)
 
 	// join_room
-	app.server.AddTool(mcp.NewTool("join_room",
-		mcp.WithDescription(`Join the chat room with a unique name.
+	app.server.AddTool(mcp.NewTool("join_room", nonDestructiveToolOptions(`Join the chat room with a unique name.
 
 Args:
     agent_name: Unique name for this agent (e.g., "backend", "frontend", "mobile")
@@ -92,8 +108,7 @@ Returns:
 
 Notes:
     - Agent names must be unique per room; duplicate names are rejected
-    - role="manager" claims manager lock for the room (only one active manager)`),
-		mcp.WithDestructiveHintAnnotation(false),
+    - role="manager" claims manager lock for the room (only one active manager)`,
 		mcp.WithString("agent_name",
 			mcp.Required(),
 			mcp.Description("Unique name for this agent (e.g., \"backend\", \"frontend\", \"mobile\")"),
@@ -104,11 +119,10 @@ Notes:
 		mcp.WithString("room",
 			mcp.Description("Room name (empty = default room from AGENT_CHAT_ROOM env or \"default\")"),
 		),
-	), h.joinRoom)
+	)...), h.joinRoom)
 
 	// send_message
-	app.server.AddTool(mcp.NewTool("send_message",
-		mcp.WithDescription(`Send a message to other agents.
+	app.server.AddTool(mcp.NewTool("send_message", nonDestructiveToolOptions(`Send a message to other agents.
 
 Args:
     from_agent: Your agent name
@@ -123,8 +137,7 @@ Returns:
 
 Notes:
     - from_agent must match the name you joined with via join_room
-    - If a manager is active in the room, non-manager messages are first routed to manager`),
-		mcp.WithDestructiveHintAnnotation(false),
+    - If a manager is active in the room, non-manager messages are first routed to manager`,
 		mcp.WithString("from_agent",
 			mcp.Required(),
 			mcp.Description(agentNameDescription),
@@ -143,11 +156,10 @@ Notes:
 			mcp.Description("\"urgent\", \"normal\", or \"low\" (default: \"normal\")"),
 		),
 		roomArg(),
-	), h.sendMessage)
+	)...), h.sendMessage)
 
 	// read_messages
-	app.server.AddTool(mcp.NewTool("read_messages",
-		mcp.WithDescription(`Read messages from the chat room.
+	app.server.AddTool(mcp.NewTool("read_messages", readOnlyToolOptions(`Read messages from the chat room.
 
 Args:
     agent_name: Your agent name (to filter relevant messages)
@@ -157,9 +169,7 @@ Args:
     room: Room name (empty = default room)
 
 Returns:
-    List of messages formatted for reading`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
+    List of messages formatted for reading`,
 		mcp.WithString("agent_name",
 			mcp.Required(),
 			mcp.Description("Your agent name (to filter relevant messages)"),
@@ -174,38 +184,33 @@ Returns:
 			mcp.Description("Maximum number of messages to return (default: 10, 0 for unlimited)"),
 		),
 		roomArg(),
-	), h.readMessages)
+	)...), h.readMessages)
 
 	// list_agents
-	app.server.AddTool(mcp.NewTool("list_agents",
-		mcp.WithDescription(`List all agents currently in the chat room.
+	app.server.AddTool(mcp.NewTool("list_agents", readOnlyToolOptions(`List all agents currently in the chat room.
 
 Args:
     agent_name: Your agent name (optional, for updating last_seen)
     room: Room name (empty = default room)
 
 Returns:
-    List of active agents with their roles`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
+    List of active agents with their roles`,
 		optionalAgentNameArg(),
 		roomArg(),
-	), h.listAgents)
+	)...), h.listAgents)
 
 	// leave_room
-	app.server.AddTool(mcp.NewTool("leave_room",
-		mcp.WithDescription(`Leave the chat room.
+	app.server.AddTool(mcp.NewTool("leave_room", nonDestructiveToolOptions(`Leave the chat room.
 
 Args:
     agent_name: Your agent name
     room: Room name (empty = default room)
 
 Returns:
-    Confirmation message`),
-		mcp.WithDestructiveHintAnnotation(false),
+    Confirmation message`,
 		requiredAgentNameArg(),
 		roomArg(),
-	), h.leaveRoom)
+	)...), h.leaveRoom)
 
 	// clear_room
 	app.server.AddTool(mcp.NewTool("clear_room",
@@ -220,8 +225,7 @@ Returns:
 	), h.clearRoom)
 
 	// read_all_messages
-	app.server.AddTool(mcp.NewTool("read_all_messages",
-		mcp.WithDescription(`Read ALL messages in the chat room (for manager/admin use).
+	app.server.AddTool(mcp.NewTool("read_all_messages", readOnlyToolOptions(`Read ALL messages in the chat room (for manager/admin use).
 
 Args:
     since_id: Only get messages after this ID (default: 0 for all)
@@ -229,9 +233,7 @@ Args:
     room: Room name (empty = default room)
 
 Returns:
-    List of all messages formatted for reading`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
+    List of all messages formatted for reading`,
 		mcp.WithNumber("since_id",
 			mcp.Description("Only get messages after this ID (default: 0 for all)"),
 		),
@@ -239,11 +241,10 @@ Returns:
 			mcp.Description("Maximum number of messages to return (default: 15, 0 for unlimited)"),
 		),
 		roomArg(),
-	), h.readAllMessages)
+	)...), h.readAllMessages)
 
 	// read_summary
-	app.server.AddTool(mcp.NewTool("read_summary",
-		mcp.WithDescription(`Read the previous session's summary for this room, if one was saved.
+	app.server.AddTool(mcp.NewTool("read_summary", readOnlyToolOptions(`Read the previous session's summary for this room, if one was saved.
 
 Prefer this over read_all_messages on join: it gives the prior-session context
 (goals, decisions, open items) in a few tokens instead of pulling the whole
@@ -253,35 +254,26 @@ Args:
     room: Room name (empty = default room)
 
 Returns:
-    The latest saved summary, or a notice if none exists yet`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
+    The latest saved summary, or a notice if none exists yet`,
 		roomArg(),
-	), h.readSummary)
+	)...), h.readSummary)
 
 	// get_last_message_id
-	app.server.AddTool(mcp.NewTool("get_last_message_id",
-		mcp.WithDescription(`Get the ID of the last message. Useful for polling new messages.
+	app.server.AddTool(mcp.NewTool("get_last_message_id", readOnlyToolOptions(`Get the ID of the last message. Useful for polling new messages.
 
 Args:
     agent_name: Your agent name (optional, for updating last_seen)
     room: Room name (empty = default room)
 
 Returns:
-    The ID of the last message, or 0 if no messages`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
+    The ID of the last message, or 0 if no messages`,
 		optionalAgentNameArg(),
 		roomArg(),
-	), h.getLastMessageID)
+	)...), h.getLastMessageID)
 
 	// list_rooms
-	app.server.AddTool(mcp.NewTool("list_rooms",
-		mcp.WithDescription(`List all available chat rooms.
+	app.server.AddTool(mcp.NewTool("list_rooms", readOnlyToolOptions(`List all available chat rooms.
 
 Returns:
-    List of rooms with agent counts`),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithDestructiveHintAnnotation(false),
-	), h.listRooms)
+    List of rooms with agent counts`)...), h.listRooms)
 }
