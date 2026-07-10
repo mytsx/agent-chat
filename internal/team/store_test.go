@@ -557,6 +557,91 @@ func TestSanitizeCharterStripsMarkerStraddlingCap(t *testing.T) {
 // SetCustomPrompt writes the room charter via a targeted single-field endpoint
 // (SetManager pattern) rather than the positional Update, which would reset the
 // charter on every grid-layout change. The value must round-trip through Get.
+func TestSetManagerClearsObserverRoleCaseInsensitive(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{
+		{Name: "Pilot", Role: RoleObserver, CLIType: "claude"},
+	})
+
+	updated, err := s.SetManager(tm.ID, "pilot")
+	if err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+	if updated.ManagerAgent != "pilot" {
+		t.Fatalf("ManagerAgent = %q, want %q", updated.ManagerAgent, "pilot")
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0].Role != "" {
+		t.Fatalf("manager observer role was not cleared: %+v", updated.Agents)
+	}
+}
+
+func TestSetManagerSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: "Lead", CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("seed SetManager failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("no-op SetManager should succeed: %v", err)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read sentinel failed: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("unchanged SetManager rewrote the file: %s", raw)
+	}
+}
+
+func TestSetManagerWritesWhenUnchangedManagerClearsObserver(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	s.mu.Lock()
+	s.teams[0].ManagerAgent = "Pilot"
+	s.mu.Unlock()
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-SHOULD-BE-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	updated, err := s.SetManager(tm.ID, "Pilot")
+	if err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+	if updated.Agents[0].Role != "" {
+		t.Fatalf("observer role was not cleared for unchanged manager: %+v", updated.Agents)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read rewritten file failed: %v", err)
+	}
+	if bytes.Equal(raw, sentinel) {
+		t.Fatal("SetManager skipped write even though it cleared observer role")
+	}
+}
+
 func TestSetCustomPromptRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	tm, err := s.Create("TeamA", "2x2", nil)

@@ -281,6 +281,25 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
 
+func agentsWithoutObserverRole(agents []AgentConfig, agentName string) ([]AgentConfig, bool) {
+	if agentName == "" {
+		return agents, false
+	}
+	for i, agent := range agents {
+		if !sameAgentName(agent.Name, agentName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(agent.Role), RoleObserver) {
+			return agents, false
+		}
+		updated := make([]AgentConfig, len(agents))
+		copy(updated, agents)
+		updated[i].Role = ""
+		return updated, true
+	}
+	return agents, false
+}
+
 // SetManager sets or clears manager agent for a team. Empty string clears manager.
 func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 	if managerAgent != "" {
@@ -301,18 +320,10 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 			// observer Role on the new manager, else broadcastRoleLookup would wrongly
 			// skip the manager from broadcasts. Copy-on-write so concurrent readers of
 			// the shared Agents slice don't race.
-			if managerAgent != "" {
-				for j, a := range t.Agents {
-					if sameAgentName(a.Name, managerAgent) {
-						if strings.EqualFold(strings.TrimSpace(a.Role), RoleObserver) {
-							updated := make([]AgentConfig, len(prevAgents))
-							copy(updated, prevAgents)
-							updated[j].Role = ""
-							s.teams[i].Agents = updated
-						}
-						break
-					}
-				}
+			updatedAgents, agentsChanged := agentsWithoutObserverRole(t.Agents, managerAgent)
+			s.teams[i].Agents = updatedAgents
+			if prevMgr == managerAgent && !agentsChanged {
+				return s.teams[i], nil
 			}
 			if err := s.save(); err != nil {
 				s.teams[i].ManagerAgent = prevMgr
