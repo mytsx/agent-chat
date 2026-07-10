@@ -109,9 +109,7 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 
 	h.logger.Printf("Client identified: type=%s agent=%s", data.ClientType, data.AgentName)
 
-	resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true}
-	resp.Data, _ = json.Marshal(map[string]bool{"ok": true})
-	c.sendJSON(resp)
+	c.sendOK(req.ID, req.Type)
 }
 
 func (h *Hub) validateDesktopToken(token string) bool {
@@ -163,8 +161,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	} else {
 		text = fmt.Sprintf("'%s' odası manager'ı '%s' olarak ayarlandı.", room, managerAgent)
 	}
-	respData, _ := json.Marshal(map[string]string{"text": text})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, text)
 }
 
 // handleSetObservers replaces the desktop-authorized observer set for a room (#17).
@@ -197,8 +194,7 @@ func (h *Hub) handleSetObservers(c *Client, req types.Request) {
 	h.setConfiguredObservers(room, data.Observers)
 
 	text := fmt.Sprintf("'%s' odası için %d observer atandı.", room, len(data.Observers))
-	respData, _ := json.Marshal(map[string]string{"text": text})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, text)
 }
 
 func (h *Hub) handleSubscribe(c *Client, req types.Request) {
@@ -228,9 +224,7 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 
 	h.logger.Printf("Client subscribed to rooms: %v", data.Rooms)
 
-	resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true}
-	resp.Data, _ = json.Marshal(map[string]bool{"ok": true})
-	c.sendJSON(resp)
+	c.sendOK(req.ID, req.Type)
 }
 
 func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
@@ -724,8 +718,7 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	h.resetSessionTracking(room)
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
-	respData, _ := json.Marshal(map[string]string{"text": text})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, text)
 
 	h.broadcastEvent(room, "room_cleared", map[string]any{})
 }
@@ -893,8 +886,7 @@ func (h *Hub) handleReadSummary(c *Client, req types.Request) {
 	}
 
 	text := fmt.Sprintf("\U0001f4dd Önceki session özeti (%s):\n\n%s", doc.CreatedAt, doc.Text)
-	respData, _ := json.Marshal(map[string]string{"text": text})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, text)
 }
 
 func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
@@ -1072,6 +1064,5 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 	os.Remove(stateFile + ".tmp")
 
 	text := fmt.Sprintf("\U0001f5d1️ '%s' odası silindi.", room)
-	respData, _ := json.Marshal(map[string]string{"text": text})
-	c.sendJSON(types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: respData})
+	c.sendText(req.ID, req.Type, text)
 }

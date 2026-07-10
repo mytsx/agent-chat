@@ -143,6 +143,25 @@ func (c *Client) sendJSON(v any) {
 	}
 }
 
+// sendSuccess sends a successful response with an optional JSON payload.
+func (c *Client) sendSuccess(id, reqType string, payload any) {
+	resp := types.Response{ID: id, RequestType: reqType, Success: true}
+	if payload != nil {
+		resp.Data, _ = json.Marshal(payload)
+	}
+	c.sendJSON(resp)
+}
+
+// sendOK sends a standard ok=true success response.
+func (c *Client) sendOK(id, reqType string) {
+	c.sendSuccess(id, reqType, map[string]bool{"ok": true})
+}
+
+// sendText sends a text-only success response.
+func (c *Client) sendText(id, reqType, text string) {
+	c.sendSuccess(id, reqType, map[string]string{"text": text})
+}
+
 // sendError sends an error response.
 func (c *Client) sendError(id, reqType, errMsg string) {
 	c.sendJSON(types.Response{
