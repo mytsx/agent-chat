@@ -234,6 +234,25 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 	return ok && sessions[agentName] == sessionID
 }
 
+// snapshotAgentSessions returns a copy of the registered sessions for chatDir so
+// callers can release o.mu before notifying agents. registeredDirs is populated
+// only when chatDir has no sessions, for diagnostics.
+func (o *Orchestrator) snapshotAgentSessions(chatDir string) (sessionsCopy map[string]string, registeredDirs []string, ok bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	sessions := o.agentSessions[chatDir]
+	if sessions == nil {
+		return nil, mapKeys(o.agentSessions), false
+	}
+
+	sessionsCopy = make(map[string]string, len(sessions))
+	for agent, sessionID := range sessions {
+		sessionsCopy[agent] = sessionID
+	}
+	return sessionsCopy, nil, true
+}
+
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
@@ -652,18 +671,11 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 
 	// Manager-routed messages must always notify the manager target, even for ACK-like content.
 	if msg.RoutedByManager {
-		o.mu.Lock()
-		sessions := o.agentSessions[chatDir]
-		if sessions == nil {
-			o.mu.Unlock()
+		sessionsCopy, _, ok := o.snapshotAgentSessions(chatDir)
+		if !ok {
 			log.Printf("[ORCH] No agent sessions for chatDir=%s (manager-routed)", chatDir)
 			return
 		}
-		sessionsCopy := make(map[string]string, len(sessions))
-		for k, v := range sessions {
-			sessionsCopy[k] = v
-		}
-		o.mu.Unlock()
 
 		target := msg.To
 		if sessionID, ok := sessionsCopy[target]; ok {
@@ -682,19 +694,11 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 	}
 
 	// Snapshot sessions under lock to avoid race with RegisterAgent/UnregisterAgent
-	o.mu.Lock()
-	sessions := o.agentSessions[chatDir]
-	if sessions == nil {
-		log.Printf("[ORCH] No agent sessions for chatDir=%s (registered dirs: %v)", chatDir, mapKeys(o.agentSessions))
-		o.mu.Unlock()
+	sessionsCopy, registeredDirs, ok := o.snapshotAgentSessions(chatDir)
+	if !ok {
+		log.Printf("[ORCH] No agent sessions for chatDir=%s (registered dirs: %v)", chatDir, registeredDirs)
 		return
 	}
-	// Copy map so we can release the lock before sending notifications
-	sessionsCopy := make(map[string]string, len(sessions))
-	for k, v := range sessions {
-		sessionsCopy[k] = v
-	}
-	o.mu.Unlock()
 
 	log.Printf("[ORCH] Registered agents for chatDir: %v", mapKeys(sessionsCopy))
 
