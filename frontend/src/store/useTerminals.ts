@@ -96,6 +96,17 @@ function replaceSessionID(
   );
 }
 
+function setTeamSessions(
+  sessionsByTeam: Record<string, TerminalSession[]>,
+  teamID: string,
+  sessions: TerminalSession[]
+): Record<string, TerminalSession[]> {
+  return {
+    ...sessionsByTeam,
+    [teamID]: sessions,
+  };
+}
+
 async function refreshTeamAfterTerminalChange(teamID: string, logPrefix: string): Promise<void> {
   try {
     await useTeams.getState().refreshTeam(teamID);
@@ -112,15 +123,16 @@ function replaceRestartedSessionState(
 ): Partial<TerminalsState> {
   const [captured, pending] = drainPendingCLISessionID(state.pendingCLISessionIDs, newSessionID);
   return {
-    sessions: {
-      ...state.sessions,
-      [teamID]: replaceSessionID(
+    sessions: setTeamSessions(
+      state.sessions,
+      teamID,
+      replaceSessionID(
         state.sessions[teamID] ?? [],
         oldSessionID,
         newSessionID,
         captured
-      ),
-    },
+      )
+    ),
     pendingCLISessionIDs: pending,
   };
 }
@@ -147,10 +159,10 @@ function appendSessionState(
     state.pendingCLISessionIDs
   );
   return {
-    sessions: {
-      ...state.sessions,
-      [session.teamID]: [...(state.sessions[session.teamID] ?? []), attached],
-    },
+    sessions: setTeamSessions(state.sessions, session.teamID, [
+      ...(state.sessions[session.teamID] ?? []),
+      attached,
+    ]),
     pendingCLISessionIDs: pending,
   };
 }
@@ -238,10 +250,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
           s.pendingCLISessionIDs
         );
         return {
-          sessions: {
-            ...s.sessions,
-            [teamID]: [...(s.sessions[teamID] ?? []), ...applied],
-          },
+          sessions: setTeamSessions(s.sessions, teamID, [
+            ...(s.sessions[teamID] ?? []),
+            ...applied,
+          ]),
           pendingCLISessionIDs: pending,
         };
       });
@@ -266,12 +278,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       }
     }
     set((s) => ({
-      sessions: {
-        ...s.sessions,
-        [teamID]: (s.sessions[teamID] ?? []).filter(
-          (t) => t.sessionID !== sessionID
-        ),
-      },
+      sessions: setTeamSessions(
+        s.sessions,
+        teamID,
+        (s.sessions[teamID] ?? []).filter((t) => t.sessionID !== sessionID)
+      ),
     }));
   },
 
@@ -364,10 +375,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         const nextList = [...list];
         nextList[index] = { ...nextList[index], cliSessionID };
         return {
-          sessions: {
-            ...state.sessions,
-            [teamID]: nextList,
-          },
+          sessions: setTeamSessions(state.sessions, teamID, nextList),
           pendingCLISessionIDs: pending,
         };
       }
