@@ -228,6 +228,34 @@ export default function TerminalGrid() {
     }
   }
 
+  const renderTerminalPane = (
+    session: TerminalSession,
+    options: { isFocused?: boolean; onRemove?: () => void; teamID?: string } = {}
+  ) => {
+    const actionTeamID = options.teamID ?? session.teamID;
+    return (
+      <TerminalPane
+        sessionID={session.sessionID}
+        agentName={session.agentName}
+        cliType={session.cliType}
+        isFocused={options.isFocused ?? false}
+        onToggleFocus={() => toggleFocusSession(session.sessionID)}
+        onRemove={options.onRemove}
+        onRestart={() =>
+          restartTerminal(actionTeamID, session.sessionID).catch((err) =>
+            console.error("[restart] failed:", err)
+          )
+        }
+        onResume={() =>
+          resumeTerminal(actionTeamID, session.sessionID).catch((err) =>
+            console.error("[resume] failed:", err)
+          )
+        }
+        canResume={!!session.cliSessionID}
+      />
+    );
+  };
+
   const renderFocusedMode = () => {
     const focused = teamSessions.find((s) => s.sessionID === focusedSessionID);
     if (!focused) return null;
@@ -242,16 +270,7 @@ export default function TerminalGrid() {
               flex: 1,
             }}
           >
-            <TerminalPane
-              sessionID={s.sessionID}
-              agentName={s.agentName}
-              cliType={s.cliType}
-              isFocused={s.sessionID === focusedSessionID}
-              onToggleFocus={() => toggleFocusSession(s.sessionID)}
-              onRestart={() => restartTerminal(s.teamID, s.sessionID).catch(err => console.error("[restart] failed:", err))}
-              onResume={() => resumeTerminal(s.teamID, s.sessionID).catch(err => console.error("[resume] failed:", err))}
-              canResume={!!s.cliSessionID}
-            />
+            {renderTerminalPane(s, { isFocused: s.sessionID === focusedSessionID })}
           </div>
         ))}
       </div>
@@ -260,18 +279,7 @@ export default function TerminalGrid() {
 
   const renderSlot = (slot: GridSlot) => {
     if (slot.type === "terminal") {
-      return (
-        <TerminalPane
-          sessionID={slot.session.sessionID}
-          agentName={slot.session.agentName}
-          cliType={slot.session.cliType}
-          isFocused={false}
-          onToggleFocus={() => toggleFocusSession(slot.session.sessionID)}
-          onRestart={() => restartTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[restart] failed:", err))}
-          onResume={() => resumeTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[resume] failed:", err))}
-          canResume={!!slot.session.cliSessionID}
-        />
-      );
+      return renderTerminalPane(slot.session);
     }
     return (
       <SetupWizard
@@ -320,21 +328,13 @@ export default function TerminalGrid() {
           >
             {teamSessions.map((s) => (
               <div key={s.sessionID} className="custom-grid-item">
-                <TerminalPane
-                  sessionID={s.sessionID}
-                  agentName={s.agentName}
-                  cliType={s.cliType}
-                  isFocused={false}
-                  onToggleFocus={() => toggleFocusSession(s.sessionID)}
-                  onRemove={() =>
+                {renderTerminalPane(s, {
+                  teamID: team.id,
+                  onRemove: () =>
                     removeTerminal(team.id, s.sessionID).catch((err) =>
                       console.error("[remove] failed:", err)
-                    )
-                  }
-                  onRestart={() => restartTerminal(team.id, s.sessionID).catch(err => console.error("[restart] failed:", err))}
-                  onResume={() => resumeTerminal(team.id, s.sessionID).catch(err => console.error("[resume] failed:", err))}
-                  canResume={!!s.cliSessionID}
-                />
+                    ),
+                })}
               </div>
             ))}
           </FreeformGrid>
