@@ -115,6 +115,19 @@ async function refreshTeamAfterTerminalChange(teamID: string, logPrefix: string)
   }
 }
 
+function requireExistingSession(
+  sessions: TerminalSession[],
+  teamID: string,
+  sessionID: string,
+  action: "restartTerminal" | "resumeTerminal"
+): void {
+  if (sessions.some((session) => session.sessionID === sessionID)) {
+    return;
+  }
+  console.error(`[${action}] session ${sessionID} not found in team ${teamID}`);
+  throw new Error("Session not found");
+}
+
 function replaceRestartedSessionState(
   state: TerminalsState,
   teamID: string,
@@ -320,11 +333,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   restartTerminal: async (teamID, sessionID) => {
     const teamSessions = get().sessions[teamID] ?? [];
-    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
-    if (!oldSession) {
-      console.error(`[restartTerminal] session ${sessionID} not found in team ${teamID}`);
-      throw new Error("Session not found");
-    }
+    requireExistingSession(teamSessions, teamID, sessionID, "restartTerminal");
 
     const newSessionID = await RestartTerminal(sessionID);
 
@@ -341,11 +350,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   resumeTerminal: async (teamID, sessionID) => {
     const teamSessions = get().sessions[teamID] ?? [];
-    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
-    if (!oldSession) {
-      console.error(`[resumeTerminal] session ${sessionID} not found in team ${teamID}`);
-      throw new Error("Session not found");
-    }
+    requireExistingSession(teamSessions, teamID, sessionID, "resumeTerminal");
 
     const newSessionID = await ResumeTerminal(sessionID);
 
