@@ -119,6 +119,21 @@ function nextCustomSlotIndex(sessions: TerminalSession[]): number {
     : 0;
 }
 
+function gridSlotKey(slot: GridSlot): string {
+  return slot.type === "terminal" ? slot.session.sessionID : `wizard-${slot.slotIndex}`;
+}
+
+function terminalCountLabel(isCustomMode: boolean, terminalCount: number, capacity: number): string {
+  if (isCustomMode) {
+    return `${terminalCount} terminal${terminalCount !== 1 ? "s" : ""}`;
+  }
+  return `${terminalCount}/${capacity}`;
+}
+
+function reportTerminalActionFailure(action: string, err: unknown) {
+  console.error(`[${action}] failed:`, err);
+}
+
 function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
   if (typeof window === "undefined") {
     return {};
@@ -257,12 +272,12 @@ export default function TerminalGrid() {
         onRemove={options.onRemove}
         onRestart={() =>
           restartTerminal(actionTeamID, session.sessionID).catch((err) =>
-            console.error("[restart] failed:", err)
+            reportTerminalActionFailure("restart", err)
           )
         }
         onResume={() =>
           resumeTerminal(actionTeamID, session.sessionID).catch((err) =>
-            console.error("[resume] failed:", err)
+            reportTerminalActionFailure("resume", err)
           )
         }
         canResume={!!session.cliSessionID}
@@ -342,7 +357,7 @@ export default function TerminalGrid() {
                   teamID: team.id,
                   onRemove: () =>
                     removeTerminal(team.id, s.sessionID).catch((err) =>
-                      console.error("[remove] failed:", err)
+                      reportTerminalActionFailure("remove", err)
                     ),
                 })}
               </div>
@@ -363,17 +378,11 @@ export default function TerminalGrid() {
       <PanelGroup orientation="vertical" className="terminal-panel-group">
         {slotRows.map((rowSlots, rowIdx) => (
           <PanelGroupRow key={rowIdx} rowIdx={rowIdx}>
-            {rowSlots.map((slot, colIdx) => {
-              const key =
-                slot.type === "terminal"
-                  ? slot.session.sessionID
-                  : `wizard-${slot.slotIndex}`;
-              return (
-                <PanelItem key={key} colIdx={colIdx}>
-                  {renderSlot(slot)}
-                </PanelItem>
-              );
-            })}
+            {rowSlots.map((slot, colIdx) => (
+              <PanelItem key={gridSlotKey(slot)} colIdx={colIdx}>
+                {renderSlot(slot)}
+              </PanelItem>
+            ))}
           </PanelGroupRow>
         ))}
       </PanelGroup>
@@ -415,9 +424,7 @@ export default function TerminalGrid() {
             </button>
           )}
           <span className="terminal-count">
-            {isCustomMode
-              ? `${teamSessions.length} terminal${teamSessions.length !== 1 ? "s" : ""}`
-              : `${teamSessions.length}/${capacity}`}
+            {terminalCountLabel(isCustomMode, teamSessions.length, capacity)}
           </span>
         </div>
       </div>
