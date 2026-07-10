@@ -42,6 +42,25 @@ func optionalAgentNameArg() mcp.ToolOption {
 	)
 }
 
+func fromAgentArg() mcp.ToolOption {
+	return mcp.WithString("from_agent",
+		mcp.Required(),
+		mcp.Description(agentNameDescription),
+	)
+}
+
+func sinceIDArg(description string) mcp.ToolOption {
+	return mcp.WithNumber("since_id",
+		mcp.Description(description),
+	)
+}
+
+func limitArg(description string) mcp.ToolOption {
+	return mcp.WithNumber("limit",
+		mcp.Description(description),
+	)
+}
+
 func nonDestructiveToolOptions(description string, opts ...mcp.ToolOption) []mcp.ToolOption {
 	return annotatedToolOptions(description, false, opts...)
 }
@@ -142,10 +161,7 @@ Returns:
 Notes:
     - from_agent must match the name you joined with via join_room
     - If a manager is active in the room, non-manager messages are first routed to manager`,
-		mcp.WithString("from_agent",
-			mcp.Required(),
-			mcp.Description(agentNameDescription),
-		),
+		fromAgentArg(),
 		mcp.WithString("content",
 			mcp.Required(),
 			mcp.Description("Message content"),
@@ -178,15 +194,11 @@ Returns:
 			mcp.Required(),
 			mcp.Description("Your agent name (to filter relevant messages)"),
 		),
-		mcp.WithNumber("since_id",
-			mcp.Description("Only get messages after this ID (default: 0 for all)"),
-		),
+		sinceIDArg("Only get messages after this ID (default: 0 for all)"),
 		mcp.WithBoolean("unread_only",
 			mcp.Description("If True, only show messages not from yourself (default: True)"),
 		),
-		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of messages to return (default: 10, 0 for unlimited)"),
-		),
+		limitArg("Maximum number of messages to return (default: 10, 0 for unlimited)"),
 		roomArg(),
 	)...)
 
@@ -238,12 +250,8 @@ Args:
 
 Returns:
     List of all messages formatted for reading`,
-		mcp.WithNumber("since_id",
-			mcp.Description("Only get messages after this ID (default: 0 for all)"),
-		),
-		mcp.WithNumber("limit",
-			mcp.Description("Maximum number of messages to return (default: 15, 0 for unlimited)"),
-		),
+		sinceIDArg("Only get messages after this ID (default: 0 for all)"),
+		limitArg("Maximum number of messages to return (default: 15, 0 for unlimited)"),
 		roomArg(),
 	)...)
 
