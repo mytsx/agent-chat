@@ -1633,20 +1633,9 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	}
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
-	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
+	// Tracked by promptLogN so GetRoomTranscript can drain in-flight logs first.
 	room, agent := a.logRoomForSession(sess), sess.AgentName
-	// Stamp the delivery moment NOW, synchronously — the prompt was just written to
-	// the agent's PTY, so this precedes any reply the agent can produce. Letting the
-	// hub stamp on (delayed) RPC arrival could order the prompt AFTER that reply in
-	// the timestamp-sorted transcript (#58).
-	ts := types.Timestamp()
-	a.promptLogN.Add(1)
-	go func() {
-		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, agent, content, ts); err != nil {
-			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
-		}
-	}()
+	a.logPromptAsync(client, room, agent, content, fmt.Sprintf("agent=%s", agent), "prompt")
 }
 
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
@@ -1660,14 +1649,19 @@ func (a *App) logTeamBroadcast(room, content string) {
 	}
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
 	// broadcast that already reached every agent. Tracked by promptLogN.
-	// Stamp the delivery moment synchronously (see logUserPrompt) — the broadcast
-	// already reached every agent's PTY, so this precedes any reply (#58).
+	a.logPromptAsync(client, room, "all", content, fmt.Sprintf("room=%s", room), "broadcast")
+}
+
+func (a *App) logPromptAsync(client *hubclient.HubClient, room, agent, content, logContext, label string) {
+	// Stamp the delivery moment synchronously — the prompt/broadcast already reached
+	// the agent PTY, so this precedes any reply. Letting the hub stamp on delayed RPC
+	// arrival could order the prompt AFTER that reply in timestamp-sorted transcripts (#58).
 	ts := types.Timestamp()
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, "all", content, ts); err != nil {
-			log.Printf("[SUMMARY] broadcast loglanamadı (room=%s): %v", room, err)
+		if err := client.LogMessage(room, agent, content, ts); err != nil {
+			log.Printf("[SUMMARY] %s loglanamadı (%s): %v", label, logContext, err)
 		}
 	}()
 }
