@@ -128,9 +128,16 @@ func (c *Client) isDesktopAuthorized() bool {
 	return c.clientType == "desktop" && c.desktopAuthed
 }
 
+func (c *Client) requireDesktopAuthorized(req types.Request, message string) bool {
+	if c.isDesktopAuthorized() {
+		return true
+	}
+	c.sendError(req.ID, req.Type, message)
+	return false
+}
+
 func (h *Hub) handleSetManager(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi manager atayabilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi manager atayabilir") {
 		return
 	}
 
@@ -169,8 +176,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 // authority that decides who is a read-only observer, so a CLI agent can't grant
 // itself observer (and thus read-all) access.
 func (h *Hub) handleSetObservers(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi observer atayabilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi observer atayabilir") {
 		return
 	}
 
@@ -724,8 +730,7 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop odayı arşivleyebilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop odayı arşivleyebilir") {
 		return
 	}
 
@@ -758,8 +763,7 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 func (h *Hub) handleSaveSession(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop session kaydedebilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop session kaydedebilir") {
 		return
 	}
 
@@ -786,8 +790,7 @@ func (h *Hub) handleSaveSession(c *Client, req types.Request) {
 // shown live, but the orchestrator must skip user_prompt so it is never injected
 // back into agent terminals (it was already delivered to the target PTY).
 func (h *Hub) handleLogMessage(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop prompt loglayabilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop prompt loglayabilir") {
 		return
 	}
 
@@ -914,8 +917,7 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 // handleGetAgents returns raw agent data for a room (used by desktop app).
 func (h *Hub) handleGetAgents(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi agent listesini ham biçimde okuyabilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi agent listesini ham biçimde okuyabilir") {
 		return
 	}
 
@@ -931,8 +933,7 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 
 // handleGetMessagesRaw returns raw message data for a room (used by desktop app).
 func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi mesajları ham biçimde okuyabilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi mesajları ham biçimde okuyabilir") {
 		return
 	}
 
@@ -974,8 +975,7 @@ func (h *Hub) handleListRooms(c *Client, req types.Request) {
 // browser (orphan rooms included). Desktop-authorized only \u2014 agents must not see
 // other teams' history.
 func (h *Hub) handleListRoomsDetailed(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yaln\u0131zca yetkili desktop istemcisi oda listesini ayr\u0131nt\u0131l\u0131 okuyabilir")
+	if !c.requireDesktopAuthorized(req, "yaln\u0131zca yetkili desktop istemcisi oda listesini ayr\u0131nt\u0131l\u0131 okuyabilir") {
 		return
 	}
 
@@ -993,8 +993,7 @@ func (h *Hub) handleListRoomsDetailed(c *Client, req types.Request) {
 // session snapshots (hub-state/sessions/{room}/) are PRESERVED — only the live snapshot
 // goes. A tombstone keeps the persist loop from resurrecting the file.
 func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
-	if !c.isDesktopAuthorized() {
-		c.sendError(req.ID, req.Type, "yalnızca yetkili desktop istemcisi oda silebilir")
+	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi oda silebilir") {
 		return
 	}
 	room := h.resolveRoom(req.Room)
