@@ -73,6 +73,7 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.now()
+	previous, hadPrevious := s.records[sessionID]
 	if r, ok := s.records[sessionID]; ok {
 		// A re-Record of an existing id is a NEW run — Copilot keeps the same
 		// events.jsonl across resumes, so onSessionID records the same id again. Start
@@ -95,7 +96,13 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 			CLIType: cliType, Cwd: cwd, FirstSeen: t, LastSeen: t,
 		}
 	}
-	s.save()
+	if !s.save() {
+		if hadPrevious {
+			s.records[sessionID] = previous
+		} else {
+			delete(s.records, sessionID)
+		}
+	}
 }
 
 // Touch advances LastSeen for a known session (FirstSeen preserved). Unknown → no-op.
@@ -106,9 +113,12 @@ func (s *Store) Touch(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r, ok := s.records[sessionID]; ok {
+		previous := r
 		r.LastSeen = s.now()
 		s.records[sessionID] = r
-		s.save()
+		if !s.save() {
+			s.records[sessionID] = previous
+		}
 	}
 }
 
@@ -123,9 +133,12 @@ func (s *Store) TouchAt(sessionID string, t float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r, ok := s.records[sessionID]; ok && t > r.LastSeen {
+		previous := r
 		r.LastSeen = t
 		s.records[sessionID] = r
-		s.save()
+		if !s.save() {
+			s.records[sessionID] = previous
+		}
 	}
 }
 
@@ -198,6 +211,7 @@ func (s *Store) RenameRoom(oldRoom, newRoom string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneRecords(s.records)
 	changed := false
 	for id, r := range s.records {
 		if strings.EqualFold(r.Room, oldRoom) {
@@ -207,7 +221,9 @@ func (s *Store) RenameRoom(oldRoom, newRoom string) {
 		}
 	}
 	if changed {
-		s.save()
+		if !s.save() {
+			s.records = previous
+		}
 	}
 }
 
@@ -223,24 +239,36 @@ func (s *Store) Get(sessionID string) (Record, bool) {
 	return r, ok
 }
 
+func cloneRecords(records map[string]Record) map[string]Record {
+	cloned := make(map[string]Record, len(records))
+	for id, record := range records {
+		cloned[id] = record
+	}
+	return cloned
+}
+
 // save writes records atomically (temp+rename). Called under mu. Record/Touch are
 // void, so a persist failure can't be returned — but it must not be SILENT (the user
 // would lose resume history with no trace), so each failure is logged, mirroring how
-// team.Store surfaces its persistence errors (Copilot).
-func (s *Store) save() {
+// team.Store surfaces its persistence errors (Copilot). The boolean lets callers
+// roll back in-memory mutations when persistence fails, keeping memory and disk in
+// sync for future resume-history reads.
+func (s *Store) save() bool {
 	data, err := json.MarshalIndent(s.records, "", "  ")
 	if err != nil {
 		log.Printf("[SESSIONLOG] marshal failed: %v", err)
-		return
+		return false
 	}
 	tmp := s.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		log.Printf("[SESSIONLOG] write %s failed: %v", tmp, err)
 		os.Remove(tmp)
-		return
+		return false
 	}
 	if err := os.Rename(tmp, s.filePath); err != nil {
 		log.Printf("[SESSIONLOG] rename %s -> %s failed: %v", tmp, s.filePath, err)
 		os.Remove(tmp)
+		return false
 	}
+	return true
 }
