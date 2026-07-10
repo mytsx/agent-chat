@@ -234,6 +234,18 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 	return ok && sessions[agentName] == sessionID
 }
 
+func notificationKey(chatDir, agentName string) string {
+	return chatDir + ":" + agentName
+}
+
+// armFlushTimerLocked schedules a pending-notification flush for the agent.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) armFlushTimerLocked(key, chatDir, agentName, sessionID string, delay time.Duration) {
+	o.pendingTimers[key] = time.AfterFunc(delay, func() {
+		o.flushPending(chatDir, agentName, sessionID)
+	})
+}
+
 // snapshotAgentSessions returns a copy of the registered sessions for chatDir so
 // callers can release o.mu before notifying agents. registeredDirs is populated
 // only when chatDir has no sessions, for diagnostics.
@@ -272,7 +284,7 @@ func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 		delete(sessions, agentName)
 	}
 	// F007: Clean up cooldown/deferral tracking for this agent
-	key := chatDir + ":" + agentName
+	key := notificationKey(chatDir, agentName)
 	delete(o.lastNotified, key)
 	if timer, ok := o.pendingTimers[key]; ok {
 		timer.Stop()
@@ -483,9 +495,7 @@ func (o *Orchestrator) queueLocked(key, chatDir, agentName, sessionID, fromAgent
 				delay = rem
 			}
 		}
-		o.pendingTimers[key] = time.AfterFunc(delay, func() {
-			o.flushPending(chatDir, agentName, sessionID)
-		})
+		o.armFlushTimerLocked(key, chatDir, agentName, sessionID, delay)
 	}
 }
 
@@ -493,7 +503,7 @@ func (o *Orchestrator) queueLocked(key, chatDir, agentName, sessionID, fromAgent
 // window and defers while the user has a pending input line; otherwise it
 // injects immediately.
 func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent string, isBroadcast bool) {
-	key := chatDir + ":" + agentName
+	key := notificationKey(chatDir, agentName)
 
 	// Query pending-input OUTSIDE o.mu (lock ordering: never hold o.mu while
 	// locking pty.Manager.mu).
@@ -534,7 +544,7 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 // maxDeferral); once the cap is exceeded it routes to the UI fallback instead of
 // corrupting the PTY input.
 func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
-	key := chatDir + ":" + agentName
+	key := notificationKey(chatDir, agentName)
 
 	// Query pending-input OUTSIDE o.mu (lock ordering).
 	pending := o.hasPendingInput(sessionID)
@@ -568,9 +578,7 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 			if tm := o.pendingTimers[key]; tm != nil {
 				tm.Stop()
 			}
-			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
-				o.flushPending(chatDir, agentName, sessionID)
-			})
+			o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
 			o.mu.Unlock()
 			log.Printf("[ORCH] Notification deferred (pending input) agent=%s", agentName)
 			return
@@ -641,9 +649,7 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 			o.deferStartedAt[key] = startedAt
 		}
 		if _, exists := o.pendingTimers[key]; !exists {
-			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
-				o.flushPending(chatDir, agentName, sessionID)
-			})
+			o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
 		}
 		o.mu.Unlock()
 		log.Printf("[ORCH] Flush raced into pending input, re-deferred agent=%s", agentName)
