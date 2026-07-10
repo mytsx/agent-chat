@@ -62,6 +62,27 @@ interface TerminalsState {
   listAgentSessions: (teamID: string, agentName: string) => Promise<SessionInfo[]>;
 }
 
+function drainPendingCLISessionID(
+  pendingBySession: Record<string, string>,
+  sessionID: string
+): [string | undefined, Record<string, string>] {
+  const cliSessionID = pendingBySession[sessionID];
+  if (cliSessionID === undefined) {
+    return [undefined, pendingBySession];
+  }
+  const next = { ...pendingBySession };
+  delete next[sessionID];
+  return [cliSessionID, next];
+}
+
+function attachPendingCLISessionID(
+  session: TerminalSession,
+  pendingBySession: Record<string, string>
+): [TerminalSession, Record<string, string>] {
+  const [cliSessionID, pending] = drainPendingCLISessionID(pendingBySession, session.sessionID);
+  return [cliSessionID === undefined ? session : { ...session, cliSessionID }, pending];
+}
+
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   pendingCLISessionIDs: {},
@@ -98,18 +119,14 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     );
     set((s) => {
       // Apply any resume id captured before this row existed (#40, Codex P2).
-      const pendingID = s.pendingCLISessionIDs[sessionID];
-      const session: TerminalSession = {
+      const [session, pending] = attachPendingCLISessionID({
         sessionID,
         teamID,
         agentName,
         cliType,
         index: currentSessions.length,
         slotIndex: resolvedSlotIndex,
-        ...(pendingID !== undefined ? { cliSessionID: pendingID } : {}),
-      };
-      const pending = { ...s.pendingCLISessionIDs };
-      delete pending[sessionID];
+      }, s.pendingCLISessionIDs);
       return {
         sessions: {
           ...s.sessions,
@@ -158,12 +175,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         // Drain buffered resume ids whose event beat the row insertion: this batch
         // path awaits every backend create before adding any rows, so a fast CLI's
         // captured id can arrive first (#40, Codex P2).
-        const pending = { ...s.pendingCLISessionIDs };
+        let pending = s.pendingCLISessionIDs;
         const applied = newSessions.map((sess) => {
-          const pid = pending[sess.sessionID];
-          if (pid === undefined) return sess;
-          delete pending[sess.sessionID];
-          return { ...sess, cliSessionID: pid };
+          const [session, nextPending] = attachPendingCLISessionID(sess, pending);
+          pending = nextPending;
+          return session;
         });
         return {
           sessions: {
@@ -256,9 +272,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
     // captured id is never lost if its event raced this replacement (#40 Codex P2).
     set((s) => {
-      const pending = { ...s.pendingCLISessionIDs };
-      const captured = pending[newSessionID];
-      delete pending[newSessionID];
+      const [captured, pending] = drainPendingCLISessionID(s.pendingCLISessionIDs, newSessionID);
       return {
         sessions: {
           ...s.sessions,
@@ -291,9 +305,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
     // isn't lost if its event raced this replacement (#40 Codex P2).
     set((s) => {
-      const pending = { ...s.pendingCLISessionIDs };
-      const captured = pending[newSessionID];
-      delete pending[newSessionID];
+      const [captured, pending] = drainPendingCLISessionID(s.pendingCLISessionIDs, newSessionID);
       return {
         sessions: {
           ...s.sessions,
@@ -351,18 +363,14 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     const currentSessions = get().sessions[teamID] ?? [];
     const sessionID = await CreateTerminalResume(teamID, agentName, workDir, cliType, promptId, useWorktree, slotIndex, resumeID);
     set((s) => {
-      const pendingID = s.pendingCLISessionIDs[sessionID];
-      const session: TerminalSession = {
+      const [session, pending] = attachPendingCLISessionID({
         sessionID,
         teamID,
         agentName,
         cliType,
         index: currentSessions.length,
         slotIndex,
-        ...(pendingID !== undefined ? { cliSessionID: pendingID } : {}),
-      };
-      const pending = { ...s.pendingCLISessionIDs };
-      delete pending[sessionID];
+      }, s.pendingCLISessionIDs);
       return {
         sessions: {
           ...s.sessions,

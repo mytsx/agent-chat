@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 
+	"desktop/internal/types"
 	"desktop/internal/validation"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -35,6 +36,18 @@ func extractText(data json.RawMessage) string {
 	return string(data)
 }
 
+func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
+	resp, err := call()
+	if err != nil {
+		h.logger.Printf("%s: hub error: %v", tool, err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if !resp.Success {
+		return mcp.NewToolResultError(resp.Error), nil
+	}
+	return mcp.NewToolResultText(extractText(resp.Data)), nil
+}
+
 func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName, err := request.RequireString("agent_name")
 	if err != nil {
@@ -55,16 +68,9 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", agentName, role, room)
 
-	resp, err := h.storage.JoinRoom(room, agentName, role)
-	if err != nil {
-		h.logger.Printf("join_room: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("join_room", func() (*types.Response, error) {
+		return h.storage.JoinRoom(room, agentName, role)
+	})
 }
 
 func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -99,16 +105,9 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	h.logger.Printf("send_message: from=%q to=%q room=%q priority=%s expects_reply=%v contentLen=%d",
 		fromAgent, toAgent, room, priority, expectsReply, len(content))
 
-	resp, err := h.storage.SendMessage(room, fromAgent, toAgent, content, expectsReply, priority)
-	if err != nil {
-		h.logger.Printf("send_message: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("send_message", func() (*types.Response, error) {
+		return h.storage.SendMessage(room, fromAgent, toAgent, content, expectsReply, priority)
+	})
 }
 
 func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -131,16 +130,9 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	h.logger.Printf("read_messages: agent=%q since_id=%d unread_only=%v limit=%d room=%q",
 		agentName, sinceID, unreadOnly, limit, room)
 
-	resp, err := h.storage.GetMessages(room, agentName, sinceID, limit, unreadOnly)
-	if err != nil {
-		h.logger.Printf("read_messages: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("read_messages", func() (*types.Response, error) {
+		return h.storage.GetMessages(room, agentName, sinceID, limit, unreadOnly)
+	})
 }
 
 func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -156,16 +148,9 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 
 	h.logger.Printf("list_agents: agent=%q room=%q", agentName, room)
 
-	resp, err := h.storage.ListAgents(room, agentName)
-	if err != nil {
-		h.logger.Printf("list_agents: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("list_agents", func() (*types.Response, error) {
+		return h.storage.ListAgents(room, agentName)
+	})
 }
 
 func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -184,16 +169,9 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 
 	h.logger.Printf("leave_room: agent=%q room=%q", agentName, room)
 
-	resp, err := h.storage.LeaveRoom(room, agentName)
-	if err != nil {
-		h.logger.Printf("leave_room: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("leave_room", func() (*types.Response, error) {
+		return h.storage.LeaveRoom(room, agentName)
+	})
 }
 
 func (h *toolHandlers) clearRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -205,16 +183,9 @@ func (h *toolHandlers) clearRoom(_ context.Context, request mcp.CallToolRequest)
 
 	h.logger.Printf("clear_room: room=%q", room)
 
-	resp, err := h.storage.ClearRoom(room)
-	if err != nil {
-		h.logger.Printf("clear_room: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("clear_room", func() (*types.Response, error) {
+		return h.storage.ClearRoom(room)
+	})
 }
 
 func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -228,16 +199,9 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 
 	h.logger.Printf("read_all_messages: since_id=%d limit=%d room=%q", sinceID, limit, room)
 
-	resp, err := h.storage.GetAllMessages(room, sinceID, limit)
-	if err != nil {
-		h.logger.Printf("read_all_messages: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("read_all_messages", func() (*types.Response, error) {
+		return h.storage.GetAllMessages(room, sinceID, limit)
+	})
 }
 
 func (h *toolHandlers) readSummary(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -249,16 +213,9 @@ func (h *toolHandlers) readSummary(_ context.Context, request mcp.CallToolReques
 
 	h.logger.Printf("read_summary: room=%q", room)
 
-	resp, err := h.storage.GetSummary(room)
-	if err != nil {
-		h.logger.Printf("read_summary: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("read_summary", func() (*types.Response, error) {
+		return h.storage.GetSummary(room)
+	})
 }
 
 func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -297,14 +254,5 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 func (h *toolHandlers) listRooms(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	h.logger.Printf("list_rooms")
 
-	resp, err := h.storage.ListRooms()
-	if err != nil {
-		h.logger.Printf("list_rooms: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
-	}
-
-	return mcp.NewToolResultText(extractText(resp.Data)), nil
+	return h.resultFromHub("list_rooms", h.storage.ListRooms)
 }
