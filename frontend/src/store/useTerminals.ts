@@ -324,28 +324,33 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
 
   setCLISessionID: (sessionID, cliSessionID) => {
     set((state) => {
-      let matched = false;
-      const next: Record<string, TerminalSession[]> = {};
-      for (const [tid, list] of Object.entries(state.sessions)) {
-        next[tid] = list.map((s) => {
-          if (s.sessionID === sessionID) {
-            matched = true;
-            return { ...s, cliSessionID };
-          }
-          return s;
-        });
-      }
-      if (matched) {
-        // Applied directly; also drop any stale buffered id for this session.
-        if (state.pendingCLISessionIDs[sessionID] === undefined) {
-          return { sessions: next };
+      for (const [teamID, list] of Object.entries(state.sessions)) {
+        const index = list.findIndex((s) => s.sessionID === sessionID);
+        if (index === -1) {
+          continue;
         }
-        const pending = { ...state.pendingCLISessionIDs };
-        delete pending[sessionID];
-        return { sessions: next, pendingCLISessionIDs: pending };
+
+        const [, pending] = drainPendingCLISessionID(state.pendingCLISessionIDs, sessionID);
+        if (list[index].cliSessionID === cliSessionID && pending === state.pendingCLISessionIDs) {
+          return state;
+        }
+
+        const nextList = [...list];
+        nextList[index] = { ...nextList[index], cliSessionID };
+        return {
+          sessions: {
+            ...state.sessions,
+            [teamID]: nextList,
+          },
+          pendingCLISessionIDs: pending,
+        };
       }
+
       // The session row isn't in the store yet — buffer the id and apply it when
       // the session is added (addTerminal / openTeamFromConfig) (#40, Codex P2).
+      if (state.pendingCLISessionIDs[sessionID] === cliSessionID) {
+        return state;
+      }
       return {
         pendingCLISessionIDs: {
           ...state.pendingCLISessionIDs,
