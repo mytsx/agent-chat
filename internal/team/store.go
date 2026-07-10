@@ -359,20 +359,30 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 		updated := make([]AgentConfig, len(prevAgents))
 		copy(updated, prevAgents)
 		found := false
+		agentsChanged := false
 		for j, a := range updated {
 			if sameAgentName(a.Name, name) {
-				updated[j].Role = RoleObserver
+				if updated[j].Role != RoleObserver {
+					updated[j].Role = RoleObserver
+					agentsChanged = true
+				}
 				found = true
 				break
 			}
 		}
 		if !found {
 			updated = append(updated, AgentConfig{Name: name, Role: RoleObserver})
+			agentsChanged = true
 		}
 		s.teams[i].Agents = updated
 		// Mutual exclusion: an observer is not a manager.
+		managerChanged := false
 		if s.teams[i].IsManagerAgent(name) {
 			s.teams[i].ManagerAgent = ""
+			managerChanged = true
+		}
+		if !agentsChanged && !managerChanged {
+			return s.teams[i], nil
 		}
 
 		if err := s.save(); err != nil {

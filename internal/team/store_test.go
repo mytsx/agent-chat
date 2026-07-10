@@ -642,6 +642,69 @@ func TestSetManagerWritesWhenUnchangedManagerClearsObserver(t *testing.T) {
 	}
 }
 
+func TestSetObserverSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetObserver(tm.ID, "pilot"); err != nil {
+		t.Fatalf("no-op SetObserver should succeed: %v", err)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read sentinel failed: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("unchanged SetObserver rewrote the file: %s", raw)
+	}
+}
+
+func TestSetObserverWritesWhenClearingManager(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-SHOULD-BE-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	updated, err := s.SetObserver(tm.ID, "pilot")
+	if err != nil {
+		t.Fatalf("SetObserver failed: %v", err)
+	}
+	if updated.ManagerAgent != "" {
+		t.Fatalf("observer should clear manager assignment, got %q", updated.ManagerAgent)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read rewritten file failed: %v", err)
+	}
+	if bytes.Equal(raw, sentinel) {
+		t.Fatal("SetObserver skipped write even though it cleared manager assignment")
+	}
+}
+
 func TestSetCustomPromptRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	tm, err := s.Create("TeamA", "2x2", nil)
