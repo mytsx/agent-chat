@@ -1,7 +1,6 @@
 package mcpserver
 
 import (
-	"fmt"
 	"log"
 	"os"
 
@@ -18,11 +17,28 @@ type MCPServerApp struct {
 	logger  *log.Logger
 }
 
-const roomArgDescription = "Room name (empty = default room)"
+const (
+	roomArgDescription           = "Room name (empty = default room)"
+	agentNameDescription         = "Your agent name"
+	optionalAgentNameDescription = "Your agent name (optional, for updating last_seen)"
+)
 
 func roomArg() mcp.ToolOption {
 	return mcp.WithString("room",
 		mcp.Description(roomArgDescription),
+	)
+}
+
+func requiredAgentNameArg() mcp.ToolOption {
+	return mcp.WithString("agent_name",
+		mcp.Required(),
+		mcp.Description(agentNameDescription),
+	)
+}
+
+func optionalAgentNameArg() mcp.ToolOption {
+	return mcp.WithString("agent_name",
+		mcp.Description(optionalAgentNameDescription),
 	)
 }
 
@@ -111,7 +127,7 @@ Notes:
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithString("from_agent",
 			mcp.Required(),
-			mcp.Description("Your agent name"),
+			mcp.Description(agentNameDescription),
 		),
 		mcp.WithString("content",
 			mcp.Required(),
@@ -124,7 +140,7 @@ Notes:
 			mcp.Description("Set False for acknowledgments/thanks to prevent infinite loops (default: True)"),
 		),
 		mcp.WithString("priority",
-			mcp.Description(fmt.Sprintf("\"urgent\", \"normal\", or \"low\" (default: \"normal\")")),
+			mcp.Description("\"urgent\", \"normal\", or \"low\" (default: \"normal\")"),
 		),
 		roomArg(),
 	), h.sendMessage)
@@ -172,9 +188,7 @@ Returns:
     List of active agents with their roles`),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("agent_name",
-			mcp.Description("Your agent name (optional, for updating last_seen)"),
-		),
+		optionalAgentNameArg(),
 		roomArg(),
 	), h.listAgents)
 
@@ -189,10 +203,7 @@ Args:
 Returns:
     Confirmation message`),
 		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("agent_name",
-			mcp.Required(),
-			mcp.Description("Your agent name"),
-		),
+		requiredAgentNameArg(),
 		roomArg(),
 	), h.leaveRoom)
 
@@ -260,9 +271,7 @@ Returns:
     The ID of the last message, or 0 if no messages`),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("agent_name",
-			mcp.Description("Your agent name (optional, for updating last_seen)"),
-		),
+		optionalAgentNameArg(),
 		roomArg(),
 	), h.getLastMessageID)
 
