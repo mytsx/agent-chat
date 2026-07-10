@@ -125,12 +125,25 @@ function replaceRestartedSessionState(
   };
 }
 
+function attachPendingCLISessionIDs(
+  sessions: TerminalSession[],
+  pendingBySession: Record<string, string>
+): [TerminalSession[], Record<string, string>] {
+  let pending = pendingBySession;
+  const attached = sessions.map((session) => {
+    const [nextSession, nextPending] = attachPendingCLISessionID(session, pending);
+    pending = nextPending;
+    return nextSession;
+  });
+  return [attached, pending];
+}
+
 function appendSessionState(
   state: TerminalsState,
   session: TerminalSession
 ): Partial<TerminalsState> {
-  const [attached, pending] = attachPendingCLISessionID(
-    session,
+  const [[attached], pending] = attachPendingCLISessionIDs(
+    [session],
     state.pendingCLISessionIDs
   );
   return {
@@ -220,12 +233,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         // Drain buffered resume ids whose event beat the row insertion: this batch
         // path awaits every backend create before adding any rows, so a fast CLI's
         // captured id can arrive first (#40, Codex P2).
-        let pending = s.pendingCLISessionIDs;
-        const applied = newSessions.map((sess) => {
-          const [session, nextPending] = attachPendingCLISessionID(sess, pending);
-          pending = nextPending;
-          return session;
-        });
+        const [applied, pending] = attachPendingCLISessionIDs(
+          newSessions,
+          s.pendingCLISessionIDs
+        );
         return {
           sessions: {
             ...s.sessions,
