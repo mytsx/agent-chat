@@ -18,6 +18,14 @@ type MCPServerApp struct {
 	logger  *log.Logger
 }
 
+const roomArgDescription = "Room name (empty = default room)"
+
+func roomArg() mcp.ToolOption {
+	return mcp.WithString("room",
+		mcp.Description(roomArgDescription),
+	)
+}
+
 // NewMCPServerApp creates a new MCP server application backed by a hub client.
 func NewMCPServerApp(client *hubclient.HubClient, defaultRoom string, logger *log.Logger) *MCPServerApp {
 	s := server.NewMCPServer(
@@ -118,9 +126,7 @@ Notes:
 		mcp.WithString("priority",
 			mcp.Description(fmt.Sprintf("\"urgent\", \"normal\", or \"low\" (default: \"normal\")")),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.sendMessage)
 
 	// read_messages
@@ -151,9 +157,7 @@ Returns:
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of messages to return (default: 10, 0 for unlimited)"),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.readMessages)
 
 	// list_agents
@@ -171,9 +175,7 @@ Returns:
 		mcp.WithString("agent_name",
 			mcp.Description("Your agent name (optional, for updating last_seen)"),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.listAgents)
 
 	// leave_room
@@ -191,9 +193,7 @@ Returns:
 			mcp.Required(),
 			mcp.Description("Your agent name"),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.leaveRoom)
 
 	// clear_room
@@ -205,9 +205,7 @@ Args:
 
 Returns:
     Confirmation message`),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.clearRoom)
 
 	// read_all_messages
@@ -229,9 +227,7 @@ Returns:
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of messages to return (default: 15, 0 for unlimited)"),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.readAllMessages)
 
 	// read_summary
@@ -249,9 +245,7 @@ Returns:
     The latest saved summary, or a notice if none exists yet`),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.readSummary)
 
 	// get_last_message_id
@@ -269,9 +263,7 @@ Returns:
 		mcp.WithString("agent_name",
 			mcp.Description("Your agent name (optional, for updating last_seen)"),
 		),
-		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room)"),
-		),
+		roomArg(),
 	), h.getLastMessageID)
 
 	// list_rooms
