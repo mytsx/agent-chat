@@ -96,6 +96,35 @@ function replaceSessionID(
   );
 }
 
+async function refreshTeamAfterTerminalChange(teamID: string, logPrefix: string): Promise<void> {
+  try {
+    await useTeams.getState().refreshTeam(teamID);
+  } catch (e) {
+    console.error(logPrefix, e);
+  }
+}
+
+function replaceRestartedSessionState(
+  state: TerminalsState,
+  teamID: string,
+  oldSessionID: string,
+  newSessionID: string
+): Partial<TerminalsState> {
+  const [captured, pending] = drainPendingCLISessionID(state.pendingCLISessionIDs, newSessionID);
+  return {
+    sessions: {
+      ...state.sessions,
+      [teamID]: replaceSessionID(
+        state.sessions[teamID] ?? [],
+        oldSessionID,
+        newSessionID,
+        captured
+      ),
+    },
+    pendingCLISessionIDs: pending,
+  };
+}
+
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   pendingCLISessionIDs: {},
@@ -152,11 +181,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // Backend persisted this agent into the team via UpsertAgent; re-pull the
     // team so later grid updates don't echo a stale agents array. The PTY is
     // already running, so a refresh failure must not fail the whole creation.
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[addTerminal] refreshTeam failed:", e);
-    }
+    await refreshTeamAfterTerminalChange(teamID, "[addTerminal] refreshTeam failed:");
 
     return sessionID;
   },
@@ -207,11 +232,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // OpenTeamFromConfig re-persists each agent (CreateTerminal → UpsertAgent),
     // possibly migrating legacy slot indices; refresh so the team store matches.
     // PTYs are already running, so a refresh failure must not fail the batch.
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[openTeamFromConfigResume] refreshTeam failed:", e);
-    }
+    await refreshTeamAfterTerminalChange(teamID, "[openTeamFromConfigResume] refreshTeam failed:");
 
     return results;
   },
@@ -284,21 +305,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // or ResumeTerminal would fall back to another fresh restart — #40 Codex P3).
     // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
     // captured id is never lost if its event raced this replacement (#40 Codex P2).
-    set((s) => {
-      const [captured, pending] = drainPendingCLISessionID(s.pendingCLISessionIDs, newSessionID);
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: replaceSessionID(
-            s.sessions[teamID] ?? [],
-            sessionID,
-            newSessionID,
-            captured
-          ),
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
+    set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
 
     return newSessionID;
   },
@@ -318,21 +325,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // PTY captures its new id; the resumed CLI regenerates its session id). Draining
     // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
     // isn't lost if its event raced this replacement (#40 Codex P2).
-    set((s) => {
-      const [captured, pending] = drainPendingCLISessionID(s.pendingCLISessionIDs, newSessionID);
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: replaceSessionID(
-            s.sessions[teamID] ?? [],
-            sessionID,
-            newSessionID,
-            captured
-          ),
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
+    set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
 
     return newSessionID;
   },
@@ -399,11 +392,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         pendingCLISessionIDs: pending,
       };
     });
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[createTerminalResume] refreshTeam:", e);
-    }
+    await refreshTeamAfterTerminalChange(teamID, "[createTerminalResume] refreshTeam:");
     return sessionID;
   },
 
