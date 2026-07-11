@@ -95,6 +95,25 @@ func TestRequireValidRoomNames(t *testing.T) {
 	}
 }
 
+func TestHandleSubscribe_InvalidPayloadRejected(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "sub-bad",
+		Type: "subscribe",
+		Data: json.RawMessage(`{"rooms":`),
+	})
+
+	resp := readResponse(t, c, "subscribe")
+	if resp.Success || resp.Error != "invalid subscribe payload" {
+		t.Fatalf("response success=%v error=%q, want invalid subscribe payload", resp.Success, resp.Error)
+	}
+	if len(c.rooms) != 0 {
+		t.Fatalf("invalid subscribe payload mutated rooms: %#v", c.rooms)
+	}
+}
+
 func TestFormatAgentMessages(t *testing.T) {
 	t.Parallel()
 

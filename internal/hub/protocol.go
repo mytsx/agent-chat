@@ -262,7 +262,9 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	var data struct {
 		Rooms []string `json:"rooms"`
 	}
-	json.Unmarshal(req.Data, &data)
+	if !c.decodeRequestData(req, &data, "invalid subscribe payload") {
+		return
+	}
 
 	// Reject invalid room names before creating any subscription (same filename
 	// safety as join_room — see handleJoinRoom).
