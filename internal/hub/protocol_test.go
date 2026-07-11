@@ -48,6 +48,69 @@ func readResponse(t *testing.T, c *Client, reqType string) types.Response {
 	}
 }
 
+func TestClientRequireJoinedRoom(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		agentName   string
+		joinedRoom  string
+		room        string
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "not joined",
+			room:      "r1",
+			wantError: "önce join_room çağırmalısınız",
+		},
+		{
+			name:       "wrong room",
+			agentName:  "alice",
+			joinedRoom: "r1",
+			room:       "r2",
+			wantError:  "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: r1",
+		},
+		{
+			name:        "joined room",
+			agentName:   "alice",
+			joinedRoom:  "r1",
+			room:        "r1",
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, c := newTestHubClient()
+			c.agentName = tt.agentName
+			c.joinedRoom = tt.joinedRoom
+			req := types.Request{ID: "req-1", Type: "get_messages"}
+
+			allowed := c.requireJoinedRoom(req, tt.room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s")
+			if allowed != tt.wantAllowed {
+				t.Fatalf("requireJoinedRoom() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "get_messages")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestHandleSendMessage_BeforeJoinRejected(t *testing.T) {
 	h, c := newTestHubClient()
 	req := types.Request{

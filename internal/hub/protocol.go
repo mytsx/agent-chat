@@ -136,6 +136,18 @@ func (c *Client) requireDesktopAuthorized(req types.Request, message string) boo
 	return false
 }
 
+func (c *Client) requireJoinedRoom(req types.Request, room, notJoinedMessage, wrongRoomFormat string) bool {
+	if c.agentName == "" || c.joinedRoom == "" {
+		c.sendError(req.ID, req.Type, notJoinedMessage)
+		return false
+	}
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf(wrongRoomFormat, c.joinedRoom))
+		return false
+	}
+	return true
+}
+
 func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi manager atayabilir") {
 		return
@@ -351,12 +363,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
-	if c.joinedRoom == "" || c.agentName == "" {
-		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
-		return
-	}
-	if c.joinedRoom != room {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odada mesaj gönderebilirsiniz: %s", c.joinedRoom))
+	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odada mesaj gönderebilirsiniz: %s") {
 		return
 	}
 
@@ -459,12 +466,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
-	if c.joinedRoom == "" || c.agentName == "" {
-		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
-		return
-	}
-	if c.joinedRoom != room {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
+	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s") {
 		return
 	}
 	if err := validation.ValidateName(data.AgentName); err != nil {
@@ -648,16 +650,11 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
-	if c.agentName == "" || c.joinedRoom == "" {
-		c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
+	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan ayrılabilirsiniz: %s") {
 		return
 	}
 	if data.AgentName != c.agentName {
 		c.sendError(req.ID, req.Type, "yalnızca kendi adınızla leave_room çağırabilirsiniz")
-		return
-	}
-	if c.joinedRoom != room {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan ayrılabilirsiniz: %s", c.joinedRoom))
 		return
 	}
 
@@ -683,12 +680,7 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 
 	// Only authorized desktop app or active manager can clear a room.
 	if !c.isDesktopAuthorized() {
-		if c.agentName == "" || c.joinedRoom == "" {
-			c.sendError(req.ID, req.Type, "önce join_room çağırmalısınız")
-			return
-		}
-		if c.joinedRoom != room {
-			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odayı temizleyebilirsiniz: %s", c.joinedRoom))
+		if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odayı temizleyebilirsiniz: %s") {
 			return
 		}
 
