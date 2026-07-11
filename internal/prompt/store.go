@@ -206,6 +206,7 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 	if len(s.prompts) > 0 {
 		return
 	}
+	prev := s.prompts
 
 	now := time.Now().Format(time.RFC3339)
 
@@ -232,7 +233,9 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 		},
 	}
 
-	s.save()
+	if err := s.save(); err != nil {
+		s.prompts = prev // roll back so memory matches disk on startup seed failure
+	}
 }
 
 // SeedIfMissingByName creates a prompt with the given name only if no prompt with

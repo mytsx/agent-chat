@@ -6,6 +6,7 @@ import {
   SetDeferralEnabled,
 } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -25,7 +26,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   useEffect(() => {
     GetVoiceStatus()
       .then(setStatus)
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(errorToString(e)));
     GetDeferralEnabled()
       .then(setDeferralEnabled)
       .catch(() => {});
@@ -36,7 +37,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     try {
       await SetDeferralEnabled(checked);
     } catch (e) {
-      setError(String(e));
+      setError(errorToString(e));
       setDeferralEnabled(!checked); // geri al
     }
   };
@@ -56,7 +57,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       const fresh = await GetVoiceStatus();
       setStatus(fresh);
     } catch (e) {
-      setError(String(e));
+      setError(errorToString(e));
     } finally {
       setSaving(false);
     }

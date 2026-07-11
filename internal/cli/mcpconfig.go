@@ -150,6 +150,8 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 			os.WriteFile(backupPath, data, 0644)
 			config = make(map[string]any)
 		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
 	}
 
 	// --- 1. Update global mcpServers ---

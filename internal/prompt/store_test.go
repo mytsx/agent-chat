@@ -178,3 +178,20 @@ func TestSaveFailuresRollbackInMemoryState(t *testing.T) {
 		t.Fatalf("Delete rollback left prompts = %#v", prompts)
 	}
 }
+
+func TestSeedRollsBackWhenSaveFails(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Point filePath at a directory so Seed's temp write can succeed but the final
+	// atomic rename fails. Seed has no error return, so it must still keep memory
+	// aligned with disk rather than exposing prompts that were never persisted.
+	s.filePath = t.TempDir()
+	s.Seed("base", "manager")
+
+	if prompts := s.List(); len(prompts) != 0 {
+		t.Fatalf("failed Seed was kept in memory: %#v", prompts)
+	}
+}
