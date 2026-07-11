@@ -42,6 +42,7 @@ function AppContent() {
   const createTeam = useTeams((s) => s.createTeam);
   const { addMessages, setAgents, loadMessages, loadAgents } = useMessages();
   const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
@@ -78,8 +79,10 @@ function AppContent() {
         if (!cancelled && currentTeams.length === 0) {
           await createTeam("Default", "2x2", []);
         }
+        if (!cancelled) setStartupError(null);
       } catch (e) {
         console.error("Failed to load teams:", e);
+        if (!cancelled) setStartupError(e instanceof Error ? e.message : String(e));
       }
       if (!cancelled) setReady(true);
     };
@@ -224,6 +227,14 @@ function AppContent() {
       ))}
       <TabBar />
       <BroadcastBar />
+      {startupError && (
+        <div className="broadcast-notice" title={startupError}>
+          <span>
+            ⚠️ Başlangıç oda kurulumu tamamlanamadı. Backend bağlantısını kontrol edip tekrar deneyin: <code>{startupError}</code>
+          </span>
+          <button type="button" onClick={() => setStartupError(null)}>×</button>
+        </div>
+      )}
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">
           <Panel minSize="30%">

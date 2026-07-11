@@ -96,6 +96,7 @@ export const useTeams = create<TeamsState>((set, get) => ({
     } catch (e) {
       if (import.meta.env.DEV) console.warn("Failed to load teams:", e);
       set({ loading: false });
+      throw e;
     }
   },
 

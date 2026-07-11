@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
 )
 
 // whisperEndpoint is the OpenAI transcription endpoint. A var (not const) so tests
@@ -23,7 +24,7 @@ type WhisperClient struct {
 
 // NewWhisperClient builds a client bound to an API key.
 func NewWhisperClient(apiKey string) *WhisperClient {
-	return &WhisperClient{apiKey: apiKey, http: &http.Client{}}
+	return &WhisperClient{apiKey: strings.TrimSpace(apiKey), http: &http.Client{}}
 }
 
 // Transcribe uploads wav as multipart/form-data (model=whisper-1, language=tr)

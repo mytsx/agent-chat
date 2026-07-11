@@ -164,3 +164,75 @@ func TestCodexDiscover_ChecksNextDayForJustBeforeMidnightSpawn(t *testing.T) {
 		t.Fatalf("DiscoverFile = %q, want next-day rollout %q", got, rollout)
 	}
 }
+
+func TestJSONLAdapters_CommonCorruptAndPartialLineBehavior(t *testing.T) {
+	cases := []struct {
+		name    string
+		adapter SessionAdapter
+		full1   string
+		full2   string
+		partial string
+		rest    string
+		want    []string
+	}{
+		{
+			name:    "claude",
+			adapter: claudeAdapter{},
+			full1:   `{"type":"user","timestamp":"t1","message":{"role":"user","content":"claude bir"}}` + "\n",
+			full2:   `{"type":"user","timestamp":"t2","message":{"role":"user","content":"claude iki"}}` + "\n",
+			partial: `{"type":"user","timestamp":"t3","message":{"role":"user","content":"claude yarım`,
+			rest:    ` tamam"}}` + "\n",
+			want:    []string{"claude bir", "claude iki", "claude yarım tamam"},
+		},
+		{
+			name:    "codex",
+			adapter: codexAdapter{},
+			full1:   `{"timestamp":"t1","type":"event_msg","payload":{"type":"user_message","message":"codex bir"}}` + "\n",
+			full2:   `{"timestamp":"t2","type":"event_msg","payload":{"type":"user_message","message":"codex iki"}}` + "\n",
+			partial: `{"timestamp":"t3","type":"event_msg","payload":{"type":"user_message","message":"codex yarım`,
+			rest:    ` tamam"}}` + "\n",
+			want:    []string{"codex bir", "codex iki", "codex yarım tamam"},
+		},
+		{
+			name:    "copilot",
+			adapter: copilotAdapter{},
+			full1:   `{"type":"user.message","timestamp":"t1","data":{"content":"copilot bir"}}` + "\n",
+			full2:   `{"type":"user.message","timestamp":"t2","data":{"content":"copilot iki"}}` + "\n",
+			partial: `{"type":"user.message","timestamp":"t3","data":{"content":"copilot yarım`,
+			rest:    ` tamam"}}` + "\n",
+			want:    []string{"copilot bir", "copilot iki", "copilot yarım tamam"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			corrupt := "{bozuk json\n"
+			jsonl := tc.full1 + corrupt + tc.full2 + tc.partial
+			p := writeFile(t, dir, tc.name+".jsonl", jsonl)
+
+			msgs, cur, err := tc.adapter.ParseNewUserMessages(p, Cursor{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(msgs) != 2 || msgs[0].Content != tc.want[0] || msgs[1].Content != tc.want[1] {
+				t.Fatalf("first parse got %+v, want first two complete user messages", msgs)
+			}
+			wantOffset := int64(len(tc.full1) + len(corrupt) + len(tc.full2))
+			if cur.Offset != wantOffset {
+				t.Fatalf("cursor offset = %d, want %d (must stop before partial final line)", cur.Offset, wantOffset)
+			}
+
+			if err := os.WriteFile(p, []byte(jsonl+tc.rest), 0644); err != nil {
+				t.Fatal(err)
+			}
+			next, _, err := tc.adapter.ParseNewUserMessages(p, cur)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(next) != 1 || next[0].Content != tc.want[2] {
+				t.Fatalf("second parse got %+v, want completed partial line %q", next, tc.want[2])
+			}
+		})
+	}
+}

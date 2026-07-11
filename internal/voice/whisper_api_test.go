@@ -53,6 +53,26 @@ func TestWhisperTranscribeSendsMultipartAndParses(t *testing.T) {
 	}
 }
 
+func TestWhisperTranscribeTrimsAPIKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"text":"merhaba"}`)
+	}))
+	defer srv.Close()
+	old := whisperEndpoint
+	whisperEndpoint = srv.URL
+	defer func() { whisperEndpoint = old }()
+
+	if _, err := NewWhisperClient("  sk-xyz\n").Transcribe(context.Background(), []byte("RIFFfake")); err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if gotAuth != "Bearer sk-xyz" {
+		t.Errorf("auth = %q, want Bearer sk-xyz", gotAuth)
+	}
+}
+
 func TestWhisperTranscribeErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

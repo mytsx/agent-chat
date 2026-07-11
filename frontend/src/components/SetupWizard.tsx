@@ -29,6 +29,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const [knownAgents, setKnownAgents] = useState<string[]>([]);
   const [agentSessions, setAgentSessions] = useState<SessionInfo[]>([]);
   const [resumeID, setResumeID] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
 
   // Load known agents on mount for autocomplete
   useEffect(() => {
@@ -104,6 +105,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
 
   const handleCreate = async () => {
     if (creating) return;
+    setCreateError(null);
     setCreating(true);
     try {
       const name = agentName.trim() || `agent-${slotIndex + 1}`;
@@ -124,6 +126,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       onCreated(sessionID);
     } catch (e) {
       console.error("Failed to create terminal:", e);
+      setCreateError(e instanceof Error ? e.message : String(e));
     } finally {
       setCreating(false);
     }
@@ -277,6 +280,11 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
           >
             {creating ? "Creating..." : "Create Terminal"}
           </button>
+          {createError && (
+            <span className="wizard-hint" role="alert" style={{ color: "var(--danger)" }}>
+              Terminal oluşturulamadı: {createError}
+            </span>
+          )}
         </div>
       </div>
     </div>

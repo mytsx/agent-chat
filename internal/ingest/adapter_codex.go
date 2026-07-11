@@ -28,25 +28,22 @@ type codexLine struct {
 }
 
 func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
-	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []ParsedMessage
-	for _, line := range lines {
+	return parseCompleteJSONLUserMessages(path, cur, func(line []byte) (string, string, bool) {
 		var cl codexLine
-		if json.Unmarshal(line.Data, &cl) != nil {
-			continue
+		if json.Unmarshal(line, &cl) != nil {
+			return "", "", false
 		}
-		after := Cursor{Offset: line.OffsetAfter}
 		switch {
 		case cl.Type == "event_msg" && cl.Payload.Type == "user_message" && cl.Payload.Message != "":
-			out = append(out, ParsedMessage{Content: cl.Payload.Message, Timestamp: cl.Timestamp, After: after})
+			return cl.Payload.Message, cl.Timestamp, true
 		case cl.Type == "message" && cl.Role == "user":
 			var s string
 			if json.Unmarshal(cl.Content, &s) == nil && s != "" {
-				out = append(out, ParsedMessage{Content: s, Timestamp: cl.Timestamp, After: after})
+				return s, cl.Timestamp, true
 			}
 		}
-	}
-	return out, Cursor{Offset: next}, err
+		return "", "", false
+	})
 }
 
 func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {

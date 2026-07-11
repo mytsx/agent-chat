@@ -23,19 +23,16 @@ type copilotLine struct {
 }
 
 func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
-	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []ParsedMessage
-	for _, line := range lines {
+	return parseCompleteJSONLUserMessages(path, cur, func(line []byte) (string, string, bool) {
 		var cl copilotLine
-		if json.Unmarshal(line.Data, &cl) != nil {
-			continue
+		if json.Unmarshal(line, &cl) != nil {
+			return "", "", false
 		}
 		if cl.Type != "user.message" || cl.Data.Content == "" {
-			continue
+			return "", "", false
 		}
-		out = append(out, ParsedMessage{Content: cl.Data.Content, Timestamp: cl.Timestamp, After: Cursor{Offset: line.OffsetAfter}})
-	}
-	return out, Cursor{Offset: next}, err
+		return cl.Data.Content, cl.Timestamp, true
+	})
 }
 
 func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
