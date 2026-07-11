@@ -121,6 +121,13 @@ func (c *HubClient) forgetPending(id string) {
 	c.mu.Unlock()
 }
 
+func ensureSuccess(operation string, resp *types.Response) error {
+	if resp.Success {
+		return nil
+	}
+	return fmt.Errorf("%s failed: %s", operation, resp.Error)
+}
+
 // Send sends a request and waits for a response (synchronous RPC).
 func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	if req.ID == "" {
@@ -247,10 +254,7 @@ func (c *HubClient) Identify(clientType, agentName, room, authToken string) erro
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("identify failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("identify", resp)
 }
 
 // Subscribe subscribes to room events.
@@ -267,10 +271,7 @@ func (c *HubClient) SetManager(room, managerAgent string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("set_manager failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("set_manager", resp)
 }
 
 // SetObservers configures the desktop-authorized observer set for a room (#17).
@@ -281,10 +282,7 @@ func (c *HubClient) SetObservers(room string, observers []string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("set_observers failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("set_observers", resp)
 }
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
@@ -293,10 +291,7 @@ func (c *HubClient) DeleteRoom(room string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("delete_room failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("delete_room", resp)
 }
 
 // JoinRoom joins a room.
@@ -362,10 +357,7 @@ func (c *HubClient) LogMessage(room, to, content, timestamp string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("log_message failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("log_message", resp)
 }
 
 // ListAgents lists agents in a room.
@@ -393,10 +385,7 @@ func (c *HubClient) ArchiveRoom(room string) error {
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("archive_room failed: %s", resp.Error)
-	}
-	return nil
+	return ensureSuccess("archive_room", resp)
 }
 
 // SaveSession writes an immutable per-session snapshot of a room's full state
@@ -410,8 +399,8 @@ func (c *HubClient) SaveSession(room string) (count int, saved bool, err error) 
 	if err != nil {
 		return 0, false, err
 	}
-	if !resp.Success {
-		return 0, false, fmt.Errorf("save_session failed: %s", resp.Error)
+	if err := ensureSuccess("save_session", resp); err != nil {
+		return 0, false, err
 	}
 	var body struct {
 		Saved bool `json:"saved"`
@@ -444,8 +433,8 @@ func (c *HubClient) ListRoomsDetailed() ([]types.RoomSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("list_rooms_detailed failed: %s", resp.Error)
+	if err := ensureSuccess("list_rooms_detailed", resp); err != nil {
+		return nil, err
 	}
 	var data struct {
 		Rooms []types.RoomSummary `json:"rooms"`
@@ -462,8 +451,8 @@ func (c *HubClient) GetAgentsRaw(room string) (map[string]types.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("get_agents failed: %s", resp.Error)
+	if err := ensureSuccess("get_agents", resp); err != nil {
+		return nil, err
 	}
 	var data struct {
 		Agents map[string]types.Agent `json:"agents"`
@@ -480,8 +469,8 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("get_messages_raw failed: %s", resp.Error)
+	if err := ensureSuccess("get_messages_raw", resp); err != nil {
+		return nil, err
 	}
 	var data struct {
 		Messages []types.Message `json:"messages"`
