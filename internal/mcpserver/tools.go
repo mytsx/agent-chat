@@ -72,14 +72,23 @@ func invalidNamesResult(names ...string) *mcp.CallToolResult {
 	return nil
 }
 
-func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
+func (h *toolHandlers) responseFromHub(tool string, call func() (*types.Response, error)) (*types.Response, *mcp.CallToolResult, error) {
 	resp, err := call()
 	if err != nil {
 		h.logger.Printf("%s: hub error: %v", tool, err)
-		return toolResultError(err)
+		result, resultErr := toolResultError(err)
+		return nil, result, resultErr
 	}
 	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
+		return nil, mcp.NewToolResultError(resp.Error), nil
+	}
+	return resp, nil, nil
+}
+
+func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
+	resp, result, err := h.responseFromHub(tool, call)
+	if result != nil || err != nil {
+		return result, err
 	}
 	return mcp.NewToolResultText(extractText(resp.Data)), nil
 }
@@ -250,13 +259,11 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 		return result, nil
 	}
 
-	resp, err := h.storage.GetLastMessageID(room, agentName)
-	if err != nil {
-		h.logger.Printf("get_last_message_id: hub error: %v", err)
-		return toolResultError(err)
-	}
-	if !resp.Success {
-		return mcp.NewToolResultError(resp.Error), nil
+	resp, result, err := h.responseFromHub("get_last_message_id", func() (*types.Response, error) {
+		return h.storage.GetLastMessageID(room, agentName)
+	})
+	if result != nil || err != nil {
+		return result, err
 	}
 
 	lastID := extractLastMessageID(resp.Data)
