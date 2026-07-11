@@ -56,6 +56,16 @@ func readCompleteJSONLines(path string, byteOffset int64) ([]jsonlLine, int64, e
 	}
 	defer f.Close()
 
+	if info, err := f.Stat(); err == nil {
+		// JSONL transcripts are normally append-only, but a CLI can truncate or
+		// replace a session file at the same path during cleanup/resume. A committed
+		// cursor from the previous contents would otherwise seek past EOF forever and
+		// miss every new complete line in the replacement file.
+		if byteOffset < 0 || byteOffset > info.Size() {
+			byteOffset = 0
+		}
+	}
+
 	if _, err := f.Seek(byteOffset, io.SeekStart); err != nil {
 		return nil, byteOffset, err
 	}

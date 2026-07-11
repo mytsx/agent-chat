@@ -217,6 +217,17 @@ func TestUnregisterNonexistent(t *testing.T) {
 	o.UnregisterAgent("/rooms/team1", "ghost") // should not panic
 }
 
+func TestUnregisterLastAgentRemovesChatDir(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-1234-5678")
+
+	o.UnregisterAgent("/rooms/team1", "agent-1")
+
+	if _, exists := o.agentSessions["/rooms/team1"]; exists {
+		t.Fatal("last unregister should remove the empty chatDir entry")
+	}
+}
+
 // ── ProcessMessage routing tests ──
 
 func TestProcessMessage_SystemSkipped(t *testing.T) {

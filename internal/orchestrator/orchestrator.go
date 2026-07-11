@@ -284,6 +284,9 @@ func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 	defer o.mu.Unlock()
 	if sessions, ok := o.agentSessions[chatDir]; ok {
 		delete(sessions, agentName)
+		if len(sessions) == 0 {
+			delete(o.agentSessions, chatDir)
+		}
 	}
 	// F007: Clean up cooldown/deferral tracking for this agent
 	key := notificationKey(chatDir, agentName)

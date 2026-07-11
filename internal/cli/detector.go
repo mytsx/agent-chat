@@ -38,8 +38,9 @@ func ensureFullPATH() {
 	}
 
 	currentPATH := os.Getenv("PATH")
+	pathSeparator := string(os.PathListSeparator)
 	pathSet := make(map[string]bool)
-	for _, p := range strings.Split(currentPATH, ":") {
+	for _, p := range filepath.SplitList(currentPATH) {
 		pathSet[p] = true
 	}
 
@@ -56,7 +57,10 @@ func ensureFullPATH() {
 	}
 
 	if len(toAdd) > 0 {
-		newPATH := currentPATH + ":" + strings.Join(toAdd, ":")
+		newPATH := strings.Join(toAdd, pathSeparator)
+		if currentPATH != "" {
+			newPATH = currentPATH + pathSeparator + newPATH
+		}
 		os.Setenv("PATH", newPATH)
 	}
 }

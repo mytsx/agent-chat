@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +45,35 @@ func TestNVMNodeVersionDirsPreferSemanticNewest(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("nvm dirs = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureFullPATHWithEmptyPATHDoesNotAddCurrentDirectory(t *testing.T) {
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	ensureFullPATH()
+
+	got := os.Getenv("PATH")
+	if got == "" {
+		t.Fatal("expected PATH to include discovered user bin directory")
+	}
+	pathSeparator := string(os.PathListSeparator)
+	if strings.HasPrefix(got, pathSeparator) || strings.HasSuffix(got, pathSeparator) {
+		t.Fatalf("PATH must not contain leading/trailing empty entries that resolve to the current directory: %q", got)
+	}
+	for _, entry := range filepath.SplitList(got) {
+		if entry == "" {
+			t.Fatalf("PATH must not contain empty entries that resolve to the current directory: %q", got)
+		}
+	}
+	if !strings.Contains(got, localBin) {
+		t.Fatalf("PATH = %q, want it to include %q", got, localBin)
 	}
 }
 

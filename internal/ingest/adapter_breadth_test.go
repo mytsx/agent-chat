@@ -236,3 +236,69 @@ func TestJSONLAdapters_CommonCorruptAndPartialLineBehavior(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONLAdapters_ResetStaleCursorAfterReplacement(t *testing.T) {
+	cases := []struct {
+		name    string
+		adapter SessionAdapter
+		oldLine string
+		newLine string
+		want    string
+	}{
+		{
+			name:    "claude",
+			adapter: claudeAdapter{},
+			oldLine: `{"type":"user","timestamp":"t1","message":{"role":"user","content":"old claude message before replacement"}}` + "\n",
+			newLine: `{"type":"user","timestamp":"t2","message":{"role":"user","content":"new claude"}}` + "\n",
+			want:    "new claude",
+		},
+		{
+			name:    "codex",
+			adapter: codexAdapter{},
+			oldLine: `{"timestamp":"t1","type":"event_msg","payload":{"type":"user_message","message":"old codex message before replacement"}}` + "\n",
+			newLine: `{"timestamp":"t2","type":"event_msg","payload":{"type":"user_message","message":"new codex"}}` + "\n",
+			want:    "new codex",
+		},
+		{
+			name:    "copilot",
+			adapter: copilotAdapter{},
+			oldLine: `{"type":"user.message","timestamp":"t1","data":{"content":"old copilot message before replacement"}}` + "\n",
+			newLine: `{"type":"user.message","timestamp":"t2","data":{"content":"new copilot"}}` + "\n",
+			want:    "new copilot",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeFile(t, dir, tc.name+".jsonl", tc.oldLine)
+
+			_, cur, err := tc.adapter.ParseNewUserMessages(path, Cursor{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cur.Offset != int64(len(tc.oldLine)) {
+				t.Fatalf("seed cursor offset = %d, want %d", cur.Offset, len(tc.oldLine))
+			}
+			if len(tc.newLine) >= len(tc.oldLine) {
+				t.Fatalf("test setup requires replacement file to be smaller: new=%d old=%d", len(tc.newLine), len(tc.oldLine))
+			}
+
+			// Same-path replacement/truncation should not leave a stale cursor past EOF.
+			if err := os.WriteFile(path, []byte(tc.newLine), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			msgs, next, err := tc.adapter.ParseNewUserMessages(path, cur)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(msgs) != 1 || msgs[0].Content != tc.want {
+				t.Fatalf("got %+v, want replacement transcript message %q", msgs, tc.want)
+			}
+			if next.Offset != int64(len(tc.newLine)) {
+				t.Fatalf("next offset = %d, want %d", next.Offset, len(tc.newLine))
+			}
+		})
+	}
+}
