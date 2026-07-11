@@ -25,6 +25,7 @@ const FREEFORM_DEFAULT_H = 8;
 const FREEFORM_MIN_W = 2;
 const FREEFORM_MIN_H = 4;
 const FREEFORM_ROW_HEIGHT = 34;
+const CUSTOM_SETUP_DRAWER_ID = "custom-setup-drawer";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -365,7 +366,12 @@ export default function TerminalGrid() {
           </FreeformGrid>
         </div>
         {showCustomSetup && (
-          <div className="custom-setup-drawer">
+          <div
+            id={CUSTOM_SETUP_DRAWER_ID}
+            className="custom-setup-drawer"
+            role="region"
+            aria-label="Add terminal setup"
+          >
             {renderSetupWizard(nextSlotIndex, () => setShowCustomSetup(false))}
           </div>
         )}
@@ -419,11 +425,19 @@ export default function TerminalGrid() {
               type="button"
               className="btn-sm"
               onClick={() => setShowCustomSetup((prev) => !prev)}
+              aria-expanded={showCustomSetup}
+              aria-controls={CUSTOM_SETUP_DRAWER_ID}
+              aria-label={showCustomSetup ? "Hide add terminal setup" : "Show add terminal setup"}
             >
               {showCustomSetup ? "Hide Setup" : "Add Terminal"}
             </button>
           )}
-          <span className="terminal-count">
+          <span
+            className="terminal-count"
+            role="status"
+            aria-live="polite"
+            aria-label={isCustomMode ? `${teamSessions.length} terminals open` : `${teamSessions.length} of ${capacity} terminal slots used`}
+          >
             {terminalCountLabel(isCustomMode, teamSessions.length, capacity)}
           </span>
         </div>

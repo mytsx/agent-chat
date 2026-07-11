@@ -3,6 +3,7 @@ package voice
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,9 +31,25 @@ func TestLoadConfigMissingFileIsZeroNoError(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMalformedJSONIncludesPathContext(t *testing.T) {
+	dir := t.TempDir()
+	path := configPath(dir)
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected malformed JSON to return an error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "parse voice config") || !strings.Contains(msg, path) {
+		t.Fatalf("expected parse error to include config path, got %v", err)
+	}
+}
+
 func TestSaveConfigIsAtomicNoTempLeft(t *testing.T) {
 	dir := t.TempDir()
-	if err := SaveConfig(dir, Config{OpenAIAPIKey: "k"}); err != nil {
+	if err := SaveConfig(dir, Config{OpenAIAPIKey: "sk-test-123"}); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -40,5 +57,21 @@ func TestSaveConfigIsAtomicNoTempLeft(t *testing.T) {
 		if filepath.Ext(e.Name()) == ".tmp" {
 			t.Errorf("stray temp file: %s", e.Name())
 		}
+	}
+}
+
+func TestSaveConfigDataDirFileIncludesPathContext(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(dataDir, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := SaveConfig(dataDir, Config{OpenAIAPIKey: "sk-test-123"})
+	if err == nil {
+		t.Fatal("expected dataDir file to return an error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "create voice config dir") || !strings.Contains(msg, dataDir) {
+		t.Fatalf("expected create-dir error to include dataDir, got %v", err)
 	}
 }

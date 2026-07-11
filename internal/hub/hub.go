@@ -129,7 +129,9 @@ func (h *Hub) Run(port int) error {
 	// Write port file
 	portPath := filepath.Join(h.dataDir, "hub.port")
 	if err := os.WriteFile(portPath, []byte(fmt.Sprintf("%d", actualPort)), 0644); err != nil {
-		h.logger.Printf("Failed to write hub.port: %v", err)
+		ln.Close()
+		h.listener = nil
+		return fmt.Errorf("write hub.port: %w", err)
 	}
 
 	// Start client manager
