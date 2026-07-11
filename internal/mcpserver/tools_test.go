@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestInvalidNamesResult(t *testing.T) {
+	t.Parallel()
+
+	if result := invalidNamesResult("agent", "room"); result != nil {
+		t.Fatalf("invalidNamesResult(valid names) returned error result: %#v", result)
+	}
+	if result := invalidNamesResult("bad/name", "room"); result == nil {
+		t.Fatal("invalidNamesResult(invalid agent) returned nil")
+	}
+	if result := invalidNamesResult("agent", "bad/name"); result == nil {
+		t.Fatal("invalidNamesResult(invalid room) returned nil")
+	}
+}
+
 func TestExtractLastMessageID(t *testing.T) {
 	t.Parallel()
 

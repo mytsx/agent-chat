@@ -63,6 +63,15 @@ func invalidNameResult(name string) *mcp.CallToolResult {
 	return nil
 }
 
+func invalidNamesResult(names ...string) *mcp.CallToolResult {
+	for _, name := range names {
+		if result := invalidNameResult(name); result != nil {
+			return result
+		}
+	}
+	return nil
+}
+
 func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
 	resp, err := call()
 	if err != nil {
@@ -83,10 +92,7 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 	role := request.GetString("role", "")
 	room := request.GetString("room", "")
 
-	if result := invalidNameResult(agentName); result != nil {
-		return result, nil
-	}
-	if result := invalidNameResult(room); result != nil {
+	if result := invalidNamesResult(agentName, room); result != nil {
 		return result, nil
 	}
 	if len(role) > maxFieldLength {
@@ -147,10 +153,7 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	limit := request.GetInt("limit", 10)
 	room := request.GetString("room", "")
 
-	if result := invalidNameResult(agentName); result != nil {
-		return result, nil
-	}
-	if result := invalidNameResult(room); result != nil {
+	if result := invalidNamesResult(agentName, room); result != nil {
 		return result, nil
 	}
 
@@ -166,10 +169,7 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
 
-	if result := invalidNameResult(agentName); result != nil {
-		return result, nil
-	}
-	if result := invalidNameResult(room); result != nil {
+	if result := invalidNamesResult(agentName, room); result != nil {
 		return result, nil
 	}
 
@@ -187,10 +187,7 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 	}
 	room := request.GetString("room", "")
 
-	if result := invalidNameResult(agentName); result != nil {
-		return result, nil
-	}
-	if result := invalidNameResult(room); result != nil {
+	if result := invalidNamesResult(agentName, room); result != nil {
 		return result, nil
 	}
 
@@ -249,10 +246,7 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
 
-	if result := invalidNameResult(agentName); result != nil {
-		return result, nil
-	}
-	if result := invalidNameResult(room); result != nil {
+	if result := invalidNamesResult(agentName, room); result != nil {
 		return result, nil
 	}
 
