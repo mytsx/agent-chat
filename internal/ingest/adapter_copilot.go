@@ -65,7 +65,7 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed 
 		}
 		ev := filepath.Join(dir, "events.jsonl")
 		info, serr := os.Stat(ev)
-		if serr != nil || info.ModTime().Before(cutoff) {
+		if serr != nil || !info.Mode().IsRegular() || info.ModTime().Before(cutoff) {
 			continue
 		}
 		if claimed != nil && claimed(ev) {

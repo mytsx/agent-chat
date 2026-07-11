@@ -402,7 +402,9 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	data.To = "all"
 	data.ExpectsReply = true
 	data.Priority = "normal"
-	json.Unmarshal(req.Data, &data)
+	if !c.decodeRequestData(req, &data, "invalid send_message payload") {
+		return
+	}
 
 	room := h.resolveRoom(req.Room)
 

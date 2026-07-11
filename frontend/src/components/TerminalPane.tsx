@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } from "../../wailsjs/go/main/App";
 import { CLIType, VoiceState } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 // fmtRecTime formats elapsed recording seconds as m:ss for the live timer pill.
 function fmtRecTime(s: number): string {
@@ -217,7 +218,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
       .catch((e) => {
         busyRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
   const startVoice = () => {
@@ -243,7 +244,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         busyRef.current = false;
         releasePendingRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
   const stopVoice = () => {

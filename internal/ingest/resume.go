@@ -44,7 +44,7 @@ func resumeSeedForRoot(home, cliType, sessionID string) *ResumeSeed {
 	case "copilot":
 		p := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
 		info, err := os.Stat(p)
-		if err != nil {
+		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
 		return &ResumeSeed{Path: p, Cur: Cursor{Offset: info.Size()}}

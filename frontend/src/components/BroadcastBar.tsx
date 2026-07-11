@@ -6,6 +6,7 @@ import {
   StopBroadcastVoiceCapture,
 } from "../../wailsjs/go/main/App";
 import { VoiceState } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 // BroadcastBar lets the user type once and fan the text out to every agent
 // terminal of the active team at the same time — as if they typed it into each
@@ -49,7 +50,7 @@ export default function BroadcastBar() {
       .catch((e) => {
         busyVoiceRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
 
@@ -74,7 +75,7 @@ export default function BroadcastBar() {
         busyVoiceRef.current = false;
         releasePendingRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
 
@@ -123,7 +124,7 @@ export default function BroadcastBar() {
       await broadcastToTeam(activeTeamID, text, submit);
       setText("");
     } catch (e) {
-      setError(String(e));
+      setError(errorToString(e));
     } finally {
       setBusy(false);
     }

@@ -531,6 +531,39 @@ func TestHandleSendMessage_FromMismatchRejected(t *testing.T) {
 	}
 }
 
+func TestHandleSendMessage_InvalidPayloadRejectedAfterJoin(t *testing.T) {
+	h, c := newTestHubClient()
+
+	h.handleRequest(c, types.Request{
+		ID:   "join-1",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "alice",
+			"role":       "developer",
+		}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("expected join success, got error=%s", resp.Error)
+	}
+	before := len(h.getOrCreateRoom("r1").GetMessages())
+
+	h.handleRequest(c, types.Request{
+		ID:   "msg-bad",
+		Type: "send_message",
+		Room: "r1",
+		Data: json.RawMessage(`{"from":"alice","content":123}`),
+	})
+
+	resp := readResponse(t, c, "send_message")
+	if resp.Success || resp.Error != "invalid send_message payload" {
+		t.Fatalf("response success=%v error=%q, want invalid send_message payload", resp.Success, resp.Error)
+	}
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != before {
+		t.Fatalf("invalid send_message payload mutated messages: got %d messages, want %d", got, before)
+	}
+}
+
 func TestHandleSendMessage_ManagerBypass(t *testing.T) {
 	h, manager := newTestHubClient()
 	h.setConfiguredManager("r1", "manager")

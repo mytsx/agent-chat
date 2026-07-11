@@ -57,6 +57,19 @@ func TestResumeSeedForRoot(t *testing.T) {
 	}
 }
 
+func TestResumeSeedForRootRejectsNonRegularTranscript(t *testing.T) {
+	root := t.TempDir()
+	const copilotID = "7f32dcf3-11c6-4ca1-9461-fe8590e164e0"
+	eventsDir := filepath.Join(root, ".copilot", "session-state", copilotID, "events.jsonl")
+	if err := os.MkdirAll(eventsDir, 0700); err != nil {
+		t.Fatalf("mkdir events.jsonl dir: %v", err)
+	}
+
+	if got := resumeSeedForRoot(root, "copilot", copilotID); got != nil {
+		t.Fatalf("resumeSeedForRoot returned seed for directory transcript: %+v", got)
+	}
+}
+
 // Smoke-test the public wrapper delegates without touching the filesystem (claude
 // returns nil regardless of home, so this never reads ~/.copilot).
 func TestResumeSeedFor_PublicWrapperDelegates(t *testing.T) {
