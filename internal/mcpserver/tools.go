@@ -48,11 +48,19 @@ func extractLastMessageID(data json.RawMessage) int {
 	return int(id)
 }
 
+func toolResultError(err error) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultError(err.Error()), nil
+}
+
+func toolResultErrorf(format string, args ...any) (*mcp.CallToolResult, error) {
+	return mcp.NewToolResultError(fmt.Sprintf(format, args...)), nil
+}
+
 func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
 	resp, err := call()
 	if err != nil {
 		h.logger.Printf("%s: hub error: %v", tool, err)
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if !resp.Success {
 		return mcp.NewToolResultError(resp.Error), nil
@@ -63,19 +71,19 @@ func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, 
 func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName, err := request.RequireString("agent_name")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	role := request.GetString("role", "")
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(agentName); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if len(role) > maxFieldLength {
-		return mcp.NewToolResultError(fmt.Sprintf("role too long: %d chars, max %d", len(role), maxFieldLength)), nil
+		return toolResultErrorf("role too long: %d chars, max %d", len(role), maxFieldLength)
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", agentName, role, room)
@@ -88,11 +96,11 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	fromAgent, err := request.RequireString("from_agent")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	content, err := request.RequireString("content")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	toAgent := request.GetString("to_agent", "all")
 	expectsReply := request.GetBool("expects_reply", true)
@@ -100,18 +108,18 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(fromAgent); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if toAgent != "all" {
 		if err := validation.ValidateName(toAgent); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return toolResultError(err)
 		}
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if len(content) > maxFieldLength {
-		return mcp.NewToolResultError(fmt.Sprintf("content too long: %d chars, max %d", len(content), maxFieldLength)), nil
+		return toolResultErrorf("content too long: %d chars, max %d", len(content), maxFieldLength)
 	}
 
 	h.logger.Printf("send_message: from=%q to=%q room=%q priority=%s expects_reply=%v contentLen=%d",
@@ -125,7 +133,7 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName, err := request.RequireString("agent_name")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	sinceID := request.GetInt("since_id", 0)
 	unreadOnly := request.GetBool("unread_only", true)
@@ -133,10 +141,10 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(agentName); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("read_messages: agent=%q since_id=%d unread_only=%v limit=%d room=%q",
@@ -152,10 +160,10 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(agentName); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("list_agents: agent=%q room=%q", agentName, room)
@@ -168,15 +176,15 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agentName, err := request.RequireString("agent_name")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(agentName); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("leave_room: agent=%q room=%q", agentName, room)
@@ -190,7 +198,7 @@ func (h *toolHandlers) clearRoom(_ context.Context, request mcp.CallToolRequest)
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("clear_room: room=%q", room)
@@ -206,7 +214,7 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("read_all_messages: since_id=%d limit=%d room=%q", sinceID, limit, room)
@@ -220,7 +228,7 @@ func (h *toolHandlers) readSummary(_ context.Context, request mcp.CallToolReques
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	h.logger.Printf("read_summary: room=%q", room)
@@ -235,16 +243,16 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 	room := request.GetString("room", "")
 
 	if err := validation.ValidateName(agentName); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if err := validation.ValidateName(room); err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 
 	resp, err := h.storage.GetLastMessageID(room, agentName)
 	if err != nil {
 		h.logger.Printf("get_last_message_id: hub error: %v", err)
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err)
 	}
 	if !resp.Success {
 		return mcp.NewToolResultError(resp.Error), nil
