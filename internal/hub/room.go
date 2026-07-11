@@ -91,6 +91,20 @@ func (r *RoomState) touchAgentLastSeenLocked(agentName string) {
 	}
 }
 
+// touchAgentLastSeenByIdentityLocked refreshes the roster entry matching
+// agentName with the same case-insensitive identity rules used for manager and
+// observer roles. Must hold r.mu.
+func (r *RoomState) touchAgentLastSeenByIdentityLocked(agentName string) {
+	for name, agent := range r.agents {
+		if sameAgentName(name, agentName) {
+			agent.LastSeen = types.Now()
+			r.agents[name] = agent
+			r.dirty = true
+			return
+		}
+	}
+}
+
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
@@ -384,6 +398,7 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 	active := r.getActiveManagerLocked()
 	if sameAgentName(active, agentName) {
 		r.managerLastSeen = types.Now()
+		r.touchAgentLastSeenByIdentityLocked(active)
 	}
 	return active
 }
@@ -420,6 +435,7 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	defer r.mu.Unlock()
 	if r.isActiveManagerLocked(agentName) {
 		r.managerLastSeen = types.Now()
+		r.touchAgentLastSeenByIdentityLocked(agentName)
 		return true
 	}
 	return false

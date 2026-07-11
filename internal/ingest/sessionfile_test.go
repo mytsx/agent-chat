@@ -112,3 +112,16 @@ func TestSessionFilePathRoot_CodexDayWindow(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionFilePathRootRejectsUnsafeSessionID(t *testing.T) {
+	root := t.TempDir()
+	for _, cliType := range []string{"claude", "copilot", "codex"} {
+		for _, id := range []string{"../evil", `..\evil`, ".", "..", "*", "[abc]"} {
+			t.Run(cliType+"/"+id, func(t *testing.T) {
+				if got, ok := sessionFilePathRoot(root, cliType, "/x", id, 0); ok {
+					t.Fatalf("sessionFilePathRoot(%q, %q) = %q,true; want rejection", cliType, id, got)
+				}
+			})
+		}
+	}
+}

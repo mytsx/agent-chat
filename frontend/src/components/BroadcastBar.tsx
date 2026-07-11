@@ -109,9 +109,14 @@ export default function BroadcastBar() {
         : voiceError
           ? `Toplu mesaj ses hatası: ${voiceError}`
           : "Toplu mesaj için sesli prompt — basılı tutarak konuş";
+  const voiceCapturePending =
+    voiceState === "recording" || voiceState === "transcribing";
 
   const handleSend = async () => {
-    if (!text.trim() || !activeTeamID || busy) return;
+    // Don't race a pending transcript: sending while Whisper is still resolving
+    // can clear the textarea, then append the transcript as a stranded follow-up
+    // prompt instead of including it in the intended broadcast.
+    if (!text.trim() || !activeTeamID || busy || voiceCapturePending) return;
     setBusy(true);
     setError(null);
     try {
@@ -226,8 +231,12 @@ export default function BroadcastBar() {
       <button
         className="broadcast-bar-send"
         onClick={handleSend}
-        disabled={busy || !text.trim() || !activeTeamID}
-        title="Metni tüm agent terminallerine yaz"
+        disabled={busy || voiceCapturePending || !text.trim() || !activeTeamID}
+        title={
+          voiceCapturePending
+            ? "Sesli prompt tamamlanınca gönderilebilir"
+            : "Metni tüm agent terminallerine yaz"
+        }
       >
         {busy ? "Gönderiliyor…" : "Gönder"}
       </button>

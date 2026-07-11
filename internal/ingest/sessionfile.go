@@ -3,6 +3,7 @@ package ingest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,7 +27,7 @@ func SessionFilePath(cliType, cwd, sessionID string, startUnix float64) (string,
 // sessionFilePathRoot is SessionFilePath with the home root injected, so tests can
 // point the Codex glob at a t.TempDir() instead of the real ~/.codex (Copilot).
 func sessionFilePathRoot(home, cliType, cwd, sessionID string, startUnix float64) (string, bool) {
-	if sessionID == "" {
+	if !safeSessionIDComponent(sessionID) {
 		return "", false
 	}
 	switch cliType {
@@ -56,6 +57,19 @@ func sessionFilePathRoot(home, cliType, cwd, sessionID string, startUnix float64
 	default:
 		return "", false
 	}
+}
+
+func safeSessionIDComponent(sessionID string) bool {
+	if sessionID == "" || sessionID == "." || sessionID == ".." {
+		return false
+	}
+	if strings.ContainsAny(sessionID, `/\`) {
+		return false
+	}
+	// Codex lookup builds a glob pattern with the session ID. Rejecting glob
+	// metacharacters avoids a malformed persisted ID widening the match set and
+	// returning an unrelated transcript.
+	return !strings.ContainsAny(sessionID, `*?[`)
 }
 
 // SessionStats returns the human user-message count and a short first-message
