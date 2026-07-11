@@ -341,6 +341,28 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 	return err
 }
 
+const (
+	bracketPasteOpen  = "\x1b[200~"
+	bracketPasteClose = "\x1b[201~"
+)
+
+func sanitizeCopilotInput(text string) string {
+	flat := strings.ReplaceAll(text, "\r\n", " ")
+	return strings.Map(func(r rune) rune {
+		if sanitize.IsInvisibleFormat(r) {
+			return -1
+		}
+		if sanitize.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, flat)
+}
+
+func sanitizeBracketedPasteInput(text string) string {
+	return sanitize.StripForTerminalPaste(text)
+}
+
 // InjectText writes text into a session's input line as if the user typed it,
 // using the same bracketed-paste mechanics as a notification injection. It is the
 // fan-out primitive behind App.BroadcastToTeam.
@@ -372,16 +394,7 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// text literal (review: Codex P2 + completeness sweep). Invisible bidi/format
 		// controls are dropped outright (Trojan-Source hygiene). \r\n collapses to a
 		// single space first so a CRLF doesn't become two.
-		flat := strings.ReplaceAll(text, "\r\n", " ")
-		flat = strings.Map(func(r rune) rune {
-			if sanitize.IsInvisibleFormat(r) {
-				return -1
-			}
-			if sanitize.IsControl(r) {
-				return ' '
-			}
-			return r
-		}, flat)
+		flat := sanitizeCopilotInput(text)
 		// Nothing left after sanitization (e.g. an all-invisible payload): no-op so
 		// we never write a focus-in or leave a sticky pending flag for content that
 		// was never visible.
@@ -410,32 +423,13 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// markers the user's text itself contains so an embedded close sequence can't
 		// end paste mode early and let the tail run as live input (review:
 		// completeness sweep — paste integrity).
-		const (
-			bracketOpen  = "\x1b[200~"
-			bracketClose = "\x1b[201~"
-		)
-		safe := strings.ReplaceAll(text, bracketOpen, "")
-		safe = strings.ReplaceAll(safe, bracketClose, "")
-		// Strip control/format runes that survive the marker removal: C0/C1/DEL (a
-		// stray ESC could still start an escape sequence inside the paste) and the
-		// invisible Unicode format set (Trojan-Source). \n and \t are preserved —
-		// paste mode delivers multiline content literally.
-		safe = strings.Map(func(r rune) rune {
-			switch r {
-			case '\n', '\t':
-				return r
-			}
-			if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
-				return -1
-			}
-			return r
-		}, safe)
+		safe := sanitizeBracketedPasteInput(text)
 		// Nothing left after sanitization: no-op rather than writing an empty paste
 		// (and, for submit=true, a blank Enter) or leaving a sticky pending flag.
 		if safe == "" {
 			return nil
 		}
-		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
+		if err := m.writeLocked(session, []byte(bracketPasteOpen+safe+bracketPasteClose)); err != nil {
 			return err
 		}
 		if submit {
