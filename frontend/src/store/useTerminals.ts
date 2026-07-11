@@ -1,4 +1,4 @@
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import { CLIInfo, CLIType, TerminalSession, SessionInfo } from "../lib/types";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
@@ -62,6 +62,10 @@ interface TerminalsState {
   listAgentSessions: (teamID: string, agentName: string) => Promise<SessionInfo[]>;
 }
 
+type GetTerminalsState = StoreApi<TerminalsState>["getState"];
+type SetTerminalsState = StoreApi<TerminalsState>["setState"];
+type TerminalLifecycleAction = "restartTerminal" | "resumeTerminal";
+
 function drainPendingCLISessionID(
   pendingBySession: Record<string, string>,
   sessionID: string
@@ -119,7 +123,7 @@ function requireExistingSession(
   sessions: TerminalSession[],
   teamID: string,
   sessionID: string,
-  action: "restartTerminal" | "resumeTerminal"
+  action: TerminalLifecycleAction
 ): void {
   if (sessions.some((session) => session.sessionID === sessionID)) {
     return;
@@ -148,6 +152,23 @@ function replaceRestartedSessionState(
     ),
     pendingCLISessionIDs: pending,
   };
+}
+
+async function replaceTerminalFromBackend(
+  get: GetTerminalsState,
+  set: SetTerminalsState,
+  teamID: string,
+  sessionID: string,
+  action: TerminalLifecycleAction,
+  replaceBackendSession: (sessionID: string) => Promise<string>
+): Promise<string> {
+  const teamSessions = get().sessions[teamID] ?? [];
+  requireExistingSession(teamSessions, teamID, sessionID, action);
+
+  const newSessionID = await replaceBackendSession(sessionID);
+  set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
+
+  return newSessionID;
 }
 
 function attachPendingCLISessionIDs(
@@ -332,36 +353,22 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   restartTerminal: async (teamID, sessionID) => {
-    const teamSessions = get().sessions[teamID] ?? [];
-    requireExistingSession(teamSessions, teamID, sessionID, "restartTerminal");
-
-    const newSessionID = await RestartTerminal(sessionID);
-
     // Replace old session with new one, preserving slotIndex. cliSessionID resets
     // to whatever was buffered for newSessionID (normally undefined → resume button
     // disabled until the new PTY captures an id; a stale old id must NOT carry over,
     // or ResumeTerminal would fall back to another fresh restart — #40 Codex P3).
     // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
     // captured id is never lost if its event raced this replacement (#40 Codex P2).
-    set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
-
-    return newSessionID;
+    return replaceTerminalFromBackend(get, set, teamID, sessionID, "restartTerminal", RestartTerminal);
   },
 
   resumeTerminal: async (teamID, sessionID) => {
-    const teamSessions = get().sessions[teamID] ?? [];
-    requireExistingSession(teamSessions, teamID, sessionID, "resumeTerminal");
-
-    const newSessionID = await ResumeTerminal(sessionID);
-
     // Replace old session with new one, preserving slotIndex. cliSessionID resets to
     // whatever was buffered for newSessionID (normally undefined until the resumed
     // PTY captures its new id; the resumed CLI regenerates its session id). Draining
     // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
     // isn't lost if its event raced this replacement (#40 Codex P2).
-    set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
-
-    return newSessionID;
+    return replaceTerminalFromBackend(get, set, teamID, sessionID, "resumeTerminal", ResumeTerminal);
   },
 
   setCLISessionID: (sessionID, cliSessionID) => {
