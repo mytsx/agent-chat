@@ -504,9 +504,12 @@ func (a *App) shutdown(ctx context.Context) {
 		// #40 Faz-2: close each live session's history open-window (lastSeen) BEFORE
 		// CloseAll — quit bypasses closeTerminalInternal, which is where the per-terminal
 		// Touch normally fires, so without this the last run keeps lastSeen==firstSeen
-		// and correlation can't see it (Codex P2).
-		for _, cid := range a.ptyManager.CapturedSessionIDs() {
-			a.sessionLog.Touch(cid)
+		// and correlation can't see it (Codex P2). sessionLog can be nil when history
+		// store init failed; shutdown must still close PTYs cleanly in that degraded mode.
+		if a.sessionLog != nil {
+			for _, cid := range a.ptyManager.CapturedSessionIDs() {
+				a.sessionLog.Touch(cid)
+			}
 		}
 		a.ptyManager.CloseAll()
 	}

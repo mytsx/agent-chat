@@ -118,9 +118,12 @@ func NewStore(dataDir string) (*Store, error) {
 func (s *Store) load() error {
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("read teams file %s: %w", s.filePath, err)
 	}
-	return json.Unmarshal(data, &s.teams)
+	if err := json.Unmarshal(data, &s.teams); err != nil {
+		return fmt.Errorf("parse teams file %s: %w", s.filePath, err)
+	}
+	return nil
 }
 
 // save serializes the teams to disk atomically (temp file + rename) so a crash
@@ -130,17 +133,17 @@ func (s *Store) load() error {
 func (s *Store) save() error {
 	data, err := json.MarshalIndent(s.teams, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal teams file %s: %w", s.filePath, err)
 	}
 
 	tmpPath := s.filePath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		os.Remove(tmpPath) // clean up a partially-written temp file
-		return err
+		return fmt.Errorf("write teams file temp %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, s.filePath); err != nil {
 		os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("replace teams file %s: %w", s.filePath, err)
 	}
 	return nil
 }

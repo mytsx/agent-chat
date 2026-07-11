@@ -366,10 +366,32 @@ func TestNewStoreReportsCorruptTeamsJSON(t *testing.T) {
 				t.Fatalf("write corrupt teams.json failed: %v", err)
 			}
 
-			if _, err := NewStore(dir); err == nil {
+			_, err := NewStore(dir)
+			if err == nil {
 				t.Fatal("NewStore must report corrupt teams.json instead of starting with an empty store")
 			}
+			msg := err.Error()
+			if !strings.Contains(msg, "parse teams file") || !strings.Contains(msg, filepath.Join(dir, "teams.json")) {
+				t.Fatalf("expected parse error to include teams.json path, got %v", err)
+			}
 		})
+	}
+}
+
+func TestNewStoreReportsTeamsJSONReadPath(t *testing.T) {
+	dir := t.TempDir()
+	teamsPath := filepath.Join(dir, "teams.json")
+	if err := os.Mkdir(teamsPath, 0o755); err != nil {
+		t.Fatalf("create directory at teams.json path: %v", err)
+	}
+
+	_, err := NewStore(dir)
+	if err == nil {
+		t.Fatal("expected directory teams.json to return a read error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "read teams file") || !strings.Contains(msg, teamsPath) {
+		t.Fatalf("expected read error to include teams.json path, got %v", err)
 	}
 }
 
