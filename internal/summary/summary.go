@@ -5,7 +5,8 @@
 // layout of internal/hub (sessions/{room}/{epoch}.json). "Continue" always
 // resumes from the newest summary ("devam = en son"). The package is a leaf:
 // it is shared by both the desktop app (writes + injection reads) and the hub
-// (the read_summary RPC), so it depends only on stdlib + validation.
+// (the read_summary RPC), so it depends only on stdlib + internal validation /
+// sanitization helpers.
 package summary
 
 import (
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"desktop/internal/sanitize"
 	"desktop/internal/validation"
 )
 
@@ -62,9 +64,13 @@ func docFromEpoch(room string, epoch int64, text string) Doc {
 	return Doc{
 		Room:      room,
 		Epoch:     strconv.FormatInt(epoch, 10),
-		Text:      text,
+		Text:      sanitizeSummaryText(text),
 		CreatedAt: time.Unix(epoch, 0).Format(time.RFC3339),
 	}
+}
+
+func sanitizeSummaryText(text string) string {
+	return sanitize.StripForTerminalPaste(text)
 }
 
 // Write persists text as a new immutable per-session summary and returns the
@@ -75,6 +81,7 @@ func Write(dataDir, room, text string) (Doc, error) {
 	if err != nil {
 		return Doc{}, err
 	}
+	text = sanitizeSummaryText(text)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return Doc{}, fmt.Errorf("summary: create dir: %w", err)
 	}

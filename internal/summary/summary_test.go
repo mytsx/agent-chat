@@ -39,6 +39,49 @@ func TestWriteAndLatestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteSanitizesUnsafeSummaryText(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "team-alpha"
+	unsafe := "a\x1b[201~b\x00" + string(rune(0x202e)) + "c"
+
+	doc, err := Write(dataDir, room, unsafe)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if doc.Text != "abc" {
+		t.Fatalf("Write returned unsanitized text %q, want %q", doc.Text, "abc")
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dataDir, "hub-state", "summaries", room, doc.Epoch+summaryExt))
+	if err != nil {
+		t.Fatalf("read stored summary: %v", err)
+	}
+	if string(raw) != "abc" {
+		t.Fatalf("stored summary text = %q, want %q", raw, "abc")
+	}
+}
+
+func TestLatestSanitizesLegacyUnsafeSummaryText(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "legacy-room"
+	dir := filepath.Join(dataDir, "hub-state", "summaries", room)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := "a\x1b[200~b" + string(rune(0x202e)) + "c"
+	if err := os.WriteFile(filepath.Join(dir, "1000.md"), []byte(unsafe), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	latest, ok, err := Latest(dataDir, room)
+	if err != nil || !ok {
+		t.Fatalf("Latest = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	if latest.Text != "abc" {
+		t.Fatalf("Latest text = %q, want sanitized %q", latest.Text, "abc")
+	}
+}
+
 func TestLatestReturnsNewest(t *testing.T) {
 	dataDir := t.TempDir()
 	room := "default"
