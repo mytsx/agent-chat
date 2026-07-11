@@ -36,6 +36,18 @@ func extractText(data json.RawMessage) string {
 	return string(data)
 }
 
+func extractLastMessageID(data json.RawMessage) int {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return 0
+	}
+	id, ok := m["last_id"].(float64)
+	if !ok {
+		return 0
+	}
+	return int(id)
+}
+
 func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
 	resp, err := call()
 	if err != nil {
@@ -238,13 +250,7 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 		return mcp.NewToolResultError(resp.Error), nil
 	}
 
-	// Extract last_id from response data
-	var data map[string]any
-	json.Unmarshal(resp.Data, &data)
-	lastID := 0
-	if id, ok := data["last_id"].(float64); ok {
-		lastID = int(id)
-	}
+	lastID := extractLastMessageID(resp.Data)
 
 	h.logger.Printf("get_last_message_id: room=%q lastID=%d", room, lastID)
 
