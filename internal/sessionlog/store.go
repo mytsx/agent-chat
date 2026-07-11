@@ -74,28 +74,7 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 	defer s.mu.Unlock()
 	t := s.now()
 	previous, hadPrevious := s.records[sessionID]
-	if r, ok := s.records[sessionID]; ok {
-		// A re-Record of an existing id is a NEW run — Copilot keeps the same
-		// events.jsonl across resumes, so onSessionID records the same id again. Start
-		// a fresh open-window so "same period" correlation compares the latest run, not
-		// one interval spanning idle days between runs (Codex P2). A re-record within
-		// newWindowGapSec is treated as the same run (defensive against a double-fire)
-		// and only advances LastSeen.
-		if t-r.LastSeen > newWindowGapSec {
-			r.FirstSeen = t
-		}
-		r.LastSeen = t
-		// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
-		// resumed after a team rename or config change. Re-indexing under the CURRENT
-		// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).
-		r.Room, r.AgentName, r.CLIType, r.Cwd = room, agent, cliType, cwd
-		s.records[sessionID] = r
-	} else {
-		s.records[sessionID] = Record{
-			SessionID: sessionID, Room: room, AgentName: agent,
-			CLIType: cliType, Cwd: cwd, FirstSeen: t, LastSeen: t,
-		}
-	}
+	s.records[sessionID] = refreshedRecord(previous, hadPrevious, t, sessionID, room, agent, cliType, cwd)
 	if !s.save() {
 		if hadPrevious {
 			s.records[sessionID] = previous
@@ -103,6 +82,32 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 			delete(s.records, sessionID)
 		}
 	}
+}
+
+func refreshedRecord(previous Record, hadPrevious bool, t float64, sessionID, room, agent, cliType, cwd string) Record {
+	if !hadPrevious {
+		return Record{
+			SessionID: sessionID, Room: room, AgentName: agent,
+			CLIType: cliType, Cwd: cwd, FirstSeen: t, LastSeen: t,
+		}
+	}
+
+	r := previous
+	// A re-Record of an existing id is a NEW run — Copilot keeps the same
+	// events.jsonl across resumes, so onSessionID records the same id again. Start
+	// a fresh open-window so "same period" correlation compares the latest run, not
+	// one interval spanning idle days between runs (Codex P2). A re-record within
+	// newWindowGapSec is treated as the same run (defensive against a double-fire)
+	// and only advances LastSeen.
+	if t-r.LastSeen > newWindowGapSec {
+		r.FirstSeen = t
+	}
+	r.LastSeen = t
+	// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
+	// resumed after a team rename or config change. Re-indexing under the CURRENT
+	// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).
+	r.Room, r.AgentName, r.CLIType, r.Cwd = room, agent, cliType, cwd
+	return r
 }
 
 // Touch advances LastSeen for a known session (FirstSeen preserved). Unknown → no-op.
