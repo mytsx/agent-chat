@@ -2,6 +2,7 @@ package team
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,7 +91,11 @@ func NewStore(dataDir string) (*Store, error) {
 	}
 
 	if err := s.load(); err != nil {
-		s.teams = []Team{}
+		if errors.Is(err, os.ErrNotExist) {
+			s.teams = []Team{}
+		} else {
+			return nil, fmt.Errorf("load teams: %w", err)
+		}
 	}
 
 	return s, nil

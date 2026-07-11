@@ -1,5 +1,6 @@
 import { create, type StoreApi } from "zustand";
 import { CLIInfo, CLIType, TerminalSession, SessionInfo } from "../lib/types";
+import { focusAfterSessionRemove, focusAfterSessionReplace } from "../lib/terminalFocus";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
 import {
@@ -151,6 +152,11 @@ function replaceRestartedSessionState(
       )
     ),
     pendingCLISessionIDs: pending,
+    focusedSessionID: focusAfterSessionReplace(
+      state.focusedSessionID,
+      oldSessionID,
+      newSessionID
+    ),
   };
 }
 
@@ -317,6 +323,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         teamID,
         (s.sessions[teamID] ?? []).filter((t) => t.sessionID !== sessionID)
       ),
+      focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, [sessionID]),
     }));
   },
 
@@ -330,9 +337,13 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       }
     }
     set((s) => {
+      const removedSessionIDs = (s.sessions[teamID] ?? []).map((session) => session.sessionID);
       const sessions = { ...s.sessions };
       delete sessions[teamID];
-      return { sessions };
+      return {
+        sessions,
+        focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, removedSessionIDs),
+      };
     });
   },
 

@@ -241,9 +241,11 @@ func notificationKey(chatDir, agentName string) string {
 // armFlushTimerLocked schedules a pending-notification flush for the agent.
 // Caller MUST hold o.mu.
 func (o *Orchestrator) armFlushTimerLocked(key, chatDir, agentName, sessionID string, delay time.Duration) {
-	o.pendingTimers[key] = time.AfterFunc(delay, func() {
-		o.flushPending(chatDir, agentName, sessionID)
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
+		o.flushPending(chatDir, agentName, sessionID, timer)
 	})
+	o.pendingTimers[key] = timer
 }
 
 // snapshotAgentSessions returns a copy of the registered sessions for chatDir so
@@ -544,8 +546,12 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 // If the user still has a pending line it RE-ARMs the single timer (up to
 // maxDeferral); once the cap is exceeded it routes to the UI fallback instead of
 // corrupting the PTY input.
-func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
+func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string, expectedTimers ...*time.Timer) {
 	key := notificationKey(chatDir, agentName)
+	var expectedTimer *time.Timer
+	if len(expectedTimers) > 0 {
+		expectedTimer = expectedTimers[0]
+	}
 
 	// Query pending-input OUTSIDE o.mu (lock ordering).
 	pending := o.hasPendingInput(sessionID)
@@ -554,7 +560,16 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 	if !o.isCurrentSessionLocked(chatDir, agentName, sessionID) {
 		// The agent was unregistered or restarted (now bound to a different
 		// sessionID) since this timer was armed. This callback is stale — drop it
-		// without touching the new session's pending state/timer (review GR2).
+		// without flushing to the old session (review GR2). If this callback still
+		// owns the timer slot and pending messages remain for the same agent name,
+		// re-arm them against the current session; otherwise the slot would keep
+		// pointing at an already-fired stale timer and the pending queue could rot.
+		if expectedTimer != nil && o.pendingTimers[key] == expectedTimer {
+			delete(o.pendingTimers, key)
+			if currentSession := o.agentSessions[chatDir][agentName]; currentSession != "" && len(o.pendingMsgs[key]) > 0 {
+				o.armFlushTimerLocked(key, chatDir, agentName, currentSession, o.reArmInterval)
+			}
+		}
 		o.mu.Unlock()
 		return
 	}

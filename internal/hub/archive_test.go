@@ -711,6 +711,29 @@ func TestHandleSubscribe_RejectsInvalidRoomName(t *testing.T) {
 	}
 }
 
+func TestDesktopMaintenanceRejectsInvalidRoomName(t *testing.T) {
+	cases := []struct {
+		name    string
+		reqType string
+	}{
+		{"archive room", "archive_room"},
+		{"clear room", "clear_room"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, desktop := authedDesktop(t)
+			h.handleRequest(desktop, types.Request{ID: "1", Type: c.reqType, Room: "bad/room"})
+			if resp := readResponse(t, desktop, c.reqType); resp.Success {
+				t.Fatalf("expected %s with an invalid room name to fail", c.reqType)
+			}
+			if h.getRoom("bad/room") != nil {
+				t.Fatalf("%s materialized an invalid room", c.reqType)
+			}
+		})
+	}
+}
+
 // readArchiveLines parses a room's archive JSONL file into messages.
 func readArchiveLines(t *testing.T, dataDir, room string) []types.Message {
 	t.Helper()

@@ -296,6 +296,57 @@ func TestFlushPending_StaleSessionDropped(t *testing.T) {
 	}
 }
 
+func TestFlushPending_StaleSessionReArmsForCurrentSession(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.pendingInputFunc = func(string) bool { return false }
+	o.reArmInterval = time.Hour
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-OLD")
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.armFlushTimerLocked(key, "/rooms/t", "agent-1", "sess-OLD", time.Millisecond)
+	oldTimer := o.pendingTimers[key]
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-NEW")
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	var remaining int
+	var rearmed *time.Timer
+	for time.Now().Before(deadline) {
+		o.mu.Lock()
+		remaining = len(o.pendingMsgs[key])
+		rearmed = o.pendingTimers[key]
+		o.mu.Unlock()
+		if rearmed != oldTimer {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	o.mu.Lock()
+	rearmed = o.pendingTimers[key]
+	if rearmed != nil {
+		rearmed.Stop()
+	}
+	o.mu.Unlock()
+	oldTimer.Stop()
+
+	if len(*sent) != 0 {
+		t.Errorf("stale session: must not flush to the old session, got %d", len(*sent))
+	}
+	if remaining != 1 {
+		t.Errorf("stale flush must leave pending for the new session, got %d", remaining)
+	}
+	if rearmed == nil {
+		t.Fatal("stale flush must re-arm a timer for the current session")
+	}
+	if rearmed == oldTimer {
+		t.Fatal("stale flush left the timer slot pointing at the already-fired old timer")
+	}
+}
+
 // When a flush races into pending input (outside check passed, but tryInject's
 // atomic pre-check sees pending), the batch must be re-deferred preserving
 // chronological order (old msgs first) and the ORIGINAL deferStartedAt (so

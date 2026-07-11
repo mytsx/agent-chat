@@ -740,6 +740,10 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 		}
 		roomState.TouchManagerHeartbeat(c.agentName)
 	}
+	if err := validation.ValidateName(room); err != nil {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
+		return
+	}
 
 	roomState := h.getOrCreateRoom(room)
 
@@ -783,6 +787,10 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop odayı arşivleyebilir") {
+		return
+	}
+	if err := validation.ValidateName(room); err != nil {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
 		return
 	}
 

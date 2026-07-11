@@ -297,6 +297,29 @@ func TestLoadLegacyTeamsJSON(t *testing.T) {
 	}
 }
 
+func TestNewStoreReportsCorruptTeamsJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"truncated json", `[{"id":"t1","name":"Broken"}`},
+		{"wrong top-level shape", `{"id":"t1","name":"Broken"}`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "teams.json"), []byte(c.raw), 0o644); err != nil {
+				t.Fatalf("write corrupt teams.json failed: %v", err)
+			}
+
+			if _, err := NewStore(dir); err == nil {
+				t.Fatal("NewStore must report corrupt teams.json instead of starting with an empty store")
+			}
+		})
+	}
+}
+
 // A no-op UpsertAgent (identical config) must skip the disk write. Proven
 // deterministically and cross-platform: after seeding, the file is overwritten
 // out-of-band with a sentinel. A no-op upsert skips save() so the sentinel
