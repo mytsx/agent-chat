@@ -3,10 +3,11 @@ import { usePrompts } from "../store/usePrompts";
 import { useTerminals } from "../store/useTerminals";
 import { useTeams } from "../store/useTeams";
 import { TerminalSession } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 import PromptEditor from "./PromptEditor";
 
 interface Props {
-  onSendPrompt?: (sessionID: string, content: string) => void;
+  onSendPrompt?: (sessionID: string, content: string) => Promise<void>;
 }
 
 export default function PromptLibrary({ onSendPrompt }: Props) {
@@ -15,6 +16,8 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
   const activeTeamID = useTeams((s) => s.activeTeamID);
   const sessions = useTerminals((s) => s.sessions);
   const [sendingPromptId, setSendingPromptId] = useState<string | null>(null);
+  const [sendingTargetID, setSendingTargetID] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const teamSessions: TerminalSession[] =
     activeTeamID ? (sessions[activeTeamID] ?? []) : [];
@@ -23,9 +26,18 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
     loadPrompts();
   }, []);
 
-  const handleSend = (promptContent: string, session: TerminalSession) => {
-    onSendPrompt?.(session.sessionID, promptContent);
-    setSendingPromptId(null);
+  const handleSend = async (promptContent: string, session: TerminalSession) => {
+    if (!onSendPrompt || sendingTargetID) return;
+    setSendingTargetID(session.sessionID);
+    setSendError(null);
+    try {
+      await onSendPrompt(session.sessionID, promptContent);
+      setSendingPromptId(null);
+    } catch (e) {
+      setSendError(errorToString(e));
+    } finally {
+      setSendingTargetID(null);
+    }
   };
 
   return (
@@ -68,6 +80,11 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                 {sendingPromptId === p.id ? (
                   <div className="prompt-target-picker">
                     <span className="picker-label">Send to:</span>
+                    {sendError && (
+                      <span className="prompt-send-error" role="alert" title={sendError}>
+                        Gönderilemedi: {sendError}
+                      </span>
+                    )}
                     {teamSessions.length === 0 ? (
                       <span className="picker-empty">No terminals</span>
                     ) : (
@@ -75,15 +92,22 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                         <button
                           key={s.sessionID}
                           className="btn-sm btn-target"
-                          onClick={() => handleSend(p.content, s)}
+                          onClick={() => void handleSend(p.content, s)}
+                          disabled={!!sendingTargetID}
                         >
-                          {s.agentName || `Terminal ${s.index + 1}`}
+                          {sendingTargetID === s.sessionID
+                            ? "Sending…"
+                            : s.agentName || `Terminal ${s.index + 1}`}
                         </button>
                       ))
                     )}
                     <button
                       className="btn-sm"
-                      onClick={() => setSendingPromptId(null)}
+                      onClick={() => {
+                        setSendingPromptId(null);
+                        setSendError(null);
+                      }}
+                      disabled={!!sendingTargetID}
                     >
                       Cancel
                     </button>
@@ -92,7 +116,10 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                   <>
                     <button
                       className="btn-sm"
-                      onClick={() => setSendingPromptId(p.id)}
+                      onClick={() => {
+                        setSendError(null);
+                        setSendingPromptId(p.id);
+                      }}
                     >
                       Send
                     </button>

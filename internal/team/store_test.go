@@ -949,6 +949,18 @@ func TestCreateRollsBackOnSaveFailure(t *testing.T) {
 	}
 }
 
+func TestNewStoreReturnsDataDirCreationError(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write sentinel file: %v", err)
+	}
+
+	if _, err := NewStore(filepath.Join(notDir, "teams-data")); err == nil {
+		t.Fatal("NewStore must surface data-dir creation errors instead of starting with an unsaveable empty store")
+	}
+}
+
 func TestDeleteRollsBackOnSaveFailure(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(dir)

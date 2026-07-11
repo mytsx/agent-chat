@@ -4,6 +4,7 @@ import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
 import { useTerminals } from "./store/useTerminals";
 import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
+import { errorToString } from "./lib/errorText";
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
@@ -180,10 +181,13 @@ function AppContent() {
     []
   );
 
-  const handleSendPrompt = (sessionID: string, content: string) => {
-    SendPromptToAgent(sessionID, content, {}).catch((e) => {
+  const handleSendPrompt = async (sessionID: string, content: string) => {
+    try {
+      await SendPromptToAgent(sessionID, content, {});
+    } catch (e) {
       if (import.meta.env.DEV) console.warn("SendPromptToAgent failed:", e);
-    });
+      throw new Error(errorToString(e));
+    }
   };
 
   return (

@@ -249,7 +249,31 @@ func (a *App) startHub() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	log.Printf("[STARTUP] Hub did not create hub.port within 5s; stopping pid=%d", cmd.Process.Pid)
+	a.stopStartedHubProcess(cmd)
 	return fmt.Errorf("hub.port not created within 5s")
+}
+
+func (a *App) stopStartedHubProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// This helper is used before monitorHub is armed (startup) or before it is
+	// re-armed (crash restart). If the just-started hub never reports readiness,
+	// do not leave it running detached from the app lifecycle.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+	a.hubProcess.CompareAndSwap(cmd.Process, nil)
 }
 
 // connectToHub creates a hub client and connects.

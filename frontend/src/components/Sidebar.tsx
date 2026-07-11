@@ -6,7 +6,7 @@ import RoomBrowser from "./RoomBrowser";
 
 interface Props {
   chatDir: string;
-  onSendPrompt?: (sessionID: string, content: string) => void;
+  onSendPrompt?: (sessionID: string, content: string) => Promise<void>;
 }
 
 type SidebarTab = "status" | "messages" | "prompts" | "rooms";

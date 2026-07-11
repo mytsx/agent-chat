@@ -80,7 +80,9 @@ type Store struct {
 
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0700)
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("create team data dir: %w", err)
+	}
 	fp := filepath.Join(dataDir, "teams.json")
 
 	s := &Store{
