@@ -72,6 +72,13 @@ func hasTeamNameCollision(teams []Team, name, excludeID string) bool {
 	return false
 }
 
+func validateRequiredName(kind, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%s name is required", kind)
+	}
+	return validation.ValidateName(name)
+}
+
 // Store manages team/tab persistence
 type Store struct {
 	mu       sync.RWMutex
@@ -174,7 +181,7 @@ func (s *Store) Get(id string) (Team, error) {
 
 // Create creates a new team
 func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, error) {
-	if err := validation.ValidateName(name); err != nil {
+	if err := validateRequiredName("team", name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
 
@@ -220,7 +227,7 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 
 // Update updates a team
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
-	if err := validation.ValidateName(name); err != nil {
+	if err := validateRequiredName("team", name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
 
@@ -261,7 +268,7 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 // CreateTerminal never supply Role, so a naive upsert would erase a Role the user
 // set earlier (consumed by composeAgentPrompt). A non-empty cfg.Role overwrites.
 func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
-	if err := validation.ValidateName(cfg.Name); err != nil {
+	if err := validateRequiredName("agent", cfg.Name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
 
@@ -341,7 +348,7 @@ func agentsWithoutObserverRole(agents []AgentConfig, agentName string) ([]AgentC
 // SetManager sets or clears manager agent for a team. Empty string clears manager.
 func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 	if managerAgent != "" {
-		if err := validation.ValidateName(managerAgent); err != nil {
+		if err := validateRequiredName("manager agent", managerAgent); err != nil {
 			return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
 		}
 	}
@@ -380,7 +387,7 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 // this agent held it. The observer Role is what the hub's IsObserver gate and
 // broadcastRoleLookup read. Copy-on-write so concurrent readers don't race.
 func (s *Store) SetObserver(teamID, name string) (Team, error) {
-	if err := validation.ValidateName(name); err != nil {
+	if err := validateRequiredName("agent", name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
 

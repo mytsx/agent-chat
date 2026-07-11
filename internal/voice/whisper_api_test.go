@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,29 @@ func TestWhisperTranscribeErrorStatus(t *testing.T) {
 
 	if _, err := NewWhisperClient("bad").Transcribe(context.Background(), []byte("x")); err == nil {
 		t.Fatal("expected error on 401")
+	}
+}
+
+func TestWhisperTranscribeErrorStatusTruncatesBody(t *testing.T) {
+	tooLarge := strings.Repeat("x", maxWhisperErrorBodyBytes+128)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, tooLarge)
+	}))
+	defer srv.Close()
+	old := whisperEndpoint
+	whisperEndpoint = srv.URL
+	defer func() { whisperEndpoint = old }()
+
+	_, err := NewWhisperClient("bad").Transcribe(context.Background(), []byte("x"))
+	if err == nil {
+		t.Fatal("expected error on 502")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "…") {
+		t.Fatalf("expected truncated error body to include ellipsis, got %d-byte error", len(msg))
+	}
+	if strings.Contains(msg, strings.Repeat("x", maxWhisperErrorBodyBytes+1)) {
+		t.Fatalf("error body was not truncated: %d-byte error", len(msg))
 	}
 }

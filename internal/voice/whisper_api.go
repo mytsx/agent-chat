@@ -15,6 +15,8 @@ import (
 // can point it at an httptest server.
 var whisperEndpoint = "https://api.openai.com/v1/audio/transcriptions"
 
+const maxWhisperErrorBodyBytes = 4096
+
 // WhisperClient calls OpenAI's /v1/audio/transcriptions with a fixed Turkish
 // language hint. Implements Transcriber.
 type WhisperClient struct {
@@ -62,7 +64,10 @@ func (c *WhisperClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, err := readWhisperResponseBody(resp)
+	if err != nil {
+		return "", fmt.Errorf("⚠️ Whisper yanıtı okunamadı: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("⚠️ Whisper API hatası (%d): %s", resp.StatusCode, string(data))
 	}
@@ -73,4 +78,15 @@ func (c *WhisperClient) Transcribe(ctx context.Context, wav []byte) (string, err
 		return "", fmt.Errorf("⚠️ Whisper yanıtı çözümlenemedi: %w", err)
 	}
 	return out.Text, nil
+}
+
+func readWhisperResponseBody(resp *http.Response) ([]byte, error) {
+	if resp.StatusCode == http.StatusOK {
+		return io.ReadAll(resp.Body)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWhisperErrorBodyBytes+1))
+	if len(data) > maxWhisperErrorBodyBytes {
+		data = append(data[:maxWhisperErrorBodyBytes], []byte("…")...)
+	}
+	return data, err
 }

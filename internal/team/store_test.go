@@ -282,6 +282,51 @@ func TestCreateRejectsCaseInsensitiveDuplicateTeamName(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsBlankRequiredNames(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create TeamA failed: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"create blank team", func() error {
+			_, err := s.Create("", "2x2", nil)
+			return err
+		}},
+		{"create whitespace team", func() error {
+			_, err := s.Create("   ", "2x2", nil)
+			return err
+		}},
+		{"update whitespace team", func() error {
+			_, err := s.Update(tm.ID, "	", "2x2", nil)
+			return err
+		}},
+		{"upsert blank agent", func() error {
+			_, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "", CLIType: "claude"})
+			return err
+		}},
+		{"set whitespace manager", func() error {
+			_, err := s.SetManager(tm.ID, "  ")
+			return err
+		}},
+		{"set blank observer", func() error {
+			_, err := s.SetObserver(tm.ID, "")
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.fn(); err == nil {
+				t.Fatal("expected blank required name to be rejected")
+			}
+		})
+	}
+}
+
 func TestCreateReportsChatDirFailureAndDoesNotPersistTeam(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "rooms"), []byte("not a directory"), 0o644); err != nil {

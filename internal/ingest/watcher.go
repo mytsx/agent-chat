@@ -330,7 +330,6 @@ func (m *Manager) StopAll() {
 	m.mu.Lock()
 	all := m.sessions
 	m.sessions = make(map[string]*session)
-	m.claims = make(map[string]string)
 	m.mu.Unlock()
 	for _, s := range all {
 		s.stop()

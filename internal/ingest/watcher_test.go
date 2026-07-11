@@ -263,6 +263,31 @@ func (a *blockingAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMe
 	return nil, cur, nil
 }
 
+type claimCheckingAdapter struct {
+	path       string
+	checkPath  string
+	checked    chan bool
+	allowParse chan struct{}
+}
+
+func (a *claimCheckingAdapter) DiscoverFile(_ string, _ int64, isClaimed func(string) bool) (string, error) {
+	if a.checked != nil {
+		claimed := isClaimed(a.checkPath)
+		select {
+		case a.checked <- claimed:
+		default:
+		}
+	}
+	return a.path, nil
+}
+func (a *claimCheckingAdapter) SessionID(string) string { return "" }
+func (a *claimCheckingAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
+	if a.allowParse != nil {
+		<-a.allowParse
+	}
+	return nil, cur, nil
+}
+
 // StopSession triggers a final drain before the old watcher exits. The watcher
 // must keep holding its file claim during that drain so a same-file resume cannot
 // start ingesting the transcript concurrently under a second watcher.
@@ -303,6 +328,100 @@ func TestStopSession_HoldsClaimDuringFinalDrain(t *testing.T) {
 	}
 	if m.isClaimedByOther("other", "events.jsonl") {
 		t.Fatal("claim was not released after final drain finished")
+	}
+}
+
+// StopAll must preserve existing file claims until stopped watchers finish their
+// final drains. Clearing claims before cancellation lets a sibling same-cwd
+// watcher choose another session's already-claimed transcript during shutdown and
+// miss its own final file for that drain.
+func TestStopAll_PreservesClaimsDuringFinalDrains(t *testing.T) {
+	m := New()
+	owner := &session{id: "owner", cancel: make(chan struct{}), done: make(chan struct{}), fp: newFingerprintStore()}
+	sibling := &session{id: "sibling", cancel: make(chan struct{}), done: make(chan struct{}), fp: newFingerprintStore()}
+	m.mu.Lock()
+	m.sessions[owner.id] = owner
+	m.sessions[sibling.id] = sibling
+	m.claims["owned.jsonl"] = owner.id
+	m.mu.Unlock()
+
+	ownerAdapter := &claimCheckingAdapter{
+		path:       "owned.jsonl",
+		allowParse: make(chan struct{}),
+	}
+	siblingAdapter := &claimCheckingAdapter{
+		path:      "sibling.jsonl",
+		checkPath: "owned.jsonl",
+		checked:   make(chan bool, 1),
+	}
+	go m.run(owner, ownerAdapter, "cwd", 0, func() bool { return false }, nil, func(string, string) bool { return true }, nil, nil)
+	go m.run(sibling, siblingAdapter, "cwd", 0, func() bool { return false }, nil, func(string, string) bool { return true }, nil, nil)
+
+	stopDone := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(stopDone)
+	}()
+
+	select {
+	case claimed := <-siblingAdapter.checked:
+		if !claimed {
+			close(ownerAdapter.allowParse)
+			t.Fatal("StopAll cleared existing claims before sibling final drain discovery")
+		}
+	case <-time.After(2 * time.Second):
+		close(ownerAdapter.allowParse)
+		t.Fatal("sibling final drain did not check existing claim")
+	}
+	close(ownerAdapter.allowParse)
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopAll did not return after final drains completed")
+	}
+	if m.isClaimedByOther("other", "owned.jsonl") || m.isClaimedByOther("other", "sibling.jsonl") {
+		t.Fatal("StopAll must clean up claims after final drains complete")
+	}
+}
+
+// If StopAll reaches its bounded wait before a watcher finishes draining, the
+// timed-out watcher must still own its claim until run() exits and calls finish().
+func TestStopAll_LeavesTimedOutClaimUntilFinalDrainCompletes(t *testing.T) {
+	m := New()
+	ad := &blockingAdapter{
+		path:         "events.jsonl",
+		parseStarted: make(chan struct{}),
+		allowParse:   make(chan struct{}),
+	}
+	m.StartSession("s1", ad, "cwd", 0,
+		func() bool { return false }, nil, func(string, string) bool { return true }, nil, nil)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !m.isClaimedByOther("other", "events.jsonl") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.isClaimedByOther("other", "events.jsonl") {
+		t.Fatal("s1 should have claimed events.jsonl before StopAll")
+	}
+
+	start := time.Now()
+	m.StopAll()
+	if time.Since(start) < stopDrainBudget/2 {
+		close(ad.allowParse)
+		t.Fatal("StopAll returned before waiting for the blocked final drain")
+	}
+	if !m.isClaimedByOther("other", "events.jsonl") {
+		close(ad.allowParse)
+		t.Fatal("StopAll released a timed-out final-drain claim before the watcher finished")
+	}
+
+	close(ad.allowParse)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && m.isClaimedByOther("other", "events.jsonl") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if m.isClaimedByOther("other", "events.jsonl") {
+		t.Fatal("claim was not released after timed-out final drain eventually finished")
 	}
 }
 
