@@ -117,14 +117,10 @@ func (s *Store) Touch(sessionID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.records[sessionID]; ok {
-		previous := r
+	s.updateExistingRecord(sessionID, func(r Record) (Record, bool) {
 		r.LastSeen = s.now()
-		s.records[sessionID] = r
-		if !s.save() {
-			s.records[sessionID] = previous
-		}
-	}
+		return r, true
+	})
 }
 
 // TouchAt sets LastSeen to an EXPLICIT time (unix seconds) for a known session, but
@@ -137,13 +133,27 @@ func (s *Store) TouchAt(sessionID string, t float64) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.records[sessionID]; ok && t > r.LastSeen {
-		previous := r
-		r.LastSeen = t
-		s.records[sessionID] = r
-		if !s.save() {
-			s.records[sessionID] = previous
+	s.updateExistingRecord(sessionID, func(r Record) (Record, bool) {
+		if t <= r.LastSeen {
+			return r, false
 		}
+		r.LastSeen = t
+		return r, true
+	})
+}
+
+func (s *Store) updateExistingRecord(sessionID string, update func(Record) (Record, bool)) {
+	previous, ok := s.records[sessionID]
+	if !ok {
+		return
+	}
+	updated, changed := update(previous)
+	if !changed {
+		return
+	}
+	s.records[sessionID] = updated
+	if !s.save() {
+		s.records[sessionID] = previous
 	}
 }
 
