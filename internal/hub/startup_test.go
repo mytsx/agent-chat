@@ -30,3 +30,14 @@ func TestRunFailsWhenHubPortCannotBeWritten(t *testing.T) {
 		t.Fatalf("Port() = %d after startup failure, want listener cleaned up", got)
 	}
 }
+
+func TestShutdownIsIdempotentBeforeRun(t *testing.T) {
+	t.Parallel()
+
+	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+
+	// Shutdown can be reached from multiple lifecycle paths; repeated calls must
+	// be a no-op rather than panicking on a second close(h.done).
+	h.Shutdown()
+	h.Shutdown()
+}

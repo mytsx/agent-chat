@@ -243,6 +243,69 @@ func TestStopAndWait_StopsAndReleasesClaim(t *testing.T) {
 	}
 }
 
+type blockingAdapter struct {
+	path         string
+	parseStarted chan struct{}
+	allowParse   chan struct{}
+}
+
+func (a *blockingAdapter) DiscoverFile(string, int64, func(string) bool) (string, error) {
+	return a.path, nil
+}
+func (a *blockingAdapter) SessionID(string) string { return "" }
+func (a *blockingAdapter) ParseNewUserMessages(_ string, cur Cursor) ([]ParsedMessage, Cursor, error) {
+	select {
+	case <-a.parseStarted:
+	default:
+		close(a.parseStarted)
+	}
+	<-a.allowParse
+	return nil, cur, nil
+}
+
+// StopSession triggers a final drain before the old watcher exits. The watcher
+// must keep holding its file claim during that drain so a same-file resume cannot
+// start ingesting the transcript concurrently under a second watcher.
+func TestStopSession_HoldsClaimDuringFinalDrain(t *testing.T) {
+	m := New()
+	ad := &blockingAdapter{
+		path:         "events.jsonl",
+		parseStarted: make(chan struct{}),
+		allowParse:   make(chan struct{}),
+	}
+	m.StartSession("s1", ad, "cwd", 0,
+		func() bool { return false }, nil, func(string, string) bool { return true }, nil, nil)
+
+	// Wait for discovery + claim without allowing a regular tick parse.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !m.isClaimedByOther("other", "events.jsonl") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.isClaimedByOther("other", "events.jsonl") {
+		t.Fatal("s1 should have claimed events.jsonl before StopSession")
+	}
+
+	m.StopSession("s1")
+	select {
+	case <-ad.parseStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("final drain did not start")
+	}
+	if !m.isClaimedByOther("other", "events.jsonl") {
+		close(ad.allowParse)
+		t.Fatal("StopSession released the file claim before the final drain finished")
+	}
+
+	close(ad.allowParse)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && m.isClaimedByOther("other", "events.jsonl") {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if m.isClaimedByOther("other", "events.jsonl") {
+		t.Fatal("claim was not released after final drain finished")
+	}
+}
+
 // StopAndWait on an unknown/already-finished session returns immediately and never
 // blocks on a missing done channel (#40).
 func TestStopAndWait_UnknownSessionNoOp(t *testing.T) {

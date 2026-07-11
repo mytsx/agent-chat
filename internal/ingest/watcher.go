@@ -269,7 +269,8 @@ func (m *Manager) Unmute(sessionID string) {
 	}
 }
 
-// StopSession stops and forgets a terminal's watcher and releases its file claim.
+// StopSession stops and forgets a terminal's watcher. Its file claim is released
+// after the watcher finishes its final drain.
 func (m *Manager) StopSession(sessionID string) {
 	if m == nil {
 		return
@@ -277,9 +278,12 @@ func (m *Manager) StopSession(sessionID string) {
 	m.mu.Lock()
 	s := m.sessions[sessionID]
 	delete(m.sessions, sessionID)
-	m.releaseClaims(sessionID)
 	m.mu.Unlock()
 	if s != nil {
+		// Keep this session's file claim until run() finishes its final drain and
+		// calls finish(). Releasing it here lets a same-file resume watcher claim
+		// the transcript while the old watcher is still parsing its last flush,
+		// which can duplicate or misattribute the just-written prompt (#40/#65).
 		close(s.cancel)
 	}
 }
@@ -301,7 +305,7 @@ func (m *Manager) StopAndWait(sessionID string, timeout time.Duration) {
 	if s == nil {
 		return // already finished (or never started) — nothing to drain
 	}
-	m.StopSession(sessionID) // closes cancel + releases the claim (safe-once via map delete)
+	m.StopSession(sessionID) // closes cancel; finish() releases the claim after final drain
 	select {
 	case <-s.done:
 	case <-time.After(timeout):

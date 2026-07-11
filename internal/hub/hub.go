@@ -86,6 +86,9 @@ type Hub struct {
 	inflightRequests sync.WaitGroup
 
 	listener net.Listener
+	// shutdownOnce makes Shutdown idempotent. App lifecycle hooks and tests may
+	// call it from multiple paths; closing done twice would otherwise panic.
+	shutdownOnce sync.Once
 }
 
 // New creates a new Hub.
@@ -164,6 +167,10 @@ func (h *Hub) Port() int {
 
 // Shutdown stops the hub gracefully.
 func (h *Hub) Shutdown() {
+	h.shutdownOnce.Do(h.shutdown)
+}
+
+func (h *Hub) shutdown() {
 	close(h.done)
 
 	// Stop accepting new connections, then stop handling new requests and wait
