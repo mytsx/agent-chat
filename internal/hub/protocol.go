@@ -513,36 +513,8 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 	roomState := h.getOrCreateRoom(room)
 
-	// Only the active manager or authorized desktop app can read all messages.
-	if c.agentName == "" {
-		if !c.isDesktopAuthorized() {
-			c.sendError(req.ID, req.Type, "önce yetkili desktop identify veya join_room çağırmalısınız")
-			return
-		}
-	} else {
-		if c.joinedRoom != room {
-			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
-			return
-		}
-		activeManager := roomState.GetActiveManager()
-		isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
-		// Observer agents (#17) get read-only access to the full transcript. Authorize
-		// from the DESKTOP allow-list (isConfiguredObserver), not the room roster: this
-		// is revocable — removing an agent from the observer set via set_observers
-		// immediately drops its read-all access even while it stays connected.
-		isObserver := h.isConfiguredObserver(room, c.agentName)
-		if !isManager && !isObserver {
-			c.sendError(req.ID, req.Type, "yalnızca aktif manager veya observer tüm mesajları okuyabilir")
-			return
-		}
-		if isManager {
-			roomState.TouchManagerHeartbeat(c.agentName)
-		} else {
-			// Refresh the observer's last_seen so a read_all-only poller is not
-			// stale-evicted (the read path itself doesn't touch last_seen). Without
-			// this the observer would lose read_all access after staleTimeout.
-			roomState.TouchAgentLastSeen(c.agentName)
-		}
+	if !h.authorizeReadAllMessages(c, req, room, roomState) {
+		return
 	}
 	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
 
@@ -564,6 +536,43 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	}
 
 	c.sendText(req.ID, req.Type, sb.String())
+}
+
+func (h *Hub) authorizeReadAllMessages(c *Client, req types.Request, room string, roomState *RoomState) bool {
+	// Only the active manager or authorized desktop app can read all messages.
+	if c.agentName == "" {
+		if !c.isDesktopAuthorized() {
+			c.sendError(req.ID, req.Type, "önce yetkili desktop identify veya join_room çağırmalısınız")
+			return false
+		}
+		return true
+	}
+
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s", c.joinedRoom))
+		return false
+	}
+
+	activeManager := roomState.GetActiveManager()
+	isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
+	// Observer agents (#17) get read-only access to the full transcript. Authorize
+	// from the DESKTOP allow-list (isConfiguredObserver), not the room roster: this
+	// is revocable — removing an agent from the observer set via set_observers
+	// immediately drops its read-all access even while it stays connected.
+	isObserver := h.isConfiguredObserver(room, c.agentName)
+	if !isManager && !isObserver {
+		c.sendError(req.ID, req.Type, "yalnızca aktif manager veya observer tüm mesajları okuyabilir")
+		return false
+	}
+	if isManager {
+		roomState.TouchManagerHeartbeat(c.agentName)
+	} else {
+		// Refresh the observer's last_seen so a read_all-only poller is not
+		// stale-evicted (the read path itself doesn't touch last_seen). Without
+		// this the observer would lose read_all access after staleTimeout.
+		roomState.TouchAgentLastSeen(c.agentName)
+	}
+	return true
 }
 
 func writeAgentMessageLine(sb *strings.Builder, msg types.Message) {

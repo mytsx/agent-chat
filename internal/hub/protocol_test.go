@@ -111,6 +111,98 @@ func TestClientRequireJoinedRoom(t *testing.T) {
 	}
 }
 
+func TestAuthorizeReadAllMessages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		setup       func(h *Hub, c *Client, roomState *RoomState)
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "anonymous non desktop rejected",
+			wantError: "önce yetkili desktop identify veya join_room çağırmalısınız",
+		},
+		{
+			name: "authorized desktop allowed",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.clientType = "desktop"
+				c.desktopAuthed = true
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "joined wrong room rejected",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.agentName = "alice"
+				c.joinedRoom = "other"
+			},
+			wantError: "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: other",
+		},
+		{
+			name: "joined non manager non observer rejected",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.agentName = "alice"
+				c.joinedRoom = "r1"
+			},
+			wantError: "yalnızca aktif manager veya observer tüm mesajları okuyabilir",
+		},
+		{
+			name: "active manager allowed",
+			setup: func(_ *Hub, c *Client, roomState *RoomState) {
+				c.agentName = "manager"
+				c.joinedRoom = "r1"
+				if _, _, err := roomState.Join("manager", "manager"); err != nil {
+					panic(err)
+				}
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "configured observer allowed",
+			setup: func(h *Hub, c *Client, _ *RoomState) {
+				c.agentName = "observer"
+				c.joinedRoom = "r1"
+				h.setConfiguredObservers("r1", []string{"observer"})
+			},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h, c := newTestHubClient()
+			roomState := h.getOrCreateRoom("r1")
+			if tt.setup != nil {
+				tt.setup(h, c, roomState)
+			}
+
+			req := types.Request{ID: "req-1", Type: "get_all_messages"}
+			allowed := h.authorizeReadAllMessages(c, req, "r1", roomState)
+			if allowed != tt.wantAllowed {
+				t.Fatalf("authorizeReadAllMessages() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "get_all_messages")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestHandleSendMessage_BeforeJoinRejected(t *testing.T) {
 	h, c := newTestHubClient()
 	req := types.Request{
