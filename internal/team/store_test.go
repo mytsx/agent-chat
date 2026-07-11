@@ -305,6 +305,14 @@ func TestStoreRejectsBlankRequiredNames(t *testing.T) {
 			_, err := s.Update(tm.ID, "	", "2x2", nil)
 			return err
 		}},
+		{"create blank agent config", func() error {
+			_, err := s.Create("TeamWithBlankAgent", "2x2", []AgentConfig{{Name: ""}})
+			return err
+		}},
+		{"update blank agent config", func() error {
+			_, err := s.Update(tm.ID, "TeamA", "2x2", []AgentConfig{{Name: ""}})
+			return err
+		}},
 		{"upsert blank agent", func() error {
 			_, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "", CLIType: "claude"})
 			return err

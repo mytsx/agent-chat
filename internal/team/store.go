@@ -79,6 +79,15 @@ func validateRequiredName(kind, name string) error {
 	return validation.ValidateName(name)
 }
 
+func validateAgentConfigs(agents []AgentConfig) error {
+	for _, agent := range agents {
+		if err := validateRequiredName("agent", agent.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Store manages team/tab persistence
 type Store struct {
 	mu       sync.RWMutex
@@ -184,6 +193,9 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	if err := validateRequiredName("team", name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
+	if err := validateAgentConfigs(agents); err != nil {
+		return Team{}, fmt.Errorf("invalid agent config: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -229,6 +241,9 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
 	if err := validateRequiredName("team", name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
+	}
+	if err := validateAgentConfigs(agents); err != nil {
+		return Team{}, fmt.Errorf("invalid agent config: %w", err)
 	}
 
 	s.mu.Lock()

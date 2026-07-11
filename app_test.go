@@ -73,6 +73,20 @@ func TestListAgentSessions_CaseInsensitiveAndFileMissing(t *testing.T) {
 	}
 }
 
+func TestSessionHistoryBindings_NilStoresAreSafe(t *testing.T) {
+	a := &App{}
+
+	if got := a.roomForTeam("missing-team"); got != "default" {
+		t.Fatalf("roomForTeam with nil teamStore = %q, want default", got)
+	}
+	if got := a.ListKnownAgents("missing-team"); len(got) != 0 {
+		t.Fatalf("ListKnownAgents with nil stores = %v, want empty", got)
+	}
+	if got := a.ListAgentSessions("missing-team", "alice"); len(got) != 0 {
+		t.Fatalf("ListAgentSessions with nil stores = %v, want empty", got)
+	}
+}
+
 // recordingInject returns an inject func that records every call and optionally
 // fails for specific session IDs. broadcastToSessions injects concurrently, so
 // the calls slice is mutex-guarded against the racing appends.

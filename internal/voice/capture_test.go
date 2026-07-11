@@ -50,6 +50,27 @@ func TestResolveFFmpegReturnsExistingExecutable(t *testing.T) {
 	}
 }
 
+func TestResolveFFmpegSkipsNonExecutableFallback(t *testing.T) {
+	dir := t.TempDir()
+	nonExecutable := filepath.Join(dir, "not-executable-ffmpeg")
+	executable := filepath.Join(dir, "executable-ffmpeg")
+	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write non-executable fallback: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable fallback: %v", err)
+	}
+
+	oldPaths := commonFFmpegPaths
+	commonFFmpegPaths = []string{nonExecutable, executable}
+	t.Cleanup(func() { commonFFmpegPaths = oldPaths })
+	t.Setenv("PATH", dir)
+
+	if got := resolveFFmpeg(); got != executable {
+		t.Fatalf("resolveFFmpeg() = %q, want executable fallback %q", got, executable)
+	}
+}
+
 func TestErrFFmpegNotFoundHasInstallHint(t *testing.T) {
 	if !strings.Contains(ErrFFmpegNotFound.Error(), "brew install ffmpeg") {
 		t.Errorf("error should hint install: %v", ErrFFmpegNotFound)

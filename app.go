@@ -1715,7 +1715,7 @@ func (a *App) drainPromptLogs(timeout time.Duration) {
 // room — matching CreateTerminal's derivation and composeAgentPrompt's summary
 // lookup so logged prompts land in the same room as agent traffic.
 func (a *App) roomForTeam(teamID string) string {
-	if teamID != "" {
+	if teamID != "" && a.teamStore != nil {
 		if t, err := a.teamStore.Get(teamID); err == nil && t.Name != "" {
 			return t.Name
 		}
@@ -2823,12 +2823,14 @@ func (a *App) ListKnownAgents(teamID string) []string {
 			out = append(out, n)
 		}
 	}
-	if t, err := a.teamStore.Get(teamID); err == nil {
-		for _, ag := range t.Agents {
-			key := strings.ToLower(ag.Name)
-			if ag.Name != "" && !seen[key] {
-				seen[key] = true
-				out = append(out, ag.Name)
+	if a.teamStore != nil {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			for _, ag := range t.Agents {
+				key := strings.ToLower(ag.Name)
+				if ag.Name != "" && !seen[key] {
+					seen[key] = true
+					out = append(out, ag.Name)
+				}
 			}
 		}
 	}

@@ -39,7 +39,7 @@ func resolveFFmpeg() string {
 		return p
 	}
 	for _, p := range commonFFmpegPaths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode().Perm()&0111 != 0 {
 			return p
 		}
 	}
