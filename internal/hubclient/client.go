@@ -128,6 +128,14 @@ func ensureSuccess(operation string, resp *types.Response) error {
 	return fmt.Errorf("%s failed: %s", operation, resp.Error)
 }
 
+func (c *HubClient) sendExpectSuccess(operation string, req types.Request) error {
+	resp, err := c.Send(req)
+	if err != nil {
+		return err
+	}
+	return ensureSuccess(operation, resp)
+}
+
 // Send sends a request and waits for a response (synchronous RPC).
 func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	if req.ID == "" {
@@ -250,11 +258,7 @@ func (c *HubClient) Identify(clientType, agentName, room, authToken string) erro
 		"room":        room,
 		"auth_token":  authToken,
 	})
-	resp, err := c.Send(types.Request{Type: "identify", Data: data})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("identify", resp)
+	return c.sendExpectSuccess("identify", types.Request{Type: "identify", Data: data})
 }
 
 // Subscribe subscribes to room events.
@@ -267,31 +271,19 @@ func (c *HubClient) Subscribe(rooms []string) error {
 // SetManager configures the allowed manager agent for a room.
 func (c *HubClient) SetManager(room, managerAgent string) error {
 	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
-	resp, err := c.Send(types.Request{Type: "set_manager", Room: room, Data: data})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("set_manager", resp)
+	return c.sendExpectSuccess("set_manager", types.Request{Type: "set_manager", Room: room, Data: data})
 }
 
 // SetObservers configures the desktop-authorized observer set for a room (#17).
 // The hub rejects join_room with role "observer" for any agent not in this set.
 func (c *HubClient) SetObservers(room string, observers []string) error {
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
-	resp, err := c.Send(types.Request{Type: "set_observers", Room: room, Data: data})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("set_observers", resp)
+	return c.sendExpectSuccess("set_observers", types.Request{Type: "set_observers", Room: room, Data: data})
 }
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
 func (c *HubClient) DeleteRoom(room string) error {
-	resp, err := c.Send(types.Request{Type: "delete_room", Room: room})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("delete_room", resp)
+	return c.sendExpectSuccess("delete_room", types.Request{Type: "delete_room", Room: room})
 }
 
 // JoinRoom joins a room.
@@ -353,11 +345,7 @@ func logMessageData(to, content, timestamp string) json.RawMessage {
 // supplies the recipient ("all" or an agent name), the prompt content, and the
 // delivery-moment timestamp (#58 — pass "" to let the hub stamp it).
 func (c *HubClient) LogMessage(room, to, content, timestamp string) error {
-	resp, err := c.Send(types.Request{Type: "log_message", Room: room, Data: logMessageData(to, content, timestamp)})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("log_message", resp)
+	return c.sendExpectSuccess("log_message", types.Request{Type: "log_message", Room: room, Data: logMessageData(to, content, timestamp)})
 }
 
 // ListAgents lists agents in a room.
@@ -381,11 +369,7 @@ func (c *HubClient) ClearRoom(room string) (*types.Response, error) {
 // synchronously on the hub. Returns once the hub has written them (buffered to
 // the OS, consistent with the hub's other persistence — not fsync'd) or on error.
 func (c *HubClient) ArchiveRoom(room string) error {
-	resp, err := c.Send(types.Request{Type: "archive_room", Room: room})
-	if err != nil {
-		return err
-	}
-	return ensureSuccess("archive_room", resp)
+	return c.sendExpectSuccess("archive_room", types.Request{Type: "archive_room", Room: room})
 }
 
 // SaveSession writes an immutable per-session snapshot of a room's full state
