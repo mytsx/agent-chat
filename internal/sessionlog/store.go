@@ -29,7 +29,7 @@ type Record struct {
 
 // Store is the atomic JSON-backed session-history index. Safe for concurrent use.
 type Store struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	filePath string
 	records  map[string]Record // keyed by SessionID
 	now      func() float64
@@ -164,8 +164,8 @@ func (s *Store) ListSessions(room, agent string) []Record {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var out []Record
 	for _, r := range s.records {
 		// Case-insensitive: UpsertAgent preserves the config casing while Record stores
@@ -185,8 +185,8 @@ func (s *Store) ListAgents(room string) []string {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	// Group case-insensitively (see ListSessions); the newest-seen casing is the
 	// display name so "Alice"/"alice" collapse to one entry (Codex P2).
 	last := map[string]float64{}
@@ -248,8 +248,8 @@ func (s *Store) Get(sessionID string) (Record, bool) {
 	if s == nil {
 		return Record{}, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	r, ok := s.records[sessionID]
 	return r, ok
 }
