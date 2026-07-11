@@ -228,6 +228,21 @@ func TestUnregisterLastAgentRemovesChatDir(t *testing.T) {
 	}
 }
 
+func TestUnregisterAgentSessionIgnoresStaleSession(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-old")
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-new")
+
+	o.UnregisterAgentSession("/rooms/team1", "agent-1", "sess-old")
+
+	o.mu.Lock()
+	got := o.agentSessions["/rooms/team1"]["agent-1"]
+	o.mu.Unlock()
+	if got != "sess-new" {
+		t.Fatalf("stale session unregister removed current mapping: got %q", got)
+	}
+}
+
 // ── ProcessMessage routing tests ──
 
 func TestProcessMessage_SystemSkipped(t *testing.T) {

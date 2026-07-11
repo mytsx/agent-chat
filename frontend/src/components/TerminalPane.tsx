@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -258,6 +258,28 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     finishStop();
   };
 
+  const handleVoiceKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    if (e.repeat) return;
+    startVoice();
+  };
+
+  const handleVoiceKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    stopVoice();
+  };
+
+  const voiceButtonLabel =
+    voiceState === "recording"
+      ? "Sesli prompt kaydediliyor — bırakınca yazılır"
+      : voiceState === "transcribing"
+      ? "Sesli prompt çevriliyor"
+      : voiceError
+      ? `Sesli prompt hatası: ${voiceError}`
+      : "Sesli prompt — basılı tutarak konuş";
+
   return (
     <div className="terminal-pane">
       <div className="terminal-header">
@@ -278,7 +300,11 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
             }}
             onMouseUp={stopVoice}
             onMouseLeave={stopVoice}
-            aria-label="Sesli prompt — bas-konuş"
+            onKeyDown={handleVoiceKeyDown}
+            onKeyUp={handleVoiceKeyUp}
+            onBlur={stopVoice}
+            aria-label={voiceButtonLabel}
+            aria-pressed={voiceState === "recording"}
             title={
               voiceState === "recording"
                 ? "Kaydediliyor… bırakınca yazılır"

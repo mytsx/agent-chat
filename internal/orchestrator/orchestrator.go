@@ -278,10 +278,28 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, ptymgr.ShortID(sessionID))
 }
 
-// UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state
+// UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state.
 func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.unregisterAgentLocked(chatDir, agentName)
+}
+
+// UnregisterAgentSession removes an agent mapping only when it still points to
+// sessionID. Use this from PTY/session close paths so closing a stale terminal
+// cannot unregister a newer restarted session for the same room/agent.
+func (o *Orchestrator) UnregisterAgentSession(chatDir, agentName, sessionID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if sessions, ok := o.agentSessions[chatDir]; ok && sessions[agentName] != sessionID {
+		return
+	}
+	o.unregisterAgentLocked(chatDir, agentName)
+}
+
+// unregisterAgentLocked removes an agent's PTY session mapping and cleans up
+// cooldown/deferral state. Caller MUST hold o.mu.
+func (o *Orchestrator) unregisterAgentLocked(chatDir, agentName string) {
 	if sessions, ok := o.agentSessions[chatDir]; ok {
 		delete(sessions, agentName)
 		if len(sessions) == 0 {

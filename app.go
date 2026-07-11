@@ -1905,7 +1905,7 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 			if teamName == "" {
 				teamName = "default"
 			}
-			a.orchestrator.UnregisterAgent(teamName, agentName)
+			a.orchestrator.UnregisterAgentSession(teamName, agentName, sessionID)
 		}
 	}
 
