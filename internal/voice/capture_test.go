@@ -1,9 +1,13 @@
 package voice
 
 import (
+	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFFmpegArgsAudioOnly16kMono(t *testing.T) {
@@ -50,4 +54,73 @@ func TestErrFFmpegNotFoundHasInstallHint(t *testing.T) {
 	if !strings.Contains(ErrFFmpegNotFound.Error(), "brew install ffmpeg") {
 		t.Errorf("error should hint install: %v", ErrFFmpegNotFound)
 	}
+}
+
+func TestFFmpegRecorderStopIsSingleUseAndCleansTempWAV(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake is for Unix-like platforms")
+	}
+
+	dir := t.TempDir()
+	fakeFFmpeg := filepath.Join(dir, "fake-ffmpeg.sh")
+	readyPath := filepath.Join(dir, "ready")
+	outPath := filepath.Join(dir, "capture.wav")
+	script := `#!/bin/sh
+ready=""
+out=""
+prev=""
+for arg do
+  if [ "$prev" = "-i" ]; then
+    ready="$arg"
+  fi
+  prev="$arg"
+  out="$arg"
+done
+: > "$ready"
+trap 'printf "RIFF12345678901234567890123456789012345678901234567890" > "$out"; exit 0' INT TERM
+while :; do
+  sleep 1
+done
+`
+	if err := os.WriteFile(fakeFFmpeg, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+
+	rec := &ffmpegRecorder{bin: fakeFFmpeg, deviceSpec: readyPath, outPath: outPath}
+	if err := rec.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForFile(t, readyPath)
+
+	wav, err := rec.Stop()
+	if err != nil {
+		t.Fatalf("first Stop() error = %v", err)
+	}
+	if len(wav) <= 44 {
+		t.Fatalf("first Stop() returned %d bytes, want more than WAV header", len(wav))
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("temp WAV should be removed after Stop(); stat error = %v", err)
+	}
+
+	if _, err := rec.Stop(); err == nil || !strings.Contains(err.Error(), "zaten durduruldu") {
+		t.Fatalf("second Stop() error = %v, want already-stopped error", err)
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("second Stop() should not recreate temp WAV; stat error = %v", err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat ready file: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }

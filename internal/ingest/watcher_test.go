@@ -256,6 +256,27 @@ func TestStopAndWait_UnknownSessionNoOp(t *testing.T) {
 	}
 }
 
+// Shutdown drains are the last chance to ingest a prompt written just before the
+// terminal/app exits. They must attempt the parse+emit even if the regular tick
+// path is currently gated by hub readiness; otherwise a stale false ready check
+// can make StopAll exit without ever reading the final transcript content.
+func TestStopAll_FinalDrainBypassesReadyGate(t *testing.T) {
+	m := New()
+	ad := &fakeAdapter{batches: [][]ParsedMessage{{pm("son mesaj", 1)}}}
+	var mu sync.Mutex
+	var got []string
+	m.StartSession("s1", ad, "cwd", 0,
+		func() bool { return false }, nil, truthyEmit(&got, &mu), nil, nil)
+
+	m.StopAll()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "son mesaj" {
+		t.Fatalf("StopAll final drain emitted %v, want [son mesaj] despite ready=false", got)
+	}
+}
+
 // Two watchers in the same cwd must not both lock onto the same discovered file:
 // tryClaim is exclusive, and isClaimedByOther reports the lock to siblings (#65).
 func TestManager_ClaimsAreExclusive(t *testing.T) {

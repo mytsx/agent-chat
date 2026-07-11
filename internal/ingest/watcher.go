@@ -123,7 +123,7 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		}
 		return emit(content, ts)
 	}
-	discoverAndPoll := func() {
+	discoverAndPoll := func(forcePoll bool) {
 		// Discover + claim FIRST, regardless of hub state: claiming this terminal's
 		// file (so a sibling same-cwd watcher can't grab it) doesn't need the hub, and
 		// a muted observer watcher must claim even while the hub is down (#65).
@@ -160,10 +160,11 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 				cur = resume.Cur
 			}
 		}
-		// Gate only the poll/emit on hub readiness: don't advance the cursor (drop a
-		// prompt) while emits can't be delivered (#65). A muted watcher's em discards,
-		// so the gate just defers harmless no-op work.
-		if ready != nil && !ready() {
+		// Gate only regular tick poll/emit on hub readiness: don't advance the cursor
+		// (drop a prompt) while emits can't be delivered (#65). Final shutdown drains
+		// are the last chance to read flushed transcript content, so they still try;
+		// pollOnce keeps the cursor before a message if the emit itself fails.
+		if !forcePoll && ready != nil && !ready() {
 			return
 		}
 		cur = pollOnce(ad, path, cur, s.fp, em)
@@ -176,13 +177,13 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 			// on the way out, so the drain must DISCOVER the file too, not just poll an
 			// already-found one. The claim it may take is released right after by the
 			// deferred finish(), so there's no leak (#65 / Codex round-5).
-			discoverAndPoll()
+			discoverAndPoll(true)
 			return
 		case <-exited:
-			discoverAndPoll()
+			discoverAndPoll(true)
 			return
 		case <-ticker.C:
-			discoverAndPoll()
+			discoverAndPoll(false)
 		}
 	}
 }
