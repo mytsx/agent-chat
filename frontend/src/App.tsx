@@ -19,8 +19,8 @@ class ErrorBoundary extends Component<
 > {
   state = { error: null as string | null };
 
-  static getDerivedStateFromError(error: Error) {
-    return { error: error.message };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: errorToString(error) };
   }
 
   render() {
@@ -83,7 +83,7 @@ function AppContent() {
         if (!cancelled) setStartupError(null);
       } catch (e) {
         console.error("Failed to load teams:", e);
-        if (!cancelled) setStartupError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setStartupError(errorToString(e));
       }
       if (!cancelled) setReady(true);
     };

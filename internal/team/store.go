@@ -79,6 +79,20 @@ type Store struct {
 	teams    []Team
 }
 
+func cloneAgents(agents []AgentConfig) []AgentConfig {
+	if agents == nil {
+		return nil
+	}
+	cloned := make([]AgentConfig, len(agents))
+	copy(cloned, agents)
+	return cloned
+}
+
+func cloneTeam(t Team) Team {
+	t.Agents = cloneAgents(t.Agents)
+	return t
+}
+
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -136,7 +150,9 @@ func (s *Store) List() []Team {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Team, len(s.teams))
-	copy(result, s.teams)
+	for i, team := range s.teams {
+		result[i] = cloneTeam(team)
+	}
 	return result
 }
 
@@ -147,7 +163,7 @@ func (s *Store) Get(id string) (Team, error) {
 
 	for _, t := range s.teams {
 		if t.ID == id {
-			return t, nil
+			return cloneTeam(t), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -176,7 +192,7 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	t := Team{
 		ID:         id,
 		Name:       name,
-		Agents:     agents,
+		Agents:     cloneAgents(agents),
 		GridLayout: gridLayout,
 		ChatDir:    chatDir,
 		CreatedAt:  time.Now().Format(time.RFC3339),
@@ -192,7 +208,7 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	// Create chat directory
 	os.MkdirAll(chatDir, 0700)
 
-	return t, nil
+	return cloneTeam(t), nil
 }
 
 // Update updates a team
@@ -216,13 +232,13 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 			prev := s.teams[i]
 			s.teams[i].Name = name
 			s.teams[i].GridLayout = gridLayout
-			s.teams[i].Agents = agents
+			s.teams[i].Agents = cloneAgents(agents)
 
 			if err := s.save(); err != nil {
 				s.teams[i] = prev // roll back so memory matches disk
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -265,12 +281,11 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 				// reopens N agents (each → CreateTerminal → UpsertAgent); without this
 				// an unchanged batch would rewrite teams.json N times.
 				if existing == cfg {
-					return s.teams[i], nil
+					return cloneTeam(s.teams[i]), nil
 				}
-				// Copy-on-write: Get()/List() hand out a Team sharing this backing
-				// array, so mutate a fresh copy instead of the shared one to avoid a
-				// data race with concurrent readers (matches the whole-slice replace
-				// the Update method already does).
+				// Copy-on-write: mutate a fresh slice instead of the shared one so any
+				// stale in-process Team values cannot observe a partial update, and so
+				// concurrent readers never race with an in-place Agents mutation.
 				updated := make([]AgentConfig, len(prev))
 				copy(updated, prev)
 				updated[j] = cfg
@@ -279,7 +294,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 					s.teams[i].Agents = prev // roll back so memory matches disk
 					return Team{}, err
 				}
-				return s.teams[i], nil
+				return cloneTeam(s.teams[i]), nil
 			}
 		}
 		// Not found: append into a fresh slice (don't append in place — append may
@@ -292,7 +307,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 			s.teams[i].Agents = prev // roll back append
 			return Team{}, err
 		}
-		return s.teams[i], nil
+		return cloneTeam(s.teams[i]), nil
 	}
 	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
@@ -339,14 +354,14 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 			updatedAgents, agentsChanged := agentsWithoutObserverRole(t.Agents, managerAgent)
 			s.teams[i].Agents = updatedAgents
 			if prevMgr == managerAgent && !agentsChanged {
-				return s.teams[i], nil
+				return cloneTeam(s.teams[i]), nil
 			}
 			if err := s.save(); err != nil {
 				s.teams[i].ManagerAgent = prevMgr
 				s.teams[i].Agents = prevAgents
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -398,7 +413,7 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 			managerChanged = true
 		}
 		if !agentsChanged && !managerChanged {
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 
 		if err := s.save(); err != nil {
@@ -406,7 +421,7 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 			s.teams[i].ManagerAgent = prevMgr
 			return Team{}, err
 		}
-		return s.teams[i], nil
+		return cloneTeam(s.teams[i]), nil
 	}
 	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
@@ -455,7 +470,7 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 		if t.ID == id {
 			sanitized := sanitizeCharter(text)
 			if s.teams[i].CustomPrompt == sanitized {
-				return s.teams[i], nil // no-op: skip the disk write (matches UpsertAgent)
+				return cloneTeam(s.teams[i]), nil // no-op: skip the disk write (matches UpsertAgent)
 			}
 			prev := s.teams[i].CustomPrompt
 			s.teams[i].CustomPrompt = sanitized
@@ -463,7 +478,7 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 				s.teams[i].CustomPrompt = prev // roll back so memory matches disk
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)

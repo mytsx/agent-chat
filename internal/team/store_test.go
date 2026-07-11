@@ -219,6 +219,59 @@ func TestAgentConfigSerializationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTeamStoreDefensiveCopiesAgentSlices(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+
+	agents := []AgentConfig{{Name: "agent-a", Role: "writer"}}
+	tm, err := s.Create("TeamA", "2x2", agents)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	agents[0].Role = "mutated-after-create"
+	got, _ := s.Get(tm.ID)
+	if got.Agents[0].Role != "writer" {
+		t.Fatalf("Create retained caller-owned agents slice: %+v", got.Agents)
+	}
+	tm.Agents[0].Role = "mutated-create-result"
+	gotAfterCreateResultMutation, _ := s.Get(tm.ID)
+	if gotAfterCreateResultMutation.Agents[0].Role != "writer" {
+		t.Fatalf("Create returned the store's agents backing array: %+v", gotAfterCreateResultMutation.Agents)
+	}
+
+	got.Agents[0].Role = "mutated-get-result"
+	gotAgain, _ := s.Get(tm.ID)
+	if gotAgain.Agents[0].Role != "writer" {
+		t.Fatalf("Get exposed the store's agents backing array: %+v", gotAgain.Agents)
+	}
+
+	listed := s.List()
+	listed[0].Agents[0].Role = "mutated-list-result"
+	listedAgain := s.List()
+	if listedAgain[0].Agents[0].Role != "writer" {
+		t.Fatalf("List exposed the store's agents backing array: %+v", listedAgain[0].Agents)
+	}
+
+	updatedAgents := []AgentConfig{{Name: "agent-b", Role: "reviewer"}}
+	if _, err := s.Update(tm.ID, "TeamA", "2x2", updatedAgents); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	updatedAgents[0].Role = "mutated-after-update"
+	updated, _ := s.Get(tm.ID)
+	if updated.Agents[0].Role != "reviewer" {
+		t.Fatalf("Update retained caller-owned agents slice: %+v", updated.Agents)
+	}
+
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("reload NewStore failed: %v", err)
+	}
+	reloaded, _ := s2.Get(tm.ID)
+	if reloaded.Agents[0].Role != "reviewer" {
+		t.Fatalf("memory/disk diverged after external mutation: %+v", reloaded.Agents)
+	}
+}
+
 func TestCreateRejectsCaseInsensitiveDuplicateTeamName(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.Create("Alpha", "2x2", nil); err != nil {

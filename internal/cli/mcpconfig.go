@@ -144,7 +144,11 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) error {
 	// Read existing config or start fresh
 	config := make(map[string]any)
+	writeMode := os.FileMode(0644)
 	if data, err := os.ReadFile(configPath); err == nil {
+		if info, statErr := os.Stat(configPath); statErr == nil {
+			writeMode = info.Mode().Perm()
+		}
 		if err := json.Unmarshal(data, &config); err != nil {
 			backupPath := configPath + ".bak"
 			os.WriteFile(backupPath, data, 0644)
@@ -186,7 +190,7 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0644)
+	return os.WriteFile(configPath, out, writeMode)
 }
 
 // cleanProjectMCPOverrides removes "agent-chat" from all per-project mcpServers
