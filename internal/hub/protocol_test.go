@@ -111,6 +111,86 @@ func TestClientRequireJoinedRoom(t *testing.T) {
 	}
 }
 
+func TestClientRequireJoinedRoomOrDesktop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		agentName   string
+		joinedRoom  string
+		desktop     bool
+		room        string
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "anonymous non desktop rejected",
+			room:      "r1",
+			wantError: "önce join_room veya yetkili desktop identify çağırmalısınız",
+		},
+		{
+			name:        "authorized desktop allowed",
+			desktop:     true,
+			room:        "r1",
+			wantAllowed: true,
+		},
+		{
+			name:      "identified without joined room rejected",
+			agentName: "alice",
+			room:      "r1",
+			wantError: "yalnızca katıldığınız odanın özetini okuyabilirsiniz: ",
+		},
+		{
+			name:       "joined wrong room rejected",
+			agentName:  "alice",
+			joinedRoom: "r1",
+			room:       "r2",
+			wantError:  "yalnızca katıldığınız odanın özetini okuyabilirsiniz: r1",
+		},
+		{
+			name:        "joined room allowed",
+			agentName:   "alice",
+			joinedRoom:  "r1",
+			room:        "r1",
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, c := newTestHubClient()
+			c.agentName = tt.agentName
+			c.joinedRoom = tt.joinedRoom
+			if tt.desktop {
+				c.clientType = "desktop"
+				c.desktopAuthed = true
+			}
+			req := types.Request{ID: "req-1", Type: "read_summary"}
+
+			allowed := c.requireJoinedRoomOrDesktop(req, tt.room, "önce join_room veya yetkili desktop identify çağırmalısınız", "yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s")
+			if allowed != tt.wantAllowed {
+				t.Fatalf("requireJoinedRoomOrDesktop() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "read_summary")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestAuthorizeReadAllMessages(t *testing.T) {
 	t.Parallel()
 

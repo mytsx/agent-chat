@@ -148,6 +148,21 @@ func (c *Client) requireJoinedRoom(req types.Request, room, notJoinedMessage, wr
 	return true
 }
 
+func (c *Client) requireJoinedRoomOrDesktop(req types.Request, room, notAuthorizedMessage, wrongRoomFormat string) bool {
+	if c.agentName == "" {
+		if !c.isDesktopAuthorized() {
+			c.sendError(req.ID, req.Type, notAuthorizedMessage)
+			return false
+		}
+		return true
+	}
+	if c.joinedRoom != room {
+		c.sendError(req.ID, req.Type, fmt.Sprintf(wrongRoomFormat, c.joinedRoom))
+		return false
+	}
+	return true
+}
+
 func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi manager atayabilir") {
 		return
@@ -854,13 +869,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 func (h *Hub) handleReadSummary(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
-	if c.agentName == "" {
-		if !c.isDesktopAuthorized() {
-			c.sendError(req.ID, req.Type, "önce join_room veya yetkili desktop identify çağırmalısınız")
-			return
-		}
-	} else if c.joinedRoom != room {
-		c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s", c.joinedRoom))
+	if !c.requireJoinedRoomOrDesktop(req, room, "önce join_room veya yetkili desktop identify çağırmalısınız", "yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s") {
 		return
 	}
 
@@ -899,16 +908,10 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
-	if c.agentName == "" {
-		if !c.isDesktopAuthorized() {
-			c.sendError(req.ID, req.Type, "önce yetkili desktop identify veya join_room çağırmalısınız")
-			return
-		}
-	} else {
-		if c.joinedRoom != room {
-			c.sendError(req.ID, req.Type, fmt.Sprintf("yalnızca katıldığınız odadan sorgulama yapabilirsiniz: %s", c.joinedRoom))
-			return
-		}
+	if !c.requireJoinedRoomOrDesktop(req, room, "önce yetkili desktop identify veya join_room çağırmalısınız", "yalnızca katıldığınız odadan sorgulama yapabilirsiniz: %s") {
+		return
+	}
+	if c.agentName != "" {
 		if data.AgentName != "" && data.AgentName != c.agentName {
 			c.sendError(req.ID, req.Type, "yalnızca kendi adınızla sorgulama yapabilirsiniz")
 			return
