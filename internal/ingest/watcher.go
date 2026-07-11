@@ -47,14 +47,22 @@ func pollOnce(ad SessionAdapter, path string, startCur Cursor, fp *fingerprintSt
 
 // session is one terminal's running watcher.
 type session struct {
-	id     string
-	cancel chan struct{}
-	done   chan struct{} // closed when run() returns (after its final drain)
-	fp     *fingerprintStore
+	id       string
+	cancel   chan struct{}
+	stopOnce sync.Once
+	done     chan struct{} // closed when run() returns (after its final drain)
+	fp       *fingerprintStore
 	// muted, when set, makes the watcher still discover+CLAIM its file (so a sibling
 	// same-cwd watcher can't grab it) but DISCARD every message instead of emitting
 	// it — used for observer terminals, whose typed prompts are private (#17/#65).
 	muted atomic.Bool
+}
+
+func (s *session) stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() { close(s.cancel) })
 }
 
 // Manager owns one watcher per AI terminal, the per-terminal fingerprint stores,
@@ -284,7 +292,7 @@ func (m *Manager) StopSession(sessionID string) {
 		// calls finish(). Releasing it here lets a same-file resume watcher claim
 		// the transcript while the old watcher is still parsing its last flush,
 		// which can duplicate or misattribute the just-written prompt (#40/#65).
-		close(s.cancel)
+		s.stop()
 	}
 }
 
@@ -325,7 +333,7 @@ func (m *Manager) StopAll() {
 	m.claims = make(map[string]string)
 	m.mu.Unlock()
 	for _, s := range all {
-		close(s.cancel)
+		s.stop()
 	}
 	deadline := time.Now().Add(stopDrainBudget)
 	for _, s := range all {

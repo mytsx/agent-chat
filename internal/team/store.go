@@ -207,9 +207,13 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 		s.teams = prev // roll back so memory matches disk
 		return Team{}, err
 	}
-
-	// Create chat directory
-	os.MkdirAll(chatDir, 0700)
+	if err := os.MkdirAll(chatDir, 0700); err != nil {
+		s.teams = prev // roll back the in-memory create
+		if rollbackErr := s.save(); rollbackErr != nil {
+			return Team{}, fmt.Errorf("create team chat dir %s: %w (rollback save failed: %v)", chatDir, err, rollbackErr)
+		}
+		return Team{}, fmt.Errorf("create team chat dir %s: %w", chatDir, err)
+	}
 
 	return cloneTeam(t), nil
 }

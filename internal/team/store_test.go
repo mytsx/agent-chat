@@ -282,6 +282,35 @@ func TestCreateRejectsCaseInsensitiveDuplicateTeamName(t *testing.T) {
 	}
 }
 
+func TestCreateReportsChatDirFailureAndDoesNotPersistTeam(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "rooms"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seed rooms file failed: %v", err)
+	}
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	_, err = s.Create("TeamA", "2x2", nil)
+	if err == nil {
+		t.Fatal("expected Create to report chat directory creation failure")
+	}
+	if !strings.Contains(err.Error(), filepath.Join(dir, "rooms")) {
+		t.Fatalf("expected error to include rooms path, got %v", err)
+	}
+	if got := s.List(); len(got) != 0 {
+		t.Fatalf("failed Create persisted team in memory: %+v", got)
+	}
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("reload NewStore failed: %v", err)
+	}
+	if got := s2.List(); len(got) != 0 {
+		t.Fatalf("failed Create persisted team to disk: %+v", got)
+	}
+}
+
 func TestUpdateAllowsSameTeamNameAndRejectsOtherCaseDuplicate(t *testing.T) {
 	s := newTestStore(t)
 	alpha, err := s.Create("Alpha", "2x2", nil)

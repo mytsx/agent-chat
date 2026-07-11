@@ -99,9 +99,11 @@ function AppContent() {
   useEffect(() => {
     if (!ready) return;
 
+    let cancelled = false;
     let cleanupFn = () => {};
 
     import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      if (cancelled) return;
       EventsOn("messages:new", (data: MessagesNewEvent) => {
         if (data?.chatDir && data?.messages) {
           addMessages(data.chatDir, data.messages);
@@ -156,7 +158,10 @@ function AppContent() {
       if (import.meta.env.DEV) console.warn("Failed to load Wails runtime:", e);
     });
 
-    return () => cleanupFn();
+    return () => {
+      cancelled = true;
+      cleanupFn();
+    };
   }, [ready]);
 
   // Load messages/agents when active team changes

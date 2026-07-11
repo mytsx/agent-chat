@@ -306,6 +306,28 @@ func TestStopSession_HoldsClaimDuringFinalDrain(t *testing.T) {
 	}
 }
 
+func TestSessionStopIsIdempotent(t *testing.T) {
+	s := &session{cancel: make(chan struct{})}
+
+	s.stop()
+	s.stop()
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.stop()
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case <-s.cancel:
+	default:
+		t.Fatal("stop must close the session cancel channel")
+	}
+}
+
 // StopAndWait on an unknown/already-finished session returns immediately and never
 // blocks on a missing done channel (#40).
 func TestStopAndWait_UnknownSessionNoOp(t *testing.T) {
