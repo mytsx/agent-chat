@@ -175,6 +175,30 @@ func TestSendPromptToAgent_EmptyAfterSanitizeNoops(t *testing.T) {
 	}
 }
 
+func TestResizeTerminalRejectsInvalidDimensions(t *testing.T) {
+	a := &App{}
+	cases := []struct {
+		name string
+		cols int
+		rows int
+	}{
+		{name: "zero columns", cols: 0, rows: 24},
+		{name: "zero rows", cols: 80, rows: 0},
+		{name: "negative columns", cols: -1, rows: 24},
+		{name: "negative rows", cols: 80, rows: -1},
+		{name: "columns overflow uint16", cols: 1 << 16, rows: 24},
+		{name: "rows overflow uint16", cols: 80, rows: 1 << 16},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := a.ResizeTerminal("s1", tc.cols, tc.rows); err == nil {
+				t.Fatalf("ResizeTerminal(%d, %d) expected error", tc.cols, tc.rows)
+			}
+		})
+	}
+}
+
 // aiDelivered reflects AI-target delivery only: a failing plain shell must not
 // flip it false when every AI agent received the broadcast (#29 Codex review).
 func TestIsAICLIType(t *testing.T) {

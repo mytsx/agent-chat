@@ -1870,6 +1870,12 @@ func (a *App) broadcastRoleLookup(teamID string) func(agentName string) string {
 
 // ResizeTerminal resizes a terminal
 func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("invalid terminal size: cols and rows must be positive")
+	}
+	if cols > int(^uint16(0)) || rows > int(^uint16(0)) {
+		return fmt.Errorf("invalid terminal size: cols and rows must fit in uint16")
+	}
 	return a.ptyManager.Resize(sessionID, uint16(cols), uint16(rows))
 }
 

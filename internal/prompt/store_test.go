@@ -1,6 +1,27 @@
 package prompt
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestNewStoreReturnsMkdirError(t *testing.T) {
+	base := t.TempDir()
+	blockedParent := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(blockedParent, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(filepath.Join(blockedParent, "prompts"))
+	if err == nil {
+		t.Fatal("NewStore returned nil error for an uncreatable data dir")
+	}
+	if !strings.Contains(err.Error(), "create prompt data dir") {
+		t.Fatalf("NewStore error = %q, want prompt data dir context", err)
+	}
+}
 
 func TestSeedIfMissingByName_CreatesWhenAbsent(t *testing.T) {
 	s, err := NewStore(t.TempDir())

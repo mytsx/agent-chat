@@ -483,6 +483,9 @@ func (m *Manager) Resize(sessionID string, cols, rows uint16) error {
 	if !ok {
 		return sessionNotFoundError(sessionID)
 	}
+	if cols == 0 || rows == 0 {
+		return fmt.Errorf("invalid terminal size for session %s: cols and rows must be positive", sessionID)
+	}
 
 	return pty.Setsize(session.PTY, &pty.Winsize{
 		Cols: cols,

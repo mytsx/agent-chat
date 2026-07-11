@@ -46,6 +46,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const startedRef = useRef(false);
   const releasePendingRef = useRef(false);
   const [recSecs, setRecSecs] = useState(0);
+  const terminalLabel = agentName || "Terminal";
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -260,7 +261,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   return (
     <div className="terminal-pane">
       <div className="terminal-header">
-        <span className="terminal-agent-name">{agentName || "Terminal"}</span>
+        <span className="terminal-agent-name">{terminalLabel}</span>
         {cliType && cliType !== "shell" && (
           <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
         )}
@@ -324,6 +325,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               className="terminal-btn-resume"
               onClick={onResume}
               disabled={!canResume}
+              aria-label={canResume ? `${terminalLabel} oturumundan devam et` : `${terminalLabel} için devam edilebilir oturum yok`}
               title={canResume ? "Oturumdan devam et (--resume)" : "Devam edilebilir oturum hen\u00FCz yakalanmad\u0131"}
             >
               {"\u23EF"}
@@ -334,6 +336,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-restart"
               onClick={onRestart}
+              aria-label={`${terminalLabel} terminalini yeniden başlat`}
               title="Restart terminal"
             >
               {"\u21BB"}
@@ -344,6 +347,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-focus"
               onClick={onToggleFocus}
+              aria-label={isFocused ? `${terminalLabel} terminalini ızgaraya geri al` : `${terminalLabel} terminalini büyüt`}
               title={isFocused ? "Restore" : "Maximize"}
             >
               {isFocused ? "\u25A3" : "\u25A1"}
@@ -354,6 +358,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-remove"
               onClick={onRemove}
+              aria-label={`${terminalLabel} terminalini kapat`}
               title="Close terminal"
             >
               {"\u00D7"}
@@ -361,7 +366,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
           )}
         </div>
       </div>
-      <div className="terminal-container" ref={containerRef} />
+      <div
+        className="terminal-container"
+        ref={containerRef}
+        role="region"
+        aria-label={`${terminalLabel} terminal oturumu`}
+      />
     </div>
   );
 }
