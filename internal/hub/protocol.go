@@ -70,8 +70,7 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 		Room       string `json:"room"`
 		AuthToken  string `json:"auth_token"`
 	}
-	if err := json.Unmarshal(req.Data, &data); err != nil {
-		c.sendError(req.ID, req.Type, "invalid identify payload")
+	if !c.decodeRequestData(req, &data, "invalid identify payload") {
 		return
 	}
 
@@ -144,6 +143,14 @@ func (c *Client) requireValidName(req types.Request, name string) bool {
 	return true
 }
 
+func (c *Client) decodeRequestData(req types.Request, dest any, invalidPayloadMessage string) bool {
+	if err := json.Unmarshal(req.Data, dest); err != nil {
+		c.sendError(req.ID, req.Type, invalidPayloadMessage)
+		return false
+	}
+	return true
+}
+
 func (c *Client) requireJoinedRoom(req types.Request, room, notJoinedMessage, wrongRoomFormat string) bool {
 	if c.agentName == "" || c.joinedRoom == "" {
 		c.sendError(req.ID, req.Type, notJoinedMessage)
@@ -179,8 +186,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	var data struct {
 		ManagerAgent string `json:"manager_agent"`
 	}
-	if err := json.Unmarshal(req.Data, &data); err != nil {
-		c.sendError(req.ID, req.Type, "invalid set_manager payload")
+	if !c.decodeRequestData(req, &data, "invalid set_manager payload") {
 		return
 	}
 	managerAgent := strings.TrimSpace(data.ManagerAgent)
@@ -217,8 +223,7 @@ func (h *Hub) handleSetObservers(c *Client, req types.Request) {
 	var data struct {
 		Observers []string `json:"observers"`
 	}
-	if err := json.Unmarshal(req.Data, &data); err != nil {
-		c.sendError(req.ID, req.Type, "invalid set_observers payload")
+	if !c.decodeRequestData(req, &data, "invalid set_observers payload") {
 		return
 	}
 	for _, name := range data.Observers {
@@ -833,8 +838,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 		Timestamp string `json:"timestamp"`
 	}
 	data.To = "all"
-	if err := json.Unmarshal(req.Data, &data); err != nil {
-		c.sendError(req.ID, req.Type, "invalid log_message payload")
+	if !c.decodeRequestData(req, &data, "invalid log_message payload") {
 		return
 	}
 
