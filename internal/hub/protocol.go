@@ -143,6 +143,27 @@ func (c *Client) requireValidName(req types.Request, name string) bool {
 	return true
 }
 
+func (c *Client) requireValidNonEmptyNames(req types.Request, names []string) bool {
+	for _, name := range names {
+		if n := strings.TrimSpace(name); n != "" {
+			if !c.requireValidName(req, n) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *Client) requireValidRoomNames(req types.Request, rooms []string) bool {
+	for _, room := range rooms {
+		if err := validation.ValidateName(room); err != nil {
+			c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı %q: %v", room, err))
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) decodeRequestData(req types.Request, dest any, invalidPayloadMessage string) bool {
 	if err := json.Unmarshal(req.Data, dest); err != nil {
 		c.sendError(req.ID, req.Type, invalidPayloadMessage)
@@ -226,12 +247,8 @@ func (h *Hub) handleSetObservers(c *Client, req types.Request) {
 	if !c.decodeRequestData(req, &data, "invalid set_observers payload") {
 		return
 	}
-	for _, name := range data.Observers {
-		if n := strings.TrimSpace(name); n != "" {
-			if !c.requireValidName(req, n) {
-				return
-			}
-		}
+	if !c.requireValidNonEmptyNames(req, data.Observers) {
+		return
 	}
 
 	room := h.resolveRoom(req.Room)
@@ -249,11 +266,8 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 
 	// Reject invalid room names before creating any subscription (same filename
 	// safety as join_room — see handleJoinRoom).
-	for _, room := range data.Rooms {
-		if err := validation.ValidateName(room); err != nil {
-			c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı %q: %v", room, err))
-			return
-		}
+	if !c.requireValidRoomNames(req, data.Rooms) {
+		return
 	}
 
 	h.mu.Lock()

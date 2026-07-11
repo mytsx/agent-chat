@@ -48,6 +48,53 @@ func readResponse(t *testing.T, c *Client, reqType string) types.Response {
 	}
 }
 
+func TestRequireValidNonEmptyNames(t *testing.T) {
+	t.Parallel()
+
+	_, c := newTestHubClient()
+	req := types.Request{ID: "req-1", Type: "set_observers"}
+	if !c.requireValidNonEmptyNames(req, []string{"", "  ", "Alice"}) {
+		t.Fatalf("blank and valid names should be accepted")
+	}
+	select {
+	case payload := <-c.send:
+		t.Fatalf("expected no response for valid names, got %s", string(payload))
+	default:
+	}
+
+	if c.requireValidNonEmptyNames(req, []string{"ok", "../bad"}) {
+		t.Fatalf("invalid non-empty name should be rejected")
+	}
+	resp := readResponse(t, c, "set_observers")
+	if resp.Success || !strings.Contains(resp.Error, "invalid name \"../bad\"") {
+		t.Fatalf("unexpected invalid-name response: success=%v error=%q", resp.Success, resp.Error)
+	}
+}
+
+func TestRequireValidRoomNames(t *testing.T) {
+	t.Parallel()
+
+	_, c := newTestHubClient()
+	req := types.Request{ID: "req-1", Type: "subscribe"}
+	if !c.requireValidRoomNames(req, []string{"", "room one"}) {
+		t.Fatalf("blank default and valid room names should be accepted")
+	}
+	select {
+	case payload := <-c.send:
+		t.Fatalf("expected no response for valid rooms, got %s", string(payload))
+	default:
+	}
+
+	if c.requireValidRoomNames(req, []string{"room", ".hidden"}) {
+		t.Fatalf("invalid room name should be rejected")
+	}
+	resp := readResponse(t, c, "subscribe")
+	want := "geçersiz oda adı \".hidden\": invalid name \".hidden\": leading dot not allowed"
+	if resp.Success || resp.Error != want {
+		t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, want)
+	}
+}
+
 func TestFormatAgentMessages(t *testing.T) {
 	t.Parallel()
 
