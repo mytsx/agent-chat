@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -22,6 +24,26 @@ func TestResumeSupported(t *testing.T) {
 				t.Errorf("ResumeSupported(%s) = %v, want %v", tt.cliType, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNVMNodeVersionDirsPreferSemanticNewest(t *testing.T) {
+	home := t.TempDir()
+	base := filepath.Join(home, ".nvm", "versions", "node")
+	for _, version := range []string{"v9.11.2", "v20.1.0", "v18.19.1"} {
+		if err := os.MkdirAll(filepath.Join(base, version, "bin"), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", version, err)
+		}
+	}
+
+	got := nvmNodeVersionDirs(home)
+	want := []string{
+		filepath.Join(base, "v20.1.0", "bin"),
+		filepath.Join(base, "v18.19.1", "bin"),
+		filepath.Join(base, "v9.11.2", "bin"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nvm dirs = %v, want %v", got, want)
 	}
 }
 
