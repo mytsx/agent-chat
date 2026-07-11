@@ -114,6 +114,57 @@ func TestHandleSubscribe_InvalidPayloadRejected(t *testing.T) {
 	}
 }
 
+func TestRoomSubscribersReturnsDetachedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestHubClient()
+	c1 := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	c2 := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+
+	h.mu.Lock()
+	h.subs["r1"] = map[*Client]bool{c1: true, c2: true}
+	h.mu.Unlock()
+
+	snapshot := h.roomSubscribers("r1")
+
+	h.mu.Lock()
+	delete(h.subs["r1"], c1)
+	h.subs["r1"][&Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}] = true
+	h.mu.Unlock()
+
+	if len(snapshot) != 2 {
+		t.Fatalf("snapshot length changed after subscription-map mutation: got %d, want 2", len(snapshot))
+	}
+	seen := map[*Client]bool{}
+	for _, c := range snapshot {
+		seen[c] = true
+	}
+	if !seen[c1] || !seen[c2] {
+		t.Fatalf("snapshot lost original subscribers: %#v", snapshot)
+	}
+}
+
+func TestBroadcastToClosedSubscriberDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	h.mu.Lock()
+	h.subs["r1"] = map[*Client]bool{c: true}
+	h.mu.Unlock()
+	c.closeSend()
+
+	didPanic := true
+	func() {
+		defer func() {
+			didPanic = recover() != nil
+		}()
+		h.broadcastEvent("r1", "message_new", map[string]any{"ok": true})
+	}()
+	if didPanic {
+		t.Fatalf("broadcastEvent panicked after subscriber channel was closed")
+	}
+}
+
 func TestHandleJoinRoom_InvalidPayloadRejected(t *testing.T) {
 	t.Parallel()
 

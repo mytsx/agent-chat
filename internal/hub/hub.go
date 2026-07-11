@@ -216,7 +216,7 @@ func (h *Hub) shutdown() {
 	// Close all client connections
 	h.mu.Lock()
 	for client := range h.clients {
-		close(client.send)
+		client.closeSend()
 		client.conn.Close()
 	}
 	h.mu.Unlock()
@@ -277,7 +277,7 @@ func (h *Hub) runClientManager() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				client.closeSend()
 				// Remove from room subscriptions
 				for room := range client.rooms {
 					if subs, ok := h.subs[room]; ok {
@@ -397,6 +397,21 @@ func (h *Hub) isConfiguredObserver(room, agentName string) bool {
 	return false
 }
 
+// roomSubscribers returns a point-in-time copy of a room's subscriber set. The
+// subscription map is mutated under h.mu by subscribe/join/unregister, so
+// broadcast callers must not keep iterating the map after releasing the lock.
+func (h *Hub) roomSubscribers(room string) []*Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	subs := h.subs[room]
+	clients := make([]*Client, 0, len(subs))
+	for client := range subs {
+		clients = append(clients, client)
+	}
+	return clients
+}
+
 // broadcastEvent sends an event to all subscribers of a room.
 func (h *Hub) broadcastEvent(room, eventName string, data map[string]any) {
 	eventData, _ := json.Marshal(data)
@@ -407,11 +422,7 @@ func (h *Hub) broadcastEvent(room, eventName string, data map[string]any) {
 		Data:  eventData,
 	}
 
-	h.mu.RLock()
-	subs := h.subs[room]
-	h.mu.RUnlock()
-
-	for client := range subs {
+	for _, client := range h.roomSubscribers(room) {
 		client.sendJSON(event)
 	}
 }

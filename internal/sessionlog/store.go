@@ -213,7 +213,7 @@ func (s *Store) ListAgents(room string) []string {
 			continue
 		}
 		key := strings.ToLower(r.AgentName)
-		if r.LastSeen > last[key] {
+		if _, seen := last[key]; !seen || r.LastSeen > last[key] {
 			last[key] = r.LastSeen
 			display[key] = r.AgentName
 		}

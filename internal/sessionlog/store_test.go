@@ -185,6 +185,25 @@ func TestListAgents(t *testing.T) {
 	}
 }
 
+func TestListAgentsIncludesLoadedZeroLastSeenRecord(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{
+  "sid-zero": {"session_id":"sid-zero","room":"r","agent_name":"legacy","cli_type":"claude","cwd":"/c","first_seen":0,"last_seen":0}
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-history.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListAgents("r")
+	if len(got) != 1 || got[0] != "legacy" {
+		t.Fatalf("ListAgents = %v, want [legacy] for a loaded zero-last_seen record", got)
+	}
+}
+
 func TestEmptySessionIDNoOp(t *testing.T) {
 	s := newTestStore(t)
 	s.Record("", "r", "a", "claude", "/c")
