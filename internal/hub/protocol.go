@@ -136,6 +136,14 @@ func (c *Client) requireDesktopAuthorized(req types.Request, message string) boo
 	return false
 }
 
+func (c *Client) requireValidName(req types.Request, name string) bool {
+	if err := validation.ValidateName(name); err != nil {
+		c.sendError(req.ID, req.Type, err.Error())
+		return false
+	}
+	return true
+}
+
 func (c *Client) requireJoinedRoom(req types.Request, room, notJoinedMessage, wrongRoomFormat string) bool {
 	if c.agentName == "" || c.joinedRoom == "" {
 		c.sendError(req.ID, req.Type, notJoinedMessage)
@@ -177,8 +185,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	}
 	managerAgent := strings.TrimSpace(data.ManagerAgent)
 	if managerAgent != "" {
-		if err := validation.ValidateName(managerAgent); err != nil {
-			c.sendError(req.ID, req.Type, err.Error())
+		if !c.requireValidName(req, managerAgent) {
 			return
 		}
 	}
@@ -216,8 +223,7 @@ func (h *Hub) handleSetObservers(c *Client, req types.Request) {
 	}
 	for _, name := range data.Observers {
 		if n := strings.TrimSpace(name); n != "" {
-			if err := validation.ValidateName(n); err != nil {
-				c.sendError(req.ID, req.Type, err.Error())
+			if !c.requireValidName(req, n) {
 				return
 			}
 		}
@@ -278,8 +284,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		c.sendError(req.ID, req.Type, fmt.Sprintf("geçersiz oda adı: %v", err))
 		return
 	}
-	if err := validation.ValidateName(data.AgentName); err != nil {
-		c.sendError(req.ID, req.Type, err.Error())
+	if !c.requireValidName(req, data.AgentName) {
 		return
 	}
 	if c.agentName != "" && c.agentName != data.AgentName {
@@ -382,8 +387,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		return
 	}
 
-	if err := validation.ValidateName(data.From); err != nil {
-		c.sendError(req.ID, req.Type, err.Error())
+	if !c.requireValidName(req, data.From) {
 		return
 	}
 	if data.From != c.agentName {
@@ -391,8 +395,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		return
 	}
 	if data.To != "all" {
-		if err := validation.ValidateName(data.To); err != nil {
-			c.sendError(req.ID, req.Type, err.Error())
+		if !c.requireValidName(req, data.To) {
 			return
 		}
 	}
@@ -484,8 +487,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s") {
 		return
 	}
-	if err := validation.ValidateName(data.AgentName); err != nil {
-		c.sendError(req.ID, req.Type, err.Error())
+	if !c.requireValidName(req, data.AgentName) {
 		return
 	}
 	if data.AgentName != c.agentName {
@@ -674,8 +676,7 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 
 	room := h.resolveRoom(req.Room)
 
-	if err := validation.ValidateName(data.AgentName); err != nil {
-		c.sendError(req.ID, req.Type, err.Error())
+	if !c.requireValidName(req, data.AgentName) {
 		return
 	}
 	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan ayrılabilirsiniz: %s") {
@@ -840,8 +841,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 	room := h.resolveRoom(req.Room)
 
 	if data.To != "all" {
-		if err := validation.ValidateName(data.To); err != nil {
-			c.sendError(req.ID, req.Type, err.Error())
+		if !c.requireValidName(req, data.To) {
 			return
 		}
 	}
