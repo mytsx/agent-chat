@@ -128,6 +128,17 @@ func ensureSuccess(operation string, resp *types.Response) error {
 	return fmt.Errorf("%s failed: %s", operation, resp.Error)
 }
 
+func decodeSuccessData[T any](operation string, resp *types.Response) (T, error) {
+	var data T
+	if err := ensureSuccess(operation, resp); err != nil {
+		return data, err
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
 func (c *HubClient) sendExpectSuccess(operation string, req types.Request) error {
 	resp, err := c.Send(req)
 	if err != nil {
@@ -417,13 +428,10 @@ func (c *HubClient) ListRoomsDetailed() ([]types.RoomSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureSuccess("list_rooms_detailed", resp); err != nil {
-		return nil, err
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Rooms []types.RoomSummary `json:"rooms"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("list_rooms_detailed", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Rooms, nil
@@ -435,13 +443,10 @@ func (c *HubClient) GetAgentsRaw(room string) (map[string]types.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureSuccess("get_agents", resp); err != nil {
-		return nil, err
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Agents map[string]types.Agent `json:"agents"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("get_agents", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Agents, nil
@@ -453,13 +458,10 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureSuccess("get_messages_raw", resp); err != nil {
-		return nil, err
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Messages []types.Message `json:"messages"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("get_messages_raw", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Messages, nil
