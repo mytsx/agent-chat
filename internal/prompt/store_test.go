@@ -23,6 +23,55 @@ func TestNewStoreReturnsMkdirError(t *testing.T) {
 	}
 }
 
+func TestNewStoreReportsCorruptPromptsJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"truncated json", `[{"id":"p1","name":"Broken"}`},
+		{"wrong top-level shape", `{"id":"p1","name":"Broken"}`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "prompts.json"), []byte(c.raw), 0o644); err != nil {
+				t.Fatalf("write corrupt prompts.json failed: %v", err)
+			}
+
+			errPrefix := "load prompts"
+			if _, err := NewStore(dir); err == nil {
+				t.Fatal("NewStore must report corrupt prompts.json instead of starting with an empty store")
+			} else if !strings.Contains(err.Error(), errPrefix) {
+				t.Fatalf("NewStore error = %q, want %q context", err, errPrefix)
+			}
+		})
+	}
+}
+
+func TestNilStoreMethodsAreSafe(t *testing.T) {
+	var s *Store
+	if got := s.List(); got != nil {
+		t.Fatalf("nil List = %v, want nil", got)
+	}
+	if _, err := s.Get("missing"); err == nil {
+		t.Fatal("nil Get must return an error")
+	}
+	if _, err := s.Create("n", "c", "task", nil); err == nil {
+		t.Fatal("nil Create must return an error")
+	}
+	if _, err := s.Update("id", "n", "c", "task", nil); err == nil {
+		t.Fatal("nil Update must return an error")
+	}
+	if err := s.Delete("id"); err == nil {
+		t.Fatal("nil Delete must return an error")
+	}
+	s.Seed("base", "manager")
+	if _, created, err := s.SeedIfMissingByName("n", "c", "task", nil); err == nil || created {
+		t.Fatalf("nil SeedIfMissingByName = created %v, err %v; want created=false with error", created, err)
+	}
+}
+
 func TestSeedIfMissingByName_CreatesWhenAbsent(t *testing.T) {
 	s, err := NewStore(t.TempDir())
 	if err != nil {

@@ -686,7 +686,8 @@ html, body, #root {
   gap: 4px;
 }
 
-.wizard-field label {
+.wizard-field label,
+.wizard-field-label {
   font-size: 11px;
   color: var(--text-secondary);
   font-weight: 500;
@@ -1081,6 +1082,12 @@ html, body, #root {
 .prompt-actions {
   display: flex;
   gap: 4px;
+}
+
+.prompt-delete-hint {
+  margin-top: 6px;
+  color: var(--warning);
+  font-size: 11px;
 }
 
 /* ============ Buttons ============ */

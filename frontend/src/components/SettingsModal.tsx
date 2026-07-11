@@ -64,8 +64,14 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>⚙️ Ayarlar</h3>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id="settings-title">⚙️ Ayarlar</h3>
 
         <div className="form-group">
           <label
@@ -99,8 +105,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
             marginTop: 4,
           }}
         >
-          <label>OpenAI API Anahtarı (Sesli Prompt)</label>
+          <label htmlFor="voice-api-key">OpenAI API Anahtarı (Sesli Prompt)</label>
           <input
+            id="voice-api-key"
             type="password"
             autoFocus
             value={apiKey}
@@ -125,18 +132,19 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           </span>
         </div>
 
-        {error && <div className="form-error">⚠️ {error}</div>}
-        {saved && <div className="form-hint">✅ Kaydedildi.</div>}
+        {error && <div className="form-error" role="alert">⚠️ {error}</div>}
+        {saved && <div className="form-hint" role="status">✅ Kaydedildi.</div>}
 
         <div className="modal-actions">
           <button
             className="btn"
+            type="button"
             onClick={handleSave}
             disabled={saving || apiKey.trim() === ""}
           >
             Kaydet
           </button>
-          <button className="btn btn-secondary" onClick={onClose}>
+          <button className="btn btn-secondary" type="button" onClick={onClose}>
             Kapat
           </button>
         </div>

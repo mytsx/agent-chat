@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,8 +44,11 @@ func NewStore(dataDir string) (*Store, error) {
 	}
 
 	if err := s.load(); err != nil {
-		// File doesn't exist yet, start with empty
-		s.prompts = []Prompt{}
+		if errors.Is(err, os.ErrNotExist) {
+			s.prompts = []Prompt{}
+		} else {
+			return nil, fmt.Errorf("load prompts: %w", err)
+		}
 	}
 
 	return s, nil
@@ -78,6 +82,9 @@ func (s *Store) save() error {
 
 // List returns all prompts
 func (s *Store) List() []Prompt {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Prompt, len(s.prompts))
@@ -87,6 +94,9 @@ func (s *Store) List() []Prompt {
 
 // Get returns a prompt by ID
 func (s *Store) Get(id string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -100,6 +110,9 @@ func (s *Store) Get(id string) (Prompt, error) {
 
 // Create creates a new prompt
 func (s *Store) Create(name, content, category string, tags []string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -125,6 +138,9 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 
 // Update updates an existing prompt
 func (s *Store) Update(id, name, content, category string, tags []string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,6 +166,9 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 
 // Delete deletes a prompt
 func (s *Store) Delete(id string) error {
+	if s == nil {
+		return fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -178,6 +197,9 @@ func RenderPrompt(content string, vars map[string]string) string {
 
 // Seed adds default prompts if none exist
 func (s *Store) Seed(basePrompt, managerPrompt string) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -220,6 +242,9 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 // an existing prompt, so user edits to the seeded prompt are preserved. created
 // reports whether a new prompt was added.
 func (s *Store) SeedIfMissingByName(name, content, category string, tags []string) (Prompt, bool, error) {
+	if s == nil {
+		return Prompt{}, false, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

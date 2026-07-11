@@ -30,6 +30,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const [agentSessions, setAgentSessions] = useState<SessionInfo[]>([]);
   const [resumeID, setResumeID] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  const fieldId = (name: string) => `setup-${teamID}-${slotIndex}-${name}`;
 
   // Load known agents on mount for autocomplete
   useEffect(() => {
@@ -140,8 +141,9 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
       <div className="setup-wizard-body">
         <div className="setup-wizard-form">
           <div className="wizard-field">
-            <label>Agent Name</label>
+            <label htmlFor={fieldId("agent-name")}>Agent Name</label>
             <input
+              id={fieldId("agent-name")}
               type="text"
               value={agentName}
               onChange={(e) => setAgentName(e.target.value)}
@@ -162,8 +164,8 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
 
           {agentSessions.length > 0 && (
             <div className="wizard-field">
-              <label>Oturum <span className="wizard-optional">(geçmişten devam)</span></label>
-              <select value={resumeID} onChange={(e) => setResumeID(e.target.value)}>
+              <label htmlFor={fieldId("resume-session")}>Oturum <span className="wizard-optional">(geçmişten devam)</span></label>
+              <select id={fieldId("resume-session")} value={resumeID} onChange={(e) => setResumeID(e.target.value)}>
                 <option value="">✨ Yeni (taze)</option>
                 {agentSessions.map((s) => (
                   // fileMissing: shown (so the user sees why it's unavailable) but disabled
@@ -178,25 +180,28 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
           )}
 
           <div className="wizard-field">
-            <label>CLI Type</label>
-            <CLISelector
-              availableCLIs={availableCLIs}
-              selected={selectedCLI}
-              onSelect={setSelectedCLI}
-            />
+            <span className="wizard-field-label" id={fieldId("cli-type-label")}>CLI Type</span>
+            <div role="group" aria-labelledby={fieldId("cli-type-label")}>
+              <CLISelector
+                availableCLIs={availableCLIs}
+                selected={selectedCLI}
+                onSelect={setSelectedCLI}
+              />
+            </div>
           </div>
 
           <div className="wizard-field">
-            <label>Workspace</label>
+            <label htmlFor={fieldId("workspace")}>Workspace</label>
             <div className="wizard-dir-row">
               <input
+                id={fieldId("workspace")}
                 type="text"
                 value={workDir}
                 onChange={(e) => setWorkDir(e.target.value)}
                 placeholder="Default directory"
                 readOnly
               />
-              <button type="button" className="btn-sm" onClick={handleBrowse}>
+              <button type="button" className="btn-sm" onClick={handleBrowse} aria-label="Workspace klasörü seç">
                 Browse
               </button>
             </div>
@@ -204,8 +209,9 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
 
           {prompts.length > 0 && (
             <div className="wizard-field">
-              <label>Startup Prompt <span className="wizard-optional">(optional)</span></label>
+              <label htmlFor={fieldId("startup-prompt")}>Startup Prompt <span className="wizard-optional">(optional)</span></label>
               <select
+                id={fieldId("startup-prompt")}
                 value={promptID}
                 onChange={(e) => setPromptID(e.target.value)}
               >
