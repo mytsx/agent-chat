@@ -502,19 +502,17 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 		return
 	}
 
-	var sb strings.Builder
-	if data.Limit > 0 && totalCount > data.Limit {
-		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", data.Limit, totalCount)
-	} else {
-		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj:\n\n", len(filtered))
-	}
+	c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit))
+}
 
-	for _, msg := range filtered {
+func formatAgentMessages(messages []types.Message, totalCount, limit int) string {
+	var sb strings.Builder
+	writeMessagesHeader(&sb, len(messages), totalCount, limit, "")
+	for _, msg := range messages {
 		writeAgentMessageLine(&sb, msg)
 		fmt.Fprintf(&sb, "  (ID: %d)\n\n", msg.ID)
 	}
-
-	c.sendText(req.ID, req.Type, sb.String())
+	return sb.String()
 }
 
 func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
@@ -538,19 +536,25 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		return
 	}
 
-	var sb strings.Builder
-	if data.Limit > 0 && totalCount > data.Limit {
-		fmt.Fprintf(&sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", data.Limit, totalCount)
-	} else {
-		fmt.Fprintf(&sb, "\U0001f4ec %d mesaj (tümü):\n\n", len(filtered))
-	}
+	c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit))
+}
 
-	for _, msg := range filtered {
+func formatAllMessages(messages []types.Message, totalCount, limit int) string {
+	var sb strings.Builder
+	writeMessagesHeader(&sb, len(messages), totalCount, limit, " (tümü)")
+	for _, msg := range messages {
 		writeAllMessagesLine(&sb, msg)
 		sb.WriteString("\n")
 	}
+	return sb.String()
+}
 
-	c.sendText(req.ID, req.Type, sb.String())
+func writeMessagesHeader(sb *strings.Builder, messageCount, totalCount, limit int, suffix string) {
+	if limit > 0 && totalCount > limit {
+		fmt.Fprintf(sb, "\U0001f4ec Son %d mesaj (toplam %d):\n\n", limit, totalCount)
+		return
+	}
+	fmt.Fprintf(sb, "\U0001f4ec %d mesaj%s:\n\n", messageCount, suffix)
 }
 
 func (h *Hub) authorizeReadAllMessages(c *Client, req types.Request, room string, roomState *RoomState) bool {

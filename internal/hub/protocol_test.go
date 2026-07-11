@@ -48,6 +48,68 @@ func readResponse(t *testing.T, c *Client, reqType string) types.Response {
 	}
 }
 
+func TestFormatAgentMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []types.Message{{
+		ID:        7,
+		Timestamp: "2026-07-11T08:09:10.000000",
+		From:      "alice",
+		To:        "bob",
+		Content:   "selam",
+	}}
+
+	got := formatAgentMessages(messages, 3, 1)
+	want := "📬 Son 1 mesaj (toplam 3):\n\n[08:09:10] alice → bob: selam\n  (ID: 7)\n\n"
+	if got != want {
+		t.Fatalf("formatAgentMessages() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatAllMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []types.Message{{
+		ID:        7,
+		Timestamp: "2026-07-11T08:09:10.000000",
+		From:      "alice",
+		To:        "bob",
+		Content:   "selam",
+	}}
+
+	tests := []struct {
+		name       string
+		totalCount int
+		limit      int
+		want       string
+	}{
+		{
+			name:       "all messages header",
+			totalCount: 1,
+			limit:      15,
+			want:       "📬 1 mesaj (tümü):\n\n[08:09:10] #7 alice → bob: selam\n\n",
+		},
+		{
+			name:       "limited header omits all suffix",
+			totalCount: 3,
+			limit:      1,
+			want:       "📬 Son 1 mesaj (toplam 3):\n\n[08:09:10] #7 alice → bob: selam\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := formatAllMessages(messages, tt.totalCount, tt.limit)
+			if got != tt.want {
+				t.Fatalf("formatAllMessages() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClientRequireJoinedRoom(t *testing.T) {
 	t.Parallel()
 
