@@ -115,6 +115,12 @@ func (c *HubClient) SetEventHandler(fn func(types.Event)) {
 	c.onEvent = fn
 }
 
+func (c *HubClient) forgetPending(id string) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
 // Send sends a request and waits for a response (synchronous RPC).
 func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	if req.ID == "" {
@@ -133,17 +139,13 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	c.mu.Unlock()
 
 	if conn == nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("not connected to hub")
 	}
 
 	data, err := json.Marshal(req)
 	if err != nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, err
 	}
 
@@ -156,9 +158,7 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	err = conn.WriteMessage(websocket.TextMessage, data)
 	c.mu.Unlock()
 	if err != nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub write: %w", err)
 	}
 
@@ -169,11 +169,10 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 		}
 		return resp, nil
 	case <-time.After(defaultTimeout):
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub request timeout (id=%s type=%s)", req.ID, req.Type)
 	case <-c.done:
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub client closed")
 	}
 }
