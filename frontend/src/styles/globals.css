@@ -246,8 +246,14 @@ html, body, #root {
 
 .resize-handle:hover,
 .resize-handle:active,
+.resize-handle:focus-visible,
 .resize-handle[data-state="dragging"] {
   background: var(--accent);
+}
+
+.resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .terminal-grid-empty {

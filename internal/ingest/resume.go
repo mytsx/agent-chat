@@ -37,7 +37,7 @@ func ResumeSeedFor(cliType, sessionID string) *ResumeSeed {
 // point it at a t.TempDir() instead of touching the developer's real ~/.copilot
 // (Copilot review).
 func resumeSeedForRoot(home, cliType, sessionID string) *ResumeSeed {
-	if sessionID == "" {
+	if !safeSessionIDComponent(sessionID) {
 		return nil
 	}
 	switch cliType {

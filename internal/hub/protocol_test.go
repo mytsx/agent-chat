@@ -114,6 +114,29 @@ func TestHandleSubscribe_InvalidPayloadRejected(t *testing.T) {
 	}
 }
 
+func TestHandleJoinRoom_InvalidPayloadRejected(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "join-bad",
+		Type: "join_room",
+		Room: "r1",
+		Data: json.RawMessage(`{"agent_name":`),
+	})
+
+	resp := readResponse(t, c, "join_room")
+	if resp.Success || resp.Error != "invalid join_room payload" {
+		t.Fatalf("response success=%v error=%q, want invalid join_room payload", resp.Success, resp.Error)
+	}
+	if c.agentName != "" || c.joinedRoom != "" || len(c.rooms) != 0 {
+		t.Fatalf("invalid join_room payload mutated client: agent=%q joined=%q rooms=%#v", c.agentName, c.joinedRoom, c.rooms)
+	}
+	if room := h.getRoom("r1"); room != nil {
+		t.Fatalf("invalid join_room payload created room: %#v", room)
+	}
+}
+
 func TestFormatAgentMessages(t *testing.T) {
 	t.Parallel()
 

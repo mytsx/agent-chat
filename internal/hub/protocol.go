@@ -292,7 +292,9 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		AgentName string `json:"agent_name"`
 		Role      string `json:"role"`
 	}
-	json.Unmarshal(req.Data, &data)
+	if !c.decodeRequestData(req, &data, "invalid join_room payload") {
+		return
+	}
 
 	room := h.resolveRoom(req.Room)
 

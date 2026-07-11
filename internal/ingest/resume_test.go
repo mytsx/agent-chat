@@ -44,6 +44,8 @@ func TestResumeSeedForRoot(t *testing.T) {
 		{"gemini not supported", "gemini", copilotID},
 		{"shell", "shell", copilotID},
 		{"empty id", "copilot", ""},
+		{"path traversal id", "copilot", "../evil"},
+		{"glob metacharacter id", "copilot", "*"},
 		{"copilot but file missing", "copilot", "no-such-session"},
 	}
 	for _, tt := range nilCases {

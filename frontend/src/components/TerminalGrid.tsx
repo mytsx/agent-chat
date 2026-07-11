@@ -462,7 +462,11 @@ function PanelGroupRow({
   return (
     <>
       {rowIdx > 0 && (
-        <PanelResizeHandle className="resize-handle resize-handle-horizontal" />
+        <PanelResizeHandle
+          className="resize-handle resize-handle-horizontal"
+          aria-label={`Resize terminal row ${rowIdx}`}
+          title="Resize terminal rows"
+        />
       )}
       <Panel minSize="10%">
         <PanelGroup orientation="horizontal" className="terminal-panel-row">
@@ -484,7 +488,11 @@ function PanelItem({
   return (
     <>
       {colIdx > 0 && (
-        <PanelResizeHandle className="resize-handle resize-handle-vertical" />
+        <PanelResizeHandle
+          className="resize-handle resize-handle-vertical"
+          aria-label={`Resize terminal column ${colIdx}`}
+          title="Resize terminal columns"
+        />
       )}
       <Panel minSize="10%">{children}</Panel>
     </>
