@@ -938,13 +938,7 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 	}
 
 	room := h.resolveRoom(req.Room)
-	roomState := h.getRoom(room)
-	agents := map[string]types.Agent{}
-	if roomState != nil {
-		agents = roomState.GetAgents()
-	}
-
-	c.sendSuccess(req.ID, req.Type, map[string]any{"agents": agents})
+	c.sendSuccess(req.ID, req.Type, map[string]any{"agents": h.roomAgentsSnapshot(room)})
 }
 
 // handleGetMessagesRaw returns raw message data for a room (used by desktop app).
@@ -954,13 +948,21 @@ func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
 	}
 
 	room := h.resolveRoom(req.Room)
-	roomState := h.getRoom(room)
-	messages := []types.Message{}
-	if roomState != nil {
-		messages = roomState.GetMessages()
-	}
+	c.sendSuccess(req.ID, req.Type, map[string]any{"messages": h.roomMessagesSnapshot(room)})
+}
 
-	c.sendSuccess(req.ID, req.Type, map[string]any{"messages": messages})
+func (h *Hub) roomAgentsSnapshot(room string) map[string]types.Agent {
+	if roomState := h.getRoom(room); roomState != nil {
+		return roomState.GetAgents()
+	}
+	return map[string]types.Agent{}
+}
+
+func (h *Hub) roomMessagesSnapshot(room string) []types.Message {
+	if roomState := h.getRoom(room); roomState != nil {
+		return roomState.GetMessages()
+	}
+	return []types.Message{}
 }
 
 func (h *Hub) handleListRooms(c *Client, req types.Request) {
