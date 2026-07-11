@@ -56,6 +56,13 @@ func toolResultErrorf(format string, args ...any) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultError(fmt.Sprintf(format, args...)), nil
 }
 
+func invalidNameResult(name string) *mcp.CallToolResult {
+	if err := validation.ValidateName(name); err != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
+	return nil
+}
+
 func (h *toolHandlers) resultFromHub(tool string, call func() (*types.Response, error)) (*mcp.CallToolResult, error) {
 	resp, err := call()
 	if err != nil {
@@ -76,11 +83,11 @@ func (h *toolHandlers) joinRoom(_ context.Context, request mcp.CallToolRequest) 
 	role := request.GetString("role", "")
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(agentName); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(agentName); result != nil {
+		return result, nil
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 	if len(role) > maxFieldLength {
 		return toolResultErrorf("role too long: %d chars, max %d", len(role), maxFieldLength)
@@ -107,16 +114,16 @@ func (h *toolHandlers) sendMessage(_ context.Context, request mcp.CallToolReques
 	priority := request.GetString("priority", "normal")
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(fromAgent); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(fromAgent); result != nil {
+		return result, nil
 	}
 	if toAgent != "all" {
-		if err := validation.ValidateName(toAgent); err != nil {
-			return toolResultError(err)
+		if result := invalidNameResult(toAgent); result != nil {
+			return result, nil
 		}
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 	if len(content) > maxFieldLength {
 		return toolResultErrorf("content too long: %d chars, max %d", len(content), maxFieldLength)
@@ -140,11 +147,11 @@ func (h *toolHandlers) readMessages(_ context.Context, request mcp.CallToolReque
 	limit := request.GetInt("limit", 10)
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(agentName); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(agentName); result != nil {
+		return result, nil
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("read_messages: agent=%q since_id=%d unread_only=%v limit=%d room=%q",
@@ -159,11 +166,11 @@ func (h *toolHandlers) listAgents(_ context.Context, request mcp.CallToolRequest
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(agentName); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(agentName); result != nil {
+		return result, nil
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("list_agents: agent=%q room=%q", agentName, room)
@@ -180,11 +187,11 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 	}
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(agentName); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(agentName); result != nil {
+		return result, nil
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("leave_room: agent=%q room=%q", agentName, room)
@@ -197,8 +204,8 @@ func (h *toolHandlers) leaveRoom(_ context.Context, request mcp.CallToolRequest)
 func (h *toolHandlers) clearRoom(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("clear_room: room=%q", room)
@@ -213,8 +220,8 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 	limit := request.GetInt("limit", 15)
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("read_all_messages: since_id=%d limit=%d room=%q", sinceID, limit, room)
@@ -227,8 +234,8 @@ func (h *toolHandlers) readAllMessages(_ context.Context, request mcp.CallToolRe
 func (h *toolHandlers) readSummary(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	h.logger.Printf("read_summary: room=%q", room)
@@ -242,11 +249,11 @@ func (h *toolHandlers) getLastMessageID(_ context.Context, request mcp.CallToolR
 	agentName := request.GetString("agent_name", "")
 	room := request.GetString("room", "")
 
-	if err := validation.ValidateName(agentName); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(agentName); result != nil {
+		return result, nil
 	}
-	if err := validation.ValidateName(room); err != nil {
-		return toolResultError(err)
+	if result := invalidNameResult(room); result != nil {
+		return result, nil
 	}
 
 	resp, err := h.storage.GetLastMessageID(room, agentName)
