@@ -59,9 +59,26 @@ func New(dataDir string) (*Store, error) {
 		// (Gemini).
 		if err := json.Unmarshal(data, &s.records); err != nil || s.records == nil {
 			s.records = make(map[string]Record)
+		} else {
+			s.records = normalizeLoadedRecords(s.records)
 		}
 	}
 	return s, nil
+}
+
+func normalizeLoadedRecords(records map[string]Record) map[string]Record {
+	normalized := make(map[string]Record, len(records))
+	for id, record := range records {
+		if id == "" {
+			continue
+		}
+		// The JSON map key is the store's authoritative session id. Older/corrupt
+		// files can have a missing or stale embedded session_id; if left as-is the UI
+		// may list an empty/wrong resume target even though the map entry is usable.
+		record.SessionID = id
+		normalized[id] = record
+	}
+	return normalized
 }
 
 // Record adds a session (FirstSeen=LastSeen=now) or, if already present, only

@@ -137,6 +137,51 @@ func TestHandleJoinRoom_InvalidPayloadRejected(t *testing.T) {
 	}
 }
 
+func TestHandleGetAllMessages_InvalidPayloadRejectedNoRoomMutation(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	c.clientType = "desktop"
+	c.desktopAuthed = true
+	h.handleRequest(c, types.Request{
+		ID:   "get-all-bad",
+		Type: "get_all_messages",
+		Room: "ghost",
+		Data: json.RawMessage(`{"limit":`),
+	})
+
+	resp := readResponse(t, c, "get_all_messages")
+	if resp.Success || resp.Error != "invalid get_all_messages payload" {
+		t.Fatalf("response success=%v error=%q, want invalid get_all_messages payload", resp.Success, resp.Error)
+	}
+	if room := h.getRoom("ghost"); room != nil {
+		t.Fatalf("invalid get_all_messages payload created room: %#v", room)
+	}
+}
+
+func TestHandleGetAllMessages_WrongRoomDoesNotCreateRoom(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	c.agentName = "alice"
+	c.joinedRoom = "joined"
+	h.handleRequest(c, types.Request{
+		ID:   "get-all-wrong-room",
+		Type: "get_all_messages",
+		Room: "other",
+		Data: mustRawJSON(t, map[string]any{"limit": 10}),
+	})
+
+	resp := readResponse(t, c, "get_all_messages")
+	want := "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: joined"
+	if resp.Success || resp.Error != want {
+		t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, want)
+	}
+	if room := h.getRoom("other"); room != nil {
+		t.Fatalf("rejected get_all_messages created wrong room: %#v", room)
+	}
+}
+
 func TestFormatAgentMessages(t *testing.T) {
 	t.Parallel()
 

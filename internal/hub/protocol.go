@@ -546,15 +546,21 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		Limit   int `json:"limit"`
 	}
 	data.Limit = 15
-	json.Unmarshal(req.Data, &data)
+	if !c.decodeRequestData(req, &data, "invalid get_all_messages payload") {
+		return
+	}
 
 	room := h.resolveRoom(req.Room)
-	roomState := h.getOrCreateRoom(room)
+	roomState := h.getRoom(room)
 
 	if !h.authorizeReadAllMessages(c, req, room, roomState) {
 		return
 	}
-	filtered, totalCount := roomState.ReadAllMessages(data.SinceID, data.Limit)
+	var filtered []types.Message
+	totalCount := 0
+	if roomState != nil {
+		filtered, totalCount = roomState.ReadAllMessages(data.SinceID, data.Limit)
+	}
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
@@ -597,7 +603,10 @@ func (h *Hub) authorizeReadAllMessages(c *Client, req types.Request, room string
 		return false
 	}
 
-	activeManager := roomState.GetActiveManager()
+	activeManager := ""
+	if roomState != nil {
+		activeManager = roomState.GetActiveManager()
+	}
 	isManager := activeManager != "" && sameAgentName(c.agentName, activeManager)
 	// Observer agents (#17) get read-only access to the full transcript. Authorize
 	// from the DESKTOP allow-list (isConfiguredObserver), not the room roster: this
@@ -610,7 +619,7 @@ func (h *Hub) authorizeReadAllMessages(c *Client, req types.Request, room string
 	}
 	if isManager {
 		roomState.TouchManagerHeartbeat(c.agentName)
-	} else {
+	} else if roomState != nil {
 		// Refresh the observer's last_seen so a read_all-only poller is not
 		// stale-evicted (the read path itself doesn't touch last_seen). Without
 		// this the observer would lose read_all access after staleTimeout.

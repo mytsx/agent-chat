@@ -1,6 +1,7 @@
 package sessionlog
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -202,6 +203,37 @@ func TestPersistAndReload(t *testing.T) {
 	}
 	if len(s2.ListSessions("r", "a")) != 1 {
 		t.Fatal("reload must restore persisted record")
+	}
+}
+
+func TestNewNormalizesLoadedSessionIDs(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{
+  "sid-from-key": {"session_id":"","room":"r","agent_name":"a","cli_type":"claude","cwd":"/c","first_seen":1,"last_seen":2},
+  "sid-authoritative": {"session_id":"stale-embedded","room":"r","agent_name":"a","cli_type":"codex","cwd":"/c","first_seen":3,"last_seen":4},
+  "": {"session_id":"empty-key","room":"r","agent_name":"a","cli_type":"claude","cwd":"/c","first_seen":5,"last_seen":6}
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-history.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListSessions("r", "a")
+	if len(got) != 2 {
+		t.Fatalf("ListSessions len = %d, want 2", len(got))
+	}
+	ids := map[string]bool{}
+	for _, r := range got {
+		ids[r.SessionID] = true
+		if r.SessionID == "" || r.SessionID == "stale-embedded" || r.SessionID == "empty-key" {
+			t.Fatalf("loaded malformed session id in record: %+v", r)
+		}
+	}
+	if !ids["sid-from-key"] || !ids["sid-authoritative"] {
+		t.Fatalf("loaded ids = %v, want map-key ids", ids)
 	}
 }
 
