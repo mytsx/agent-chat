@@ -132,20 +132,21 @@ func Latest(dataDir, room string) (Doc, bool, error) {
 		return Doc{}, false, fmt.Errorf("summary: read dir: %w", err)
 	}
 
-	stems := make([]string, 0, len(entries))
+	epochs := make([]int64, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), summaryExt) {
 			continue
 		}
-		stems = append(stems, strings.TrimSuffix(e.Name(), summaryExt))
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(stems))) // newest first
-
-	for _, stem := range stems {
-		epoch, perr := strconv.ParseInt(stem, 10, 64)
+		epoch, perr := strconv.ParseInt(strings.TrimSuffix(e.Name(), summaryExt), 10, 64)
 		if perr != nil {
 			continue // ignore foreign filenames
 		}
+		epochs = append(epochs, epoch)
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] > epochs[j] }) // newest first
+
+	for _, epoch := range epochs {
+		stem := strconv.FormatInt(epoch, 10)
 		data, rerr := os.ReadFile(filepath.Join(dir, stem+summaryExt))
 		if rerr != nil {
 			continue // skip an unreadable file, fall back to the next-newest
@@ -173,23 +174,24 @@ func List(dataDir, room string) ([]Doc, error) {
 		return nil, fmt.Errorf("summary: read dir: %w", err)
 	}
 
-	stems := make([]string, 0, len(entries))
+	epochs := make([]int64, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), summaryExt) {
 			continue
 		}
-		stems = append(stems, strings.TrimSuffix(e.Name(), summaryExt))
-	}
-	// Newest first: fixed-width unix-second stems sort lexicographically the same
-	// as chronologically.
-	sort.Sort(sort.Reverse(sort.StringSlice(stems)))
-
-	docs := make([]Doc, 0, len(stems))
-	for _, stem := range stems {
-		epoch, perr := strconv.ParseInt(stem, 10, 64)
+		epoch, perr := strconv.ParseInt(strings.TrimSuffix(e.Name(), summaryExt), 10, 64)
 		if perr != nil {
 			continue // ignore foreign filenames defensively
 		}
+		epochs = append(epochs, epoch)
+	}
+	// Newest first by numeric epoch. Do not sort filename stems lexicographically:
+	// historical or hand-written short stems like 999.md sort after 1000.md.
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] > epochs[j] })
+
+	docs := make([]Doc, 0, len(epochs))
+	for _, epoch := range epochs {
+		stem := strconv.FormatInt(epoch, 10)
 		data, rerr := os.ReadFile(filepath.Join(dir, stem+summaryExt))
 		if rerr != nil {
 			continue // skip an unreadable summary file, keep the rest (graceful degradation)

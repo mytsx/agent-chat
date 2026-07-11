@@ -97,6 +97,7 @@ type App struct {
 	newVoiceRecorder func() (voice.Recorder, error)
 	voiceTranscribe  func(ctx context.Context, wav []byte) (string, error)
 	voiceInject      func(sessionID, text string, submit bool) error
+	promptInject     func(sessionID, text string, submit bool) error
 	voiceEmit        func(event string, payload interface{})
 }
 
@@ -162,6 +163,7 @@ func (a *App) startup(ctx context.Context) {
 		return voice.NewWhisperClient(cfg.OpenAIAPIKey).Transcribe(ctx, wav)
 	}
 	a.voiceInject = a.ptyManager.InjectText
+	a.promptInject = a.ptyManager.InjectText
 	a.voiceEmit = func(event string, payload interface{}) {
 		runtime.EventsEmit(a.ctx, event, payload)
 	}
@@ -2408,16 +2410,30 @@ func (a *App) DeletePrompt(id string) error {
 // instructions feed the session summary.
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
+	// This path is a terminal injection sink just like BroadcastToTeam and startup
+	// prompts. Clean before the PTY write so a user-edited prompt/template variable
+	// cannot embed bracketed-paste terminators, raw ESC/control bytes, or invisible
+	// Trojan-Source format runes. The sanitized text is also what we fingerprint and
+	// log, so the transcript records the bytes intentionally delivered rather than a
+	// more dangerous pre-sanitized payload. A fully stripped payload is a no-op.
+	delivered := sanitize.StripForTerminalPaste(rendered)
+	if strings.TrimSpace(delivered) == "" {
+		return nil
+	}
 	// Record the fingerprint BEFORE the PTY write (as the startup and broadcast paths
 	// do): otherwise a fast CLI could append this prompt and an ingestion tick could
 	// poll it before RecordInjection runs, logging it as a directly-typed message
 	// while logUserPrompt logs it too. An unconsumed fingerprint if the write fails
 	// is harmless (#65 / Codex round-5 P3).
-	a.ingestMgr.RecordInjection(sessionID, rendered)
-	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
+	a.ingestMgr.RecordInjection(sessionID, delivered)
+	inject := a.promptInject
+	if inject == nil {
+		inject = a.ptyManager.InjectText
+	}
+	if err := inject(sessionID, delivered, true); err != nil {
 		return err
 	}
-	a.logUserPrompt(sessionID, rendered)
+	a.logUserPrompt(sessionID, delivered)
 	return nil
 }
 

@@ -136,6 +136,45 @@ func TestRenderSummaryPromptText_AppendsTranscriptWhenPlaceholderMissing(t *test
 	}
 }
 
+func TestSendPromptToAgent_SanitizesBeforeTerminalInjection(t *testing.T) {
+	var gotSession, gotText string
+	var gotSubmit bool
+	a := &App{
+		promptInject: func(sessionID, text string, submit bool) error {
+			gotSession, gotText, gotSubmit = sessionID, text, submit
+			return nil
+		},
+	}
+
+	err := a.SendPromptToAgent("s1", "before\x1b[201~{{NAME}}\x00\u202Eafter", map[string]string{"NAME": "Alice"})
+	if err != nil {
+		t.Fatalf("SendPromptToAgent: %v", err)
+	}
+	if gotSession != "s1" || !gotSubmit {
+		t.Fatalf("prompt injection call = session %q submit %v, want session s1 submit true", gotSession, gotSubmit)
+	}
+	if gotText != "beforeAliceafter" {
+		t.Fatalf("injected text = %q, want sanitized rendered prompt", gotText)
+	}
+}
+
+func TestSendPromptToAgent_EmptyAfterSanitizeNoops(t *testing.T) {
+	called := false
+	a := &App{
+		promptInject: func(sessionID, text string, submit bool) error {
+			called = true
+			return nil
+		},
+	}
+
+	if err := a.SendPromptToAgent("s1", string(rune(0x202e)), nil); err != nil {
+		t.Fatalf("SendPromptToAgent: %v", err)
+	}
+	if called {
+		t.Fatal("all-stripped prompt must not be injected or submitted")
+	}
+}
+
 // aiDelivered reflects AI-target delivery only: a failing plain shell must not
 // flip it false when every AI agent received the broadcast (#29 Codex review).
 func TestIsAICLIType(t *testing.T) {

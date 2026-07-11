@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,9 @@ func New(hubAddr string, logger *log.Logger) *HubClient {
 func DiscoverHubAddr(dataDir string) (string, error) {
 	// Check env var override first
 	if port := os.Getenv("AGENT_CHAT_HUB_PORT"); port != "" {
+		if err := validateHubPort("AGENT_CHAT_HUB_PORT", port); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ws://localhost:%s/ws", port), nil
 	}
 
@@ -61,7 +65,21 @@ func DiscoverHubAddr(dataDir string) (string, error) {
 	}
 
 	port := strings.TrimSpace(string(data))
+	if err := validateHubPort(portPath, port); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("ws://localhost:%s/ws", port), nil
+}
+
+func validateHubPort(source, port string) error {
+	if port == "" {
+		return fmt.Errorf("%s is empty", source)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid hub port from %s: %q (must be 1-65535)", source, port)
+	}
+	return nil
 }
 
 // Connect establishes the WebSocket connection to the hub.
@@ -470,11 +488,13 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 // ConnectWithRetry tries to connect with exponential backoff.
 func (c *HubClient) ConnectWithRetry(maxAttempts int) error {
 	backoff := 500 * time.Millisecond
+	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
 		err := c.Connect()
 		if err == nil {
 			return nil
 		}
+		lastErr = err
 		c.logger.Printf("Hub connect attempt %d/%d failed: %v (retrying in %v)", i+1, maxAttempts, err, backoff)
 
 		select {
@@ -487,6 +507,9 @@ func (c *HubClient) ConnectWithRetry(maxAttempts int) error {
 		if backoff > maxReconnect {
 			backoff = maxReconnect
 		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to connect to hub after %d attempts; last error: %w", maxAttempts, lastErr)
 	}
 	return fmt.Errorf("failed to connect to hub after %d attempts", maxAttempts)
 }
