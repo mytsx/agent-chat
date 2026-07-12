@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -396,5 +398,17 @@ func TestSetVoiceConfigPersistsTrimmed(t *testing.T) {
 	cfg, _ := voice.LoadConfig(dir)
 	if cfg.OpenAIAPIKey != "sk-trim-me" {
 		t.Errorf("key = %q, want sk-trim-me (trimmed)", cfg.OpenAIAPIKey)
+	}
+}
+
+func TestSetVoiceConfigRejectsEmbeddedWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{dataDir: dir}
+	err := a.SetVoiceConfig("sk-good\nsecond-line")
+	if err == nil {
+		t.Fatal("expected embedded newline in API key to be rejected")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "voice.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid key must not be persisted; stat error = %v", statErr)
 	}
 }

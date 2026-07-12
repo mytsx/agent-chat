@@ -62,6 +62,8 @@ func New(dataDir string) (*Store, error) {
 		} else {
 			s.records = normalizeLoadedRecords(s.records)
 		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	return s, nil
 }

@@ -75,3 +75,17 @@ func TestSaveConfigDataDirFileIncludesPathContext(t *testing.T) {
 		t.Fatalf("expected create-dir error to include dataDir, got %v", err)
 	}
 }
+
+func TestSaveConfigRejectsEmbeddedWhitespaceKey(t *testing.T) {
+	dir := t.TempDir()
+	err := SaveConfig(dir, Config{OpenAIAPIKey: "sk-good\nsecond-line"})
+	if err == nil {
+		t.Fatal("expected embedded newline in API key to be rejected")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "whitespace/control") {
+		t.Fatalf("expected validation error to explain rejected characters, got %v", err)
+	}
+	if _, statErr := os.Stat(configPath(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid key must not write config file; stat error = %v", statErr)
+	}
+}

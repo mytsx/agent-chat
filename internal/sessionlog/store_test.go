@@ -256,6 +256,17 @@ func TestNewNormalizesLoadedSessionIDs(t *testing.T) {
 	}
 }
 
+func TestNewReturnsReadErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "session-history.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := New(dir); err == nil {
+		t.Fatal("New must return non-not-exist read errors instead of silently starting with empty history")
+	}
+}
+
 func TestRecordRollsBackWhenSaveFails(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir)
