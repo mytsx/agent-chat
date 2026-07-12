@@ -38,6 +38,26 @@ func TestRecordAndListSessions(t *testing.T) {
 	}
 }
 
+func TestListSessionsSortsDeterministicallyOnTimestampTies(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid-b", "r", "a", "claude", "/c")
+	s.Record("sid-a", "r", "a", "claude", "/c")
+
+	clock = 200
+	s.Touch("sid-a")
+	s.Touch("sid-b")
+
+	got := s.ListSessions("r", "a")
+	if len(got) != 2 {
+		t.Fatalf("ListSessions len = %d, want 2", len(got))
+	}
+	if got[0].SessionID != "sid-a" || got[1].SessionID != "sid-b" {
+		t.Fatalf("tie order = %s,%s, want sid-a,sid-b", got[0].SessionID, got[1].SessionID)
+	}
+}
+
 func TestRecordSameRunPreservesFirstSeen(t *testing.T) {
 	s := newTestStore(t)
 	clock := 100.0
@@ -219,6 +239,19 @@ func TestListAgents(t *testing.T) {
 	// son-görülme yeniden→eskiye distinct: alice(300), bob(200)
 	if len(got) != 2 || got[0] != "alice" || got[1] != "bob" {
 		t.Fatalf("ListAgents = %v, want [alice bob]", got)
+	}
+}
+
+func TestListAgentsSortsDeterministicallyOnTimestampTies(t *testing.T) {
+	s := newTestStore(t)
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("s1", "r", "bob", "claude", "/c")
+	s.Record("s2", "r", "alice", "codex", "/c")
+
+	got := s.ListAgents("r")
+	if len(got) != 2 || got[0] != "alice" || got[1] != "bob" {
+		t.Fatalf("ListAgents tie order = %v, want [alice bob]", got)
 	}
 }
 

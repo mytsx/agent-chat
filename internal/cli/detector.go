@@ -171,10 +171,7 @@ func DetectAll() []CLIInfo {
 		result = append(result, info)
 	}
 	// Always add shell
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
-	}
+	shell := resolveUserShell()
 	result = append(result, CLIInfo{
 		Type:       CLIShell,
 		Name:       "Shell",
@@ -183,6 +180,20 @@ func DetectAll() []CLIInfo {
 		BinaryPath: shell,
 	})
 	return result
+}
+
+func resolveUserShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		if path, err := exec.LookPath(shell); err == nil {
+			return path
+		}
+	}
+	for _, fallback := range []string{"/bin/zsh", "/bin/sh"} {
+		if path, err := exec.LookPath(fallback); err == nil {
+			return path
+		}
+	}
+	return "/bin/sh"
 }
 
 // GetCommand returns the command and args to start a CLI
@@ -197,11 +208,7 @@ func GetCommand(cliType CLIType) (string, []string) {
 	case CLICodex:
 		return "codex", []string{"--dangerously-bypass-approvals-and-sandbox"}
 	default:
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/zsh"
-		}
-		return shell, []string{"-l"}
+		return resolveUserShell(), []string{"-l"}
 	}
 }
 

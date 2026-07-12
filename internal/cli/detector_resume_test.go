@@ -77,6 +77,36 @@ func TestEnsureFullPATHWithEmptyPATHDoesNotAddCurrentDirectory(t *testing.T) {
 	}
 }
 
+func TestResolveUserShellFallsBackWhenSHELLIsInvalid(t *testing.T) {
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+
+	got := resolveUserShell()
+	if got == "" {
+		t.Fatal("resolveUserShell returned empty shell")
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("resolveUserShell returned non-existent shell %q: %v", got, err)
+	}
+	if got == os.Getenv("SHELL") {
+		t.Fatalf("resolveUserShell returned invalid SHELL %q", got)
+	}
+}
+
+func TestGetCommandShellUsesResolvedFallback(t *testing.T) {
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+
+	cmd, args := GetCommand(CLIShell)
+	if cmd == os.Getenv("SHELL") {
+		t.Fatalf("GetCommand(CLIShell) returned invalid SHELL %q", cmd)
+	}
+	if _, err := os.Stat(cmd); err != nil {
+		t.Fatalf("GetCommand(CLIShell) returned non-existent shell %q: %v", cmd, err)
+	}
+	if !reflect.DeepEqual(args, []string{"-l"}) {
+		t.Fatalf("args = %v, want [-l]", args)
+	}
+}
+
 func TestGetCommandResume(t *testing.T) {
 	const id = "7f32dcf3-11c6-4ca1-9461-fe8590e164e0"
 	tests := []struct {

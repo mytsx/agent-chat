@@ -93,12 +93,18 @@ func normalizeAgentConfigs(agents []AgentConfig) ([]AgentConfig, error) {
 		return nil, nil
 	}
 	normalized := cloneAgents(agents)
+	seen := make(map[string]struct{}, len(normalized))
 	for i := range normalized {
 		name, err := normalizeRequiredName("agent", normalized[i].Name)
 		if err != nil {
 			return nil, err
 		}
 		normalized[i].Name = name
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return nil, fmt.Errorf("duplicate agent name: %s", name)
+		}
+		seen[key] = struct{}{}
 	}
 	return normalized, nil
 }

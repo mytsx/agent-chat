@@ -335,6 +335,39 @@ func TestStoreRejectsBlankRequiredNames(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsDuplicateAgentConfigNames(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create TeamA failed: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"create exact duplicate", func() error {
+			_, err := s.Create("TeamExactDup", "2x2", []AgentConfig{{Name: "Pilot"}, {Name: "Pilot"}})
+			return err
+		}},
+		{"create case duplicate", func() error {
+			_, err := s.Create("TeamCaseDup", "2x2", []AgentConfig{{Name: "Pilot"}, {Name: "pilot"}})
+			return err
+		}},
+		{"update trimmed duplicate", func() error {
+			_, err := s.Update(tm.ID, "TeamA", "2x2", []AgentConfig{{Name: " Pilot "}, {Name: "pilot"}})
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.fn(); err == nil {
+				t.Fatal("expected duplicate agent config names to be rejected")
+			}
+		})
+	}
+}
+
 func TestStoreNormalizesRequiredNamesAtBoundary(t *testing.T) {
 	s := newTestStore(t)
 	tm, err := s.Create(" TeamA ", "2x2", []AgentConfig{{Name: " Pilot ", CLIType: "claude"}})

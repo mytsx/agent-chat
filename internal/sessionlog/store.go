@@ -202,7 +202,15 @@ func (s *Store) ListSessions(room, agent string) []Record {
 			out = append(out, r)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen > out[j].LastSeen })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastSeen != out[j].LastSeen {
+			return out[i].LastSeen > out[j].LastSeen
+		}
+		if out[i].FirstSeen != out[j].FirstSeen {
+			return out[i].FirstSeen > out[j].FirstSeen
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
 	return out
 }
 
@@ -235,7 +243,12 @@ func (s *Store) ListAgents(room string) []string {
 	for key := range last {
 		keys = append(keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool { return last[keys[i]] > last[keys[j]] })
+	sort.Slice(keys, func(i, j int) bool {
+		if last[keys[i]] != last[keys[j]] {
+			return last[keys[i]] > last[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
 	names := make([]string, 0, len(keys))
 	for _, key := range keys {
 		names = append(names, display[key])
