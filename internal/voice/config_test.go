@@ -47,6 +47,22 @@ func TestLoadConfigMalformedJSONIncludesPathContext(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsEmbeddedWhitespaceKey(t *testing.T) {
+	dir := t.TempDir()
+	path := configPath(dir)
+	if err := os.WriteFile(path, []byte(`{"openai_api_key":"key\nbad"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected embedded newline in persisted API key to be rejected")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "parse voice config") || !strings.Contains(msg, path) || !strings.Contains(msg, "whitespace/control") {
+		t.Fatalf("expected config path and validation context, got %v", err)
+	}
+}
+
 func TestSaveConfigIsAtomicNoTempLeft(t *testing.T) {
 	dir := t.TempDir()
 	if err := SaveConfig(dir, Config{OpenAIAPIKey: "sk-test-123"}); err != nil {

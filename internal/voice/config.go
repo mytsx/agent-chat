@@ -36,17 +36,20 @@ func LoadConfig(dataDir string) (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, fmt.Errorf("parse voice config %s: %w", fp, err)
 	}
+	key, err := normalizeOpenAIAPIKey(c.OpenAIAPIKey)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse voice config %s: %w", fp, err)
+	}
+	c.OpenAIAPIKey = key
 	return c, nil
 }
 
 // SaveConfig writes voice.json atomically (temp + rename), mirroring
 // team.Store.save. The key is a secret, so the file is mode 0600.
 func SaveConfig(dataDir string, c Config) error {
-	key := strings.TrimSpace(c.OpenAIAPIKey)
-	if key != "" && strings.ContainsFunc(key, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	}) {
-		return fmt.Errorf("invalid voice OpenAI API key: whitespace/control characters are not allowed")
+	key, err := normalizeOpenAIAPIKey(c.OpenAIAPIKey)
+	if err != nil {
+		return err
 	}
 	c.OpenAIAPIKey = key
 
@@ -68,4 +71,14 @@ func SaveConfig(dataDir string, c Config) error {
 		return fmt.Errorf("replace voice config %s: %w", fp, err)
 	}
 	return nil
+}
+
+func normalizeOpenAIAPIKey(key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key != "" && strings.ContainsFunc(key, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) {
+		return "", fmt.Errorf("invalid voice OpenAI API key: whitespace/control characters are not allowed")
+	}
+	return key, nil
 }

@@ -133,7 +133,8 @@ func refreshedRecord(previous Record, hadPrevious bool, t float64, sessionID, ro
 	return r
 }
 
-// Touch advances LastSeen for a known session (FirstSeen preserved). Unknown → no-op.
+// Touch advances LastSeen for a known session (FirstSeen preserved), never
+// regressing it if the system clock moves backwards. Unknown → no-op.
 func (s *Store) Touch(sessionID string) {
 	if s == nil || sessionID == "" {
 		return
@@ -141,8 +142,11 @@ func (s *Store) Touch(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.updateExistingRecord(sessionID, func(r Record) (Record, bool) {
-		r.LastSeen = s.now()
-		return r, true
+		if t := s.now(); t > r.LastSeen {
+			r.LastSeen = t
+			return r, true
+		}
+		return r, false
 	})
 }
 

@@ -172,6 +172,23 @@ func TestTouch(t *testing.T) {
 	}
 }
 
+func TestTouchDoesNotRegressLastSeen(t *testing.T) {
+	s := newTestStore(t)
+	clock := 200.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "r", "a", "claude", "/c")
+
+	clock = 150 // system clock moved backwards while the watcher is still running
+	s.Touch("sid")
+	got := s.ListSessions("r", "a")
+	if len(got) != 1 {
+		t.Fatalf("ListSessions len = %d, want 1", len(got))
+	}
+	if got[0].FirstSeen != 200 || got[0].LastSeen != 200 {
+		t.Fatalf("Touch regressed record window = %+v, want firstSeen=lastSeen=200", got[0])
+	}
+}
+
 func TestTouchAt(t *testing.T) {
 	s := newTestStore(t)
 	clock := 100.0
