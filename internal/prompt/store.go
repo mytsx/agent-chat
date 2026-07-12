@@ -87,9 +87,7 @@ func (s *Store) List() []Prompt {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := make([]Prompt, len(s.prompts))
-	copy(result, s.prompts)
-	return result
+	return clonePrompts(s.prompts)
 }
 
 // Get returns a prompt by ID
@@ -102,7 +100,7 @@ func (s *Store) Get(id string) (Prompt, error) {
 
 	for _, p := range s.prompts {
 		if p.ID == id {
-			return p, nil
+			return clonePrompt(p), nil
 		}
 	}
 	return Prompt{}, fmt.Errorf("prompt not found: %s", id)
@@ -122,7 +120,7 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 		Name:      name,
 		Content:   content,
 		Category:  category,
-		Tags:      tags,
+		Tags:      cloneStringSlice(tags),
 		Variables: extractVariables(content),
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -133,7 +131,7 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 		s.prompts = s.prompts[:len(s.prompts)-1]
 		return Prompt{}, err
 	}
-	return p, nil
+	return clonePrompt(p), nil
 }
 
 // Update updates an existing prompt
@@ -150,7 +148,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 			s.prompts[i].Name = name
 			s.prompts[i].Content = content
 			s.prompts[i].Category = category
-			s.prompts[i].Tags = tags
+			s.prompts[i].Tags = cloneStringSlice(tags)
 			s.prompts[i].Variables = extractVariables(content)
 			s.prompts[i].UpdatedAt = time.Now().Format(time.RFC3339)
 
@@ -158,7 +156,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 				s.prompts[i] = prev
 				return Prompt{}, err
 			}
-			return s.prompts[i], nil
+			return clonePrompt(s.prompts[i]), nil
 		}
 	}
 	return Prompt{}, fmt.Errorf("prompt not found: %s", id)
@@ -174,7 +172,7 @@ func (s *Store) Delete(id string) error {
 
 	for i, p := range s.prompts {
 		if p.ID == id {
-			prev := append([]Prompt(nil), s.prompts...)
+			prev := clonePrompts(s.prompts)
 			s.prompts = append(s.prompts[:i], s.prompts[i+1:]...)
 			if err := s.save(); err != nil {
 				s.prompts = prev
@@ -216,7 +214,7 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 			Name:      "Agent Base Prompt",
 			Content:   basePrompt,
 			Category:  "system",
-			Tags:      []string{"base", "agent"},
+			Tags:      cloneStringSlice([]string{"base", "agent"}),
 			Variables: extractVariables(basePrompt),
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -226,7 +224,7 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 			Name:      "Manager Prompt",
 			Content:   managerPrompt,
 			Category:  "role",
-			Tags:      []string{"manager", "coordinator"},
+			Tags:      cloneStringSlice([]string{"manager", "coordinator"}),
 			Variables: extractVariables(managerPrompt),
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -253,7 +251,7 @@ func (s *Store) SeedIfMissingByName(name, content, category string, tags []strin
 
 	for _, p := range s.prompts {
 		if p.Name == name {
-			return p, false, nil
+			return clonePrompt(p), false, nil
 		}
 	}
 
@@ -263,7 +261,7 @@ func (s *Store) SeedIfMissingByName(name, content, category string, tags []strin
 		Name:      name,
 		Content:   content,
 		Category:  category,
-		Tags:      tags,
+		Tags:      cloneStringSlice(tags),
 		Variables: extractVariables(content),
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -273,7 +271,31 @@ func (s *Store) SeedIfMissingByName(name, content, category string, tags []strin
 		s.prompts = s.prompts[:len(s.prompts)-1] // roll back the in-memory add so it doesn't diverge from disk
 		return Prompt{}, false, err
 	}
-	return p, true, nil
+	return clonePrompt(p), true, nil
+}
+
+func clonePrompts(prompts []Prompt) []Prompt {
+	if prompts == nil {
+		return nil
+	}
+	cloned := make([]Prompt, len(prompts))
+	for i, p := range prompts {
+		cloned[i] = clonePrompt(p)
+	}
+	return cloned
+}
+
+func clonePrompt(p Prompt) Prompt {
+	p.Tags = cloneStringSlice(p.Tags)
+	p.Variables = cloneStringSlice(p.Variables)
+	return p
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 // extractVariables finds {{VAR_NAME}} patterns in content

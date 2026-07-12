@@ -195,3 +195,34 @@ func TestSeedRollsBackWhenSaveFails(t *testing.T) {
 		t.Fatalf("failed Seed was kept in memory: %#v", prompts)
 	}
 }
+
+func TestPromptStoreDefensivelyCopiesSlices(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tags := []string{"original"}
+	p, err := s.Create("Prompt", "use {{VAR}}", "task", tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags[0] = "mutated input"
+	p.Tags[0] = "mutated returned prompt"
+	p.Variables[0] = "MUTATED_RETURNED_VARIABLE"
+
+	listed := s.List()
+	listed[0].Tags[0] = "mutated list result"
+	listed[0].Variables[0] = "MUTATED_LIST_VARIABLE"
+
+	got, err := s.Get(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tags[0] != "original" {
+		t.Fatalf("stored tags mutated through caller-owned slice: %v", got.Tags)
+	}
+	if got.Variables[0] != "VAR" {
+		t.Fatalf("stored variables mutated through returned/listed prompt: %v", got.Variables)
+	}
+}
