@@ -55,3 +55,23 @@ func TestUpsertMCPConfigPreservesExistingFileMode(t *testing.T) {
 		t.Fatalf("expected existing config mode to remain 0600, got %v", got)
 	}
 }
+
+func TestUpsertMCPConfigPreservesMalformedBackupFileMode(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(configPath, []byte(`{"mcpServers":`), 0600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+
+	if err := upsertMCPConfig(configPath, buildMCPEntry(dir, "team-a"), true); err != nil {
+		t.Fatalf("upsertMCPConfig returned error: %v", err)
+	}
+
+	info, err := os.Stat(configPath + ".bak")
+	if err != nil {
+		t.Fatalf("stat backup config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("expected malformed config backup mode to remain 0600, got %v", got)
+	}
+}
