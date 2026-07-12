@@ -558,7 +558,7 @@ func writeSessionSnapshot(t *testing.T, dataDir, room, epoch string, pr Persiste
 
 // TestSeedSessionTracking_FromSnapshotSkipsUnchanged verifies the unchanged-skip
 // survives a restart when a session snapshot already captured the state: seeding
-// reads the latest snapshot's max ID, so an idle quit does NOT write a duplicate.
+// reads the latest snapshot's full signature, so an idle quit does NOT write a duplicate.
 func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	pr := PersistedRoom{
@@ -585,6 +585,49 @@ func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
 	}
 	if files := readSessionFiles(t, dir, "proj"); len(files) != 1 {
 		t.Fatalf("idle quit wrote a duplicate: %d files, want 1 (the original snapshot)", len(files))
+	}
+}
+
+// TestSeedSessionTracking_DifferentContentWithSameIDsNotSeeded verifies restart
+// seeding compares the actual persisted message content, not just the max ID. If
+// the rolling hub-state room differs from the latest session snapshot but keeps
+// the same IDs (manual repair, crash recovery, or imported state), an idle save
+// must write the corrected content instead of skipping as "already captured".
+func TestSeedSessionTracking_DifferentContentWithSameIDsNotSeeded(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "a", To: "all", Content: "old content", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"a": {Role: "dev"}},
+	}
+	loaded := PersistedRoom{
+		Messages: []types.Message{
+			{ID: 1, From: "a", To: "all", Content: "corrected content", Type: "broadcast"},
+		},
+		Agents: map[string]types.Agent{"a": {Role: "dev"}},
+	}
+	writePersistedRoom(t, dir, "proj", loaded)
+	writeSessionSnapshot(t, dir, "proj", "1000000000", snapshot)
+
+	h := newArchiveHub(dir)
+	h.loadPersistedState()
+	h.seedSessionTracking()
+
+	_, _, skipped, err := h.saveSession("proj")
+	if err != nil {
+		t.Fatalf("saveSession: %v", err)
+	}
+	if skipped {
+		t.Fatal("same message IDs with different content must not be seeded as unchanged")
+	}
+	files := readSessionFiles(t, dir, "proj")
+	if len(files) != 2 {
+		t.Fatalf("save wrote %d snapshots, want 2 (old + corrected)", len(files))
+	}
+	latest := loadSession(t, files[1])
+	if len(latest.Messages) != 1 || latest.Messages[0].Content != "corrected content" {
+		t.Fatalf("latest snapshot = %+v, want corrected content", latest.Messages)
 	}
 }
 

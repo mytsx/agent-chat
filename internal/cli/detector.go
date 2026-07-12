@@ -69,7 +69,7 @@ func cleanPATHEntries(pathValue string) ([]string, bool) {
 	seen := make(map[string]bool, len(entries))
 	changed := false
 	for _, entry := range entries {
-		if entry == "" || seen[entry] {
+		if entry == "" || !filepath.IsAbs(entry) || seen[entry] {
 			changed = true
 			continue
 		}

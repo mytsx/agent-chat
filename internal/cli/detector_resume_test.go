@@ -77,7 +77,7 @@ func TestEnsureFullPATHWithEmptyPATHDoesNotAddCurrentDirectory(t *testing.T) {
 	}
 }
 
-func TestEnsureFullPATHRemovesEmptyAndDuplicateEntriesFromExistingPATH(t *testing.T) {
+func TestEnsureFullPATHRemovesUnsafeAndDuplicateEntriesFromExistingPATH(t *testing.T) {
 	home := t.TempDir()
 	localBin := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(localBin, 0755); err != nil {
@@ -87,7 +87,7 @@ func TestEnsureFullPATHRemovesEmptyAndDuplicateEntriesFromExistingPATH(t *testin
 	second := filepath.Join(home, "second-bin")
 	pathSeparator := string(os.PathListSeparator)
 	t.Setenv("HOME", home)
-	t.Setenv("PATH", strings.Join([]string{first, "", second, first, ""}, pathSeparator))
+	t.Setenv("PATH", strings.Join([]string{first, "", ".", "relative/bin", second, first, ""}, pathSeparator))
 
 	ensureFullPATH()
 
@@ -100,6 +100,9 @@ func TestEnsureFullPATHRemovesEmptyAndDuplicateEntriesFromExistingPATH(t *testin
 	for _, entry := range got {
 		if entry == "" {
 			t.Fatalf("PATH must not contain empty entries that resolve to the current directory: %q", os.Getenv("PATH"))
+		}
+		if !filepath.IsAbs(entry) {
+			t.Fatalf("PATH must not contain relative entries that can resolve through the current directory: %q", os.Getenv("PATH"))
 		}
 		if seen[entry] {
 			t.Fatalf("PATH must not contain duplicate entry %q: %q", entry, os.Getenv("PATH"))

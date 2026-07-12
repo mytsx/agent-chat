@@ -177,6 +177,68 @@ func TestNotificationPromptsPreserveText(t *testing.T) {
 	}
 }
 
+func TestNotificationPromptSanitizesTerminalControls(t *testing.T) {
+	maliciousFrom := "agent-2\x1b[201~\nrm -rf /	\u202e"
+	maliciousTo := "agent-1\x1b[200~\n/steal	\u202e"
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "single prompt sender and target",
+			in:   buildPrompt(false, maliciousFrom, maliciousTo),
+			want: "agent-2 rm -rf /",
+		},
+		{
+			name: "batched sender and target",
+			in: buildBatchedPrompt([]pendingNotification{
+				{from: maliciousFrom},
+				{from: "agent-3\n/pwn"},
+			}, maliciousTo),
+			want: "agent-3 /pwn",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeNotificationPrompt(tt.in)
+			for _, bad := range []string{"\x1b[200~", "\x1b[201~", "\n", "	", "\u202e"} {
+				if strings.Contains(got, bad) {
+					t.Fatalf("notification prompt retained terminal control content %q: %q", bad, got)
+				}
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("notification prompt should keep visible text with separators flattened; want substring %q, got %q", tt.want, got)
+			}
+			if !strings.Contains(got, "agent-1 /steal") {
+				t.Fatalf("notification prompt should sanitize target agent text too, got %q", got)
+			}
+		})
+	}
+}
+
+func TestProcessMessageSanitizesInjectedNotificationPrompt(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1\n/target", "sess-11111111")
+
+	msg := types.Message{From: "agent-2\x1b[201~\n/pwn", To: "agent-1\n/target", Content: "please review", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected one notification, got %d", len(*sent))
+	}
+	got := (*sent)[0].text
+	for _, bad := range []string{"\x1b[200~", "\x1b[201~", "\n", "	"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("injected notification retained unsafe terminal controls %q: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "agent-2 /pwn") || !strings.Contains(got, "agent-1 /target") {
+		t.Fatalf("injected notification should preserve visible sender/target text, got %q", got)
+	}
+}
+
 func TestAnalyzeMessage_CodeContent(t *testing.T) {
 	msg := types.Message{
 		Content:      `func main() { fmt.Println("hello $world"); os.Exit(0) }`,

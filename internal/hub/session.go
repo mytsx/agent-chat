@@ -14,28 +14,40 @@ import (
 )
 
 // sessionSignature derives a change key for a room snapshot that covers BOTH the
-// conversation (max message ID) and the agent roster (sorted name:role). The
-// unchanged-skip compares this signature, so a roster-only change — e.g. a
-// stale-agent cleanup that mutates the roster WITHOUT appending a message, which a
-// max-ID-only check would miss — still differs and triggers a fresh snapshot,
-// honouring the "messages + agent roster" contract.
+// conversation (every retained message's persisted fields) and the agent roster
+// (sorted name:role). The unchanged-skip compares this signature, so a
+// roster-only change — e.g. a stale-agent cleanup that mutates the roster WITHOUT
+// appending a message, which a max-ID-only check would miss — still differs and
+// triggers a fresh snapshot. Including full message fields also keeps restart
+// seeding from treating a loaded room as already captured when it merely has the
+// same max ID as the latest snapshot but different persisted content (user-edited
+// state, crash recovery, or a post-clear ID coincidence).
 func sessionSignature(pr PersistedRoom) string {
-	maxID := 0
-	if n := len(pr.Messages); n > 0 {
-		maxID = pr.Messages[n-1].ID
-	}
 	names := make([]string, 0, len(pr.Agents))
 	for name := range pr.Agents {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d", maxID)
+	fmt.Fprintf(&b, "messages:%d", len(pr.Messages))
+	for _, msg := range pr.Messages {
+		fmt.Fprintf(&b, "|m:%d:%q:%q:%q:%q:%q:%q:%t:%t:%q",
+			msg.ID,
+			msg.From,
+			msg.To,
+			msg.OriginalTo,
+			msg.Content,
+			msg.Timestamp,
+			msg.Type,
+			msg.RoutedByManager,
+			msg.ExpectsReply,
+			msg.Priority,
+		)
+	}
+	fmt.Fprintf(&b, "|agents:%d", len(names))
 	for _, name := range names {
 		b.WriteByte('|')
-		b.WriteString(name)
-		b.WriteByte(':')
-		b.WriteString(pr.Agents[name].Role)
+		fmt.Fprintf(&b, "a:%q:%q", name, pr.Agents[name].Role)
 	}
 	return b.String()
 }

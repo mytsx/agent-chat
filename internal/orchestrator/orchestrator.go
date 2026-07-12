@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	ptymgr "desktop/internal/pty"
+	"desktop/internal/sanitize"
 	"desktop/internal/types"
 )
 
@@ -467,6 +468,25 @@ func buildBatchedPrompt(pending []pendingNotification, agentName string) string 
 		len(pending), strings.Join(senders, ", "), agentName)
 }
 
+// sanitizeNotificationPrompt strips terminal-control payloads from notification
+// text before it is injected into an agent PTY. Agent names are validated on the
+// normal team-store path, but messages can also be replayed from disk/imports; a
+// hostile From/To value must not be able to close bracketed-paste mode or send
+// live control keys through the auto-poke path.
+func sanitizeNotificationPrompt(text string) string {
+	text = sanitize.StripForTerminalPaste(text)
+	return strings.Map(func(r rune) rune {
+		// Notification prompts are intentionally single-line. StripForTerminalPaste
+		// preserves newlines/tabs for prose paste sinks, but here those would become
+		// live Copilot keystrokes and make prompts harder to audit in shell history.
+		switch r {
+		case '\n', '	':
+			return ' '
+		}
+		return r
+	}, text)
+}
+
 // tryInject performs an atomic, lag-free notification injection into a PTY. It
 // returns false WITHOUT writing anything if the user has pending input (the
 // caller must keep deferring) — this is the last-line-of-defence check against
@@ -480,6 +500,10 @@ func buildBatchedPrompt(pending []pendingNotification, agentName string) string 
 // is always sent: the buffer was empty at paste time, so submitting is safe and
 // pokes the agent. For copilot the whole char-by-char sequence must stay atomic.
 func (o *Orchestrator) tryInject(sessionID, text string) bool {
+	text = sanitizeNotificationPrompt(text)
+	if text == "" {
+		return true
+	}
 	if o.injectFunc != nil {
 		if o.hasPendingInput(sessionID) {
 			return false
