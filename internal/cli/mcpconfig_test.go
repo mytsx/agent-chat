@@ -75,3 +75,32 @@ func TestUpsertMCPConfigPreservesMalformedBackupFileMode(t *testing.T) {
 		t.Fatalf("expected malformed config backup mode to remain 0600, got %v", got)
 	}
 }
+
+func TestUpsertMCPConfigReturnsMalformedBackupErrors(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "settings.json")
+	backupPath := configPath + ".bak"
+	malformed := []byte(`{"mcpServers":`)
+	if err := os.WriteFile(configPath, malformed, 0600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+	if err := os.Mkdir(backupPath, 0755); err != nil {
+		t.Fatalf("create directory at backup path: %v", err)
+	}
+
+	err := upsertMCPConfig(configPath, buildMCPEntry(dir, "team-a"), true)
+	if err == nil {
+		t.Fatal("expected backup write failure to abort config recovery")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "backup malformed config") || !strings.Contains(msg, backupPath) {
+		t.Fatalf("expected backup error with path context, got %v", err)
+	}
+
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read config after failed backup: %v", readErr)
+	}
+	if string(data) != string(malformed) {
+		t.Fatalf("malformed config should be left untouched when backup fails, got %q", data)
+	}
+}

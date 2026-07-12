@@ -151,7 +151,9 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 		}
 		if err := json.Unmarshal(data, &config); err != nil {
 			backupPath := configPath + ".bak"
-			os.WriteFile(backupPath, data, writeMode)
+			if err := os.WriteFile(backupPath, data, writeMode); err != nil {
+				return fmt.Errorf("backup malformed config %s: %w", backupPath, err)
+			}
 			config = make(map[string]any)
 		}
 	} else if !os.IsNotExist(err) {

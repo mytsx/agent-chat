@@ -117,11 +117,15 @@ func refreshedRecord(previous Record, hadPrevious bool, t float64, sessionID, ro
 	// a fresh open-window so "same period" correlation compares the latest run, not
 	// one interval spanning idle days between runs (Codex P2). A re-record within
 	// newWindowGapSec is treated as the same run (defensive against a double-fire)
-	// and only advances LastSeen.
+	// and only advances LastSeen. Never regress LastSeen: a system-clock step
+	// backwards while a persisted session is re-recorded must not make its duration
+	// negative or reorder it behind older history.
 	if t-r.LastSeen > newWindowGapSec {
 		r.FirstSeen = t
+		r.LastSeen = t
+	} else if t > r.LastSeen {
+		r.LastSeen = t
 	}
-	r.LastSeen = t
 	// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
 	// resumed after a team rename or config change. Re-indexing under the CURRENT
 	// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).

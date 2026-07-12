@@ -335,6 +335,88 @@ func TestStoreRejectsBlankRequiredNames(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesRequiredNamesAtBoundary(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create(" TeamA ", "2x2", []AgentConfig{{Name: " Pilot ", CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if tm.Name != "TeamA" || len(tm.Agents) != 1 || tm.Agents[0].Name != "Pilot" {
+		t.Fatalf("Create did not trim persisted team/agent names: %+v", tm)
+	}
+
+	updated, err := s.Update(tm.ID, " TeamB ", "2x2", []AgentConfig{{Name: " Reviewer ", CLIType: "gemini"}})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if updated.Name != "TeamB" || len(updated.Agents) != 1 || updated.Agents[0].Name != "Reviewer" {
+		t.Fatalf("Update did not trim persisted team/agent names: %+v", updated)
+	}
+
+	updated, err = s.UpsertAgent(tm.ID, AgentConfig{Name: " reviewer ", WorkDir: "/repo", CLIType: "claude"})
+	if err != nil {
+		t.Fatalf("UpsertAgent failed: %v", err)
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0].Name != "Reviewer" || updated.Agents[0].WorkDir != "/repo" {
+		t.Fatalf("UpsertAgent did not trim before matching existing agent: %+v", updated.Agents)
+	}
+
+	updated, err = s.SetManager(tm.ID, " Reviewer ")
+	if err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+	if updated.ManagerAgent != "Reviewer" {
+		t.Fatalf("SetManager did not trim manager name: %q", updated.ManagerAgent)
+	}
+	updated, err = s.SetObserver(tm.ID, " Reviewer ")
+	if err != nil {
+		t.Fatalf("SetObserver failed: %v", err)
+	}
+	if updated.ManagerAgent != "" || updated.Agents[0].Name != "Reviewer" || updated.Agents[0].Role != RoleObserver {
+		t.Fatalf("SetObserver did not trim before clearing manager/setting observer: %+v", updated)
+	}
+}
+
+func TestStoreRejectsTrimmedInvalidNames(t *testing.T) {
+	s := newTestStore(t)
+	tm, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create TeamA failed: %v", err)
+	}
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"create trimmed leading dot team", func() error {
+			_, err := s.Create(" .hidden", "2x2", nil)
+			return err
+		}},
+		{"update trimmed leading dot agent", func() error {
+			_, err := s.Update(tm.ID, "TeamA", "2x2", []AgentConfig{{Name: " .agent"}})
+			return err
+		}},
+		{"upsert trimmed leading dot agent", func() error {
+			_, err := s.UpsertAgent(tm.ID, AgentConfig{Name: " .agent"})
+			return err
+		}},
+		{"set trimmed leading dot manager", func() error {
+			_, err := s.SetManager(tm.ID, " .manager")
+			return err
+		}},
+		{"set trimmed leading dot observer", func() error {
+			_, err := s.SetObserver(tm.ID, " .observer")
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := c.fn(); err == nil {
+				t.Fatal("expected trimmed invalid name to be rejected")
+			}
+		})
+	}
+}
+
 func TestCreateReportsChatDirFailureAndDoesNotPersistTeam(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "rooms"), []byte("not a directory"), 0o644); err != nil {

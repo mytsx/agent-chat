@@ -66,6 +66,26 @@ func TestRecordNewRunStartsFreshWindow(t *testing.T) {
 	}
 }
 
+func TestRecordDoesNotRegressLastSeen(t *testing.T) {
+	s := newTestStore(t)
+	clock := 200.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "r", "a", "claude", "/c")
+
+	clock = 150 // clock moved backwards; metadata may refresh, but time must not regress
+	s.Record("sid", "r", "a", "codex", "/new")
+	got := s.ListSessions("r", "a")
+	if len(got) != 1 {
+		t.Fatalf("ListSessions len = %d, want 1", len(got))
+	}
+	if got[0].FirstSeen != 200 || got[0].LastSeen != 200 {
+		t.Fatalf("regressed record window = %+v, want firstSeen=lastSeen=200", got[0])
+	}
+	if got[0].CLIType != "codex" || got[0].Cwd != "/new" {
+		t.Fatalf("metadata was not refreshed on backward clock re-record: %+v", got[0])
+	}
+}
+
 func TestListMatchesAgentCaseInsensitively(t *testing.T) {
 	s := newTestStore(t)
 	clock := 100.0
