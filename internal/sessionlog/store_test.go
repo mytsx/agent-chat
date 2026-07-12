@@ -326,6 +326,28 @@ func TestNewNormalizesLoadedSessionIDs(t *testing.T) {
 	}
 }
 
+func TestNewNormalizesLoadedNegativeWindows(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{
+  "sid": {"session_id":"sid","room":"r","agent_name":"a","cli_type":"claude","cwd":"/c","first_seen":200,"last_seen":100}
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-history.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListSessions("r", "a")
+	if len(got) != 1 {
+		t.Fatalf("ListSessions len = %d, want 1", len(got))
+	}
+	if got[0].FirstSeen != 200 || got[0].LastSeen != 200 {
+		t.Fatalf("loaded window = %+v, want last_seen clamped to first_seen", got[0])
+	}
+}
+
 func TestNewReturnsReadErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "session-history.json"), 0700); err != nil {

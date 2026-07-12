@@ -78,6 +78,13 @@ func normalizeLoadedRecords(records map[string]Record) map[string]Record {
 		// files can have a missing or stale embedded session_id; if left as-is the UI
 		// may list an empty/wrong resume target even though the map entry is usable.
 		record.SessionID = id
+		// Loaded history is user-editable JSON. Keep malformed windows from producing
+		// negative durations in the resume picker; live Record/Touch paths already
+		// enforce non-regression, but legacy/corrupt files need the same invariant on
+		// load.
+		if record.LastSeen < record.FirstSeen {
+			record.LastSeen = record.FirstSeen
+		}
 		normalized[id] = record
 	}
 	return normalized

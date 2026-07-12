@@ -32,6 +32,14 @@ func NewWhisperClient(apiKey string) *WhisperClient {
 // Transcribe uploads wav as multipart/form-data (model=whisper-1, language=tr)
 // and returns the transcribed text.
 func (c *WhisperClient) Transcribe(ctx context.Context, wav []byte) (string, error) {
+	apiKey, err := normalizeOpenAIAPIKey(c.apiKey)
+	if err != nil {
+		return "", fmt.Errorf("⚠️ OpenAI API anahtarı geçersiz: %w", err)
+	}
+	if apiKey == "" {
+		return "", fmt.Errorf("⚠️ OpenAI API anahtarı yok — Ayarlar'dan girin")
+	}
+
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	fw, err := w.CreateFormFile("file", "audio.wav")
@@ -55,7 +63,7 @@ func (c *WhisperClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
 	resp, err := c.http.Do(req)

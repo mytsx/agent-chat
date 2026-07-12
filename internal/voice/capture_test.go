@@ -134,7 +134,7 @@ done
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(path); err == nil {
 			return

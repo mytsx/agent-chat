@@ -283,9 +283,50 @@ func TestProcessMessage_DirectTargetNotFound(t *testing.T) {
 	o.ProcessMessage("/rooms/t", msg) // should not panic
 }
 
+func TestProcessMessage_DirectTargetCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-pilot")
+
+	msg := types.Message{From: "Navigator", To: "pilot", Content: "Can you inspect this?", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected one notification, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-pilot" {
+		t.Fatalf("expected canonical Pilot session, got %s", (*sent)[0].sessionID)
+	}
+	if !strings.Contains((*sent)[0].text, `read_messages("Pilot")`) {
+		t.Fatalf("notification should use canonical agent name, got %q", (*sent)[0].text)
+	}
+}
+
 func TestProcessMessage_ManagerRoutedAlwaysNotifiesManager(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "manager", "sess-manager")
+
+	msg := types.Message{
+		From:            "agent-2",
+		To:              "manager",
+		OriginalTo:      "agent-1",
+		Content:         "tamam",
+		Type:            "direct",
+		RoutedByManager: true,
+		ExpectsReply:    false,
+	}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected manager notification, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-manager" {
+		t.Fatalf("expected manager session notify, got %s", (*sent)[0].sessionID)
+	}
+}
+
+func TestProcessMessage_ManagerRoutedTargetCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Manager", "sess-manager")
 
 	msg := types.Message{
 		From:            "agent-2",
@@ -478,6 +519,22 @@ func TestProcessMessage_BroadcastExcludesSender(t *testing.T) {
 		if !strings.Contains(s.text, "Broadcast") {
 			t.Errorf("broadcast notification should contain 'Broadcast', got: %s", s.text)
 		}
+	}
+}
+
+func TestProcessMessage_BroadcastExcludesSenderCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-pilot")
+	o.RegisterAgent("/rooms/t", "Navigator", "sess-navigator")
+
+	msg := types.Message{From: "pilot", To: "all", Content: "Status update", Type: "broadcast", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected only non-sender notification, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-navigator" {
+		t.Fatalf("case-variant sender should be excluded, notified %s", (*sent)[0].sessionID)
 	}
 }
 

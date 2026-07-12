@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -236,6 +237,38 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 
 func notificationKey(chatDir, agentName string) string {
 	return chatDir + ":" + agentName
+}
+
+// resolveAgentSession finds target in a session snapshot using the same trimmed,
+// case-insensitive identity model as team.Store. Prefer an exact key match, then
+// a deterministic case-folded match, so message routing doesn't depend on UI
+// casing while still avoiding map-iteration nondeterminism if stale duplicate
+// runtime entries somehow exist.
+func resolveAgentSession(sessions map[string]string, target string) (agentName, sessionID string, ok bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", "", false
+	}
+	if sessionID, ok := sessions[target]; ok {
+		return target, sessionID, true
+	}
+
+	matches := make([]string, 0, 1)
+	for agent := range sessions {
+		if strings.EqualFold(strings.TrimSpace(agent), target) {
+			matches = append(matches, agent)
+		}
+	}
+	if len(matches) == 0 {
+		return "", "", false
+	}
+	sort.Strings(matches)
+	agentName = matches[0]
+	return agentName, sessions[agentName], true
+}
+
+func sameAgentName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // armFlushTimerLocked schedules a pending-notification flush for the agent.
@@ -720,12 +753,12 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 			return
 		}
 
-		target := msg.To
-		if sessionID, ok := sessionsCopy[target]; ok {
+		target, sessionID, ok := resolveAgentSession(sessionsCopy, msg.To)
+		if ok {
 			log.Printf("[ORCH] Manager-routed notify: from=%s manager=%s original_to=%s", msg.From, target, msg.OriginalTo)
 			o.notifyAgent(chatDir, target, sessionID, msg.From, false)
 		} else {
-			log.Printf("[ORCH] Manager-routed target not found: %s", target)
+			log.Printf("[ORCH] Manager-routed target not found: %s", msg.To)
 		}
 		return
 	}
@@ -751,13 +784,13 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 	if toAgent == "all" {
 		// Broadcast - notify everyone except sender
 		for agent, sessionID := range sessionsCopy {
-			if agent != fromAgent {
+			if !sameAgentName(agent, fromAgent) {
 				o.notifyAgent(chatDir, agent, sessionID, fromAgent, true)
 			}
 		}
-	} else if sessionID, ok := sessionsCopy[toAgent]; ok {
+	} else if target, sessionID, ok := resolveAgentSession(sessionsCopy, toAgent); ok {
 		// Direct message - notify target only
-		o.notifyAgent(chatDir, toAgent, sessionID, fromAgent, false)
+		o.notifyAgent(chatDir, target, sessionID, fromAgent, false)
 	} else {
 		log.Printf("[ORCH] Target agent=%s not found in sessions", toAgent)
 	}

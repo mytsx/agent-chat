@@ -74,6 +74,29 @@ func TestWhisperTranscribeTrimsAPIKey(t *testing.T) {
 	}
 }
 
+func TestWhisperTranscribeRejectsInvalidAPIKeyBeforeRequest(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		t.Fatal("server should not be called for invalid API key")
+	}))
+	defer srv.Close()
+	old := whisperEndpoint
+	whisperEndpoint = srv.URL
+	defer func() { whisperEndpoint = old }()
+
+	_, err := NewWhisperClient("sk-good\nsecond-line").Transcribe(context.Background(), []byte("RIFFfake"))
+	if err == nil {
+		t.Fatal("expected invalid API key error")
+	}
+	if called {
+		t.Fatal("invalid API key should fail before making a request")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "geçersiz") || !strings.Contains(msg, "whitespace/control") {
+		t.Fatalf("expected validation context, got %v", err)
+	}
+}
+
 func TestWhisperTranscribeErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
