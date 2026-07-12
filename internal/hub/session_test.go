@@ -133,6 +133,26 @@ func TestSaveSession_RejectsTraversalRoom(t *testing.T) {
 	}
 }
 
+// TestPersistRoom_RejectsInvalidRoom verifies periodic/shutdown persistence has
+// the same path-safety guard as explicit session snapshots. Even if an invalid
+// room is present in memory (e.g. constructed by a unit test or stale state), the
+// hub must not write ../-derived state files outside hub-state.
+func TestPersistRoom_RejectsInvalidRoom(t *testing.T) {
+	dir := t.TempDir()
+	h := newArchiveHub(dir)
+
+	room := h.getOrCreateRoom("../evil")
+	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h.persistRoom("../evil", room)
+
+	if _, statErr := os.Stat(filepath.Join(dir, "evil.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("persistRoom escaped hub-state: err=%v", statErr)
+	}
+}
+
 // TestSaveSession_SkipsUnchangedRoom verifies a room that has not changed since
 // its last snapshot is skipped — re-saving the same state is wasteful. (Roster
 // changes count as changes: join/leave append a system message, bumping the ID.)

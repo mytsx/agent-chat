@@ -90,6 +90,14 @@ func normalizeLoadedRecords(records map[string]Record) map[string]Record {
 	return normalized
 }
 
+func sessionRecordKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func sameSessionRecordField(a, b string) bool {
+	return sessionRecordKey(a) == sessionRecordKey(b)
+}
+
 // Record adds a session (FirstSeen=LastSeen=now) or, if already present, only
 // advances LastSeen (FirstSeen preserved). Empty sessionID is a no-op.
 func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
@@ -202,10 +210,10 @@ func (s *Store) ListSessions(room, agent string) []Record {
 	defer s.mu.RUnlock()
 	var out []Record
 	for _, r := range s.records {
-		// Case-insensitive: UpsertAgent preserves the config casing while Record stores
-		// the raw launch name, so "Alice" (config) and "alice" (launched) must match —
-		// the rest of the team code treats names case-insensitively (Codex P2).
-		if strings.EqualFold(r.Room, room) && strings.EqualFold(r.AgentName, agent) {
+		// Case-insensitive and trim-tolerant: UpsertAgent normalizes config names while
+		// session-history JSON is user-editable, so stray spaces in persisted records
+		// must not hide otherwise valid resume targets from the picker.
+		if sameSessionRecordField(r.Room, room) && sameSessionRecordField(r.AgentName, agent) {
 			out = append(out, r)
 		}
 	}
@@ -234,16 +242,17 @@ func (s *Store) ListAgents(room string) []string {
 	last := map[string]float64{}
 	display := map[string]string{}
 	for _, r := range s.records {
-		if !strings.EqualFold(r.Room, room) {
+		if !sameSessionRecordField(r.Room, room) {
 			continue
 		}
-		if strings.TrimSpace(r.AgentName) == "" {
+		agentName := strings.TrimSpace(r.AgentName)
+		if agentName == "" {
 			continue
 		}
-		key := strings.ToLower(r.AgentName)
+		key := sessionRecordKey(r.AgentName)
 		if _, seen := last[key]; !seen || r.LastSeen > last[key] {
 			last[key] = r.LastSeen
-			display[key] = r.AgentName
+			display[key] = agentName
 		}
 	}
 	// Sort the already-lowercased keys by last-seen, THEN map to display names — sorting
@@ -271,7 +280,7 @@ func (s *Store) ListAgents(room string) []string {
 // team's CURRENT room name). Matched case-insensitively; no-op if unchanged or the
 // store is nil (#40 Faz-2, Codex P2).
 func (s *Store) RenameRoom(oldRoom, newRoom string) {
-	if s == nil || oldRoom == "" || strings.EqualFold(oldRoom, newRoom) {
+	if s == nil || strings.TrimSpace(oldRoom) == "" || sameSessionRecordField(oldRoom, newRoom) {
 		return
 	}
 	s.mu.Lock()
@@ -279,7 +288,7 @@ func (s *Store) RenameRoom(oldRoom, newRoom string) {
 	previous := cloneRecords(s.records)
 	changed := false
 	for id, r := range s.records {
-		if strings.EqualFold(r.Room, oldRoom) {
+		if sameSessionRecordField(r.Room, oldRoom) {
 			r.Room = newRoom
 			s.records[id] = r
 			changed = true

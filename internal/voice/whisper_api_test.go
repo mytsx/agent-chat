@@ -145,3 +145,23 @@ func TestWhisperTranscribeErrorStatusTruncatesBody(t *testing.T) {
 		t.Fatalf("error body was not truncated: %d-byte error", len(msg))
 	}
 }
+
+func TestWhisperTranscribeSuccessBodyIsBounded(t *testing.T) {
+	tooLarge := strings.Repeat("x", maxWhisperSuccessBodyBytes+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, tooLarge)
+	}))
+	defer srv.Close()
+	old := whisperEndpoint
+	whisperEndpoint = srv.URL
+	defer func() { whisperEndpoint = old }()
+
+	_, err := NewWhisperClient("sk-xyz").Transcribe(context.Background(), []byte("x"))
+	if err == nil {
+		t.Fatal("expected oversized success body error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "Whisper yanıtı okunamadı") || !strings.Contains(msg, "exceeded") {
+		t.Fatalf("expected bounded response read error, got %v", err)
+	}
+}

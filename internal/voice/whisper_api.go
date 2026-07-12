@@ -18,6 +18,8 @@ var whisperEndpoint = "https://api.openai.com/v1/audio/transcriptions"
 
 const maxWhisperErrorBodyBytes = 4096
 
+const maxWhisperSuccessBodyBytes = 1 << 20
+
 const defaultWhisperHTTPTimeout = 35 * time.Second
 
 // WhisperClient calls OpenAI's /v1/audio/transcriptions with a fixed Turkish
@@ -93,7 +95,14 @@ func (c *WhisperClient) Transcribe(ctx context.Context, wav []byte) (string, err
 
 func readWhisperResponseBody(resp *http.Response) ([]byte, error) {
 	if resp.StatusCode == http.StatusOK {
-		return io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxWhisperSuccessBodyBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > maxWhisperSuccessBodyBytes {
+			return nil, fmt.Errorf("Whisper response exceeded %d bytes", maxWhisperSuccessBodyBytes)
+		}
+		return data, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWhisperErrorBodyBytes+1))
 	if len(data) > maxWhisperErrorBodyBytes {

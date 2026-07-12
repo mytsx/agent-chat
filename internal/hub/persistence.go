@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"desktop/internal/validation"
 )
 
 const persistInterval = 5 * time.Second
@@ -116,7 +118,14 @@ func (h *Hub) persistAll() {
 
 func (h *Hub) persistRoom(name string, room *RoomState) {
 	stateDir := filepath.Join(h.dataDir, "hub-state")
-	os.MkdirAll(stateDir, 0700)
+	if err := validation.ValidateName(name); err != nil {
+		h.logger.Printf("Skipping persisted state for invalid room %q: %v", name, err)
+		return
+	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		h.logger.Printf("Failed to create state dir for room %s: %v", name, err)
+		return
+	}
 
 	snapshot := room.Snapshot()
 	data, err := json.MarshalIndent(snapshot, "", "  ")
@@ -128,6 +137,11 @@ func (h *Hub) persistRoom(name string, room *RoomState) {
 	// Atomic write: temp file + rename
 	tmpPath := filepath.Join(stateDir, name+".json.tmp")
 	finalPath := filepath.Join(stateDir, name+".json")
+	cleanStateDir := filepath.Clean(stateDir)
+	if !strings.HasPrefix(filepath.Clean(finalPath), cleanStateDir+string(os.PathSeparator)) {
+		h.logger.Printf("Skipping persisted state for room %q: path escapes state dir", name)
+		return
+	}
 
 	// Hold the read lock across the tombstone check AND the write/rename so a concurrent
 	// delete_room cannot interleave between the check and the rename to resurrect the

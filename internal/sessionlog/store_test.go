@@ -121,6 +121,19 @@ func TestListMatchesAgentCaseInsensitively(t *testing.T) {
 	}
 }
 
+func TestListMatchesTrimmedRoomAndAgentNames(t *testing.T) {
+	s := newTestStore(t)
+	s.Record("sid", "  Room  ", "  Alice  ", "claude", "/c")
+
+	if got := s.ListSessions("room", "alice"); len(got) != 1 {
+		t.Fatalf("trim-tolerant ListSessions = %d, want 1", len(got))
+	}
+	agents := s.ListAgents(" room ")
+	if len(agents) != 1 || agents[0] != "Alice" {
+		t.Fatalf("ListAgents = %v, want trimmed display [Alice]", agents)
+	}
+}
+
 func TestReRecordRefreshesMetadataOnNewWindow(t *testing.T) {
 	s := newTestStore(t)
 	clock := 100.0
@@ -149,6 +162,19 @@ func TestRenameRoomReindexesHistory(t *testing.T) {
 		t.Fatalf("new-room ListSessions = %d, want 1", len(got))
 	}
 	s.RenameRoom("x", "x") // no-op, no panic
+}
+
+func TestRenameRoomMatchesTrimmedRoomNames(t *testing.T) {
+	s := newTestStore(t)
+	s.Record("sid", "  old-room  ", "alice", "claude", "/c")
+	s.RenameRoom(" old-room ", "new-room")
+
+	if got := s.ListSessions("old-room", "alice"); len(got) != 0 {
+		t.Fatalf("old-room still has records: %v", got)
+	}
+	if got := s.ListSessions("new-room", "alice"); len(got) != 1 {
+		t.Fatalf("new-room ListSessions = %d, want 1", len(got))
+	}
 }
 
 func TestGetReturnsRecordedCwd(t *testing.T) {
