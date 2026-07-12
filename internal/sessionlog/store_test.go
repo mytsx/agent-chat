@@ -274,6 +274,27 @@ func TestListAgentsIncludesLoadedZeroLastSeenRecord(t *testing.T) {
 	}
 }
 
+func TestListAgentsSkipsBlankLoadedAgentNames(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{
+  "sid-empty": {"session_id":"sid-empty","room":"r","agent_name":"","cli_type":"claude","cwd":"/c","first_seen":1,"last_seen":1},
+  "sid-space": {"session_id":"sid-space","room":"r","agent_name":"   ","cli_type":"codex","cwd":"/c","first_seen":2,"last_seen":2},
+  "sid-valid": {"session_id":"sid-valid","room":"r","agent_name":"alice","cli_type":"claude","cwd":"/c","first_seen":3,"last_seen":3}
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-history.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListAgents("r")
+	if len(got) != 1 || got[0] != "alice" {
+		t.Fatalf("ListAgents = %v, want only [alice] (blank loaded agent names hidden)", got)
+	}
+}
+
 func TestEmptySessionIDNoOp(t *testing.T) {
 	s := newTestStore(t)
 	s.Record("", "r", "a", "claude", "/c")

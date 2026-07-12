@@ -1920,7 +1920,7 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 	// advances if newer, so this is idempotent with the done-watcher and also recovers the
 	// case where that watcher raced behind an immediate close and missed the id. A still-
 	// live terminal is touched at now() — the UI-close IS the end of its window.
-	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" {
+	if cid := a.ptyManager.GetCLISessionID(sessionID); cid != "" && a.sessionLog != nil {
 		if exitedAt, exited := a.ptyManager.SessionExitedAt(sessionID); exited {
 			a.sessionLog.TouchAt(cid, exitedAt)
 		} else {

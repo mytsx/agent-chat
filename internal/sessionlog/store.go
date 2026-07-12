@@ -237,6 +237,9 @@ func (s *Store) ListAgents(room string) []string {
 		if !strings.EqualFold(r.Room, room) {
 			continue
 		}
+		if strings.TrimSpace(r.AgentName) == "" {
+			continue
+		}
 		key := strings.ToLower(r.AgentName)
 		if _, seen := last[key]; !seen || r.LastSeen > last[key] {
 			last[key] = r.LastSeen

@@ -39,8 +39,9 @@ func ensureFullPATH() {
 
 	currentPATH := os.Getenv("PATH")
 	pathSeparator := string(os.PathListSeparator)
-	pathSet := make(map[string]bool)
-	for _, p := range filepath.SplitList(currentPATH) {
+	pathEntries, pathChanged := cleanPATHEntries(currentPATH)
+	pathSet := make(map[string]bool, len(pathEntries))
+	for _, p := range pathEntries {
 		pathSet[p] = true
 	}
 
@@ -56,13 +57,26 @@ func ensureFullPATH() {
 		}
 	}
 
-	if len(toAdd) > 0 {
-		newPATH := strings.Join(toAdd, pathSeparator)
-		if currentPATH != "" {
-			newPATH = currentPATH + pathSeparator + newPATH
-		}
+	if len(toAdd) > 0 || pathChanged {
+		newPATH := strings.Join(append(pathEntries, toAdd...), pathSeparator)
 		os.Setenv("PATH", newPATH)
 	}
+}
+
+func cleanPATHEntries(pathValue string) ([]string, bool) {
+	entries := filepath.SplitList(pathValue)
+	cleaned := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	changed := false
+	for _, entry := range entries {
+		if entry == "" || seen[entry] {
+			changed = true
+			continue
+		}
+		seen[entry] = true
+		cleaned = append(cleaned, entry)
+	}
+	return cleaned, changed
 }
 
 func nvmNodeVersionDirs(home string) []string {

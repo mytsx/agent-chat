@@ -124,6 +124,20 @@ func TestSessionHistoryBindings_NilStoresAreSafe(t *testing.T) {
 	}
 }
 
+func TestCloseTerminalInternal_NilSessionLogWithCapturedIDIsSafe(t *testing.T) {
+	m := ptymgr.NewManager(nil)
+	sid, err := m.Create("", "agent", "default", "", nil, "/bin/sh", []string{"-c", "sleep 60"}, "claude")
+	if err != nil {
+		t.Fatalf("Create PTY: %v", err)
+	}
+	m.SetCLISessionID(sid, "cli-session-1")
+
+	a := &App{ptyManager: m, sessionLog: nil}
+	if err := a.closeTerminalInternal(sid, false); err != nil {
+		t.Fatalf("closeTerminalInternal with nil sessionLog returned error: %v", err)
+	}
+}
+
 // recordingInject returns an inject func that records every call and optionally
 // fails for specific session IDs. broadcastToSessions injects concurrently, so
 // the calls slice is mutex-guarded against the racing appends.

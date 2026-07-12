@@ -77,6 +77,40 @@ func TestEnsureFullPATHWithEmptyPATHDoesNotAddCurrentDirectory(t *testing.T) {
 	}
 }
 
+func TestEnsureFullPATHRemovesEmptyAndDuplicateEntriesFromExistingPATH(t *testing.T) {
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	first := filepath.Join(home, "first-bin")
+	second := filepath.Join(home, "second-bin")
+	pathSeparator := string(os.PathListSeparator)
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", strings.Join([]string{first, "", second, first, ""}, pathSeparator))
+
+	ensureFullPATH()
+
+	got := filepath.SplitList(os.Getenv("PATH"))
+	wantPrefix := []string{first, second}
+	if len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("PATH entries = %v, want prefix %v", got, wantPrefix)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, entry := range got {
+		if entry == "" {
+			t.Fatalf("PATH must not contain empty entries that resolve to the current directory: %q", os.Getenv("PATH"))
+		}
+		if seen[entry] {
+			t.Fatalf("PATH must not contain duplicate entry %q: %q", entry, os.Getenv("PATH"))
+		}
+		seen[entry] = true
+	}
+	if !seen[localBin] {
+		t.Fatalf("PATH entries = %v, want discovered user bin %q", got, localBin)
+	}
+}
+
 func TestResolveUserShellFallsBackWhenSHELLIsInvalid(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 
