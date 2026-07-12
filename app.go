@@ -2853,7 +2853,7 @@ func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
 			DurationSec: r.LastSeen - r.FirstSeen,
 		}
 		if path, ok := ingest.SessionFilePath(r.CLIType, r.Cwd, r.SessionID, r.FirstSeen); ok {
-			if _, statErr := os.Stat(path); statErr == nil {
+			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
 				si.MessageCount, si.Snippet = ingest.SessionStats(r.CLIType, path)
 			} else {
 				si.FileMissing = true

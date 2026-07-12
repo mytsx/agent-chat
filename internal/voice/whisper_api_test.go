@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+func TestNewWhisperClientHasDefaultHTTPTimeout(t *testing.T) {
+	c := NewWhisperClient("sk-xyz")
+	if c.http == nil {
+		t.Fatal("http client is nil")
+	}
+	if c.http.Timeout != defaultWhisperHTTPTimeout {
+		t.Fatalf("http timeout = %v, want %v", c.http.Timeout, defaultWhisperHTTPTimeout)
+	}
+}
+
 func TestWhisperTranscribeSendsMultipartAndParses(t *testing.T) {
 	var gotModel, gotLang, gotAuth, gotFile string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

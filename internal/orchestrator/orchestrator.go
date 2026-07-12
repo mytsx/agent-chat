@@ -235,6 +235,31 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 	return ok && sessions[agentName] == sessionID
 }
 
+// registeredAgentNameLocked returns the currently registered key for agentName
+// in chatDir using the same trimmed, case-insensitive identity model as routing.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) registeredAgentNameLocked(chatDir, agentName string) (string, bool) {
+	sessions := o.agentSessions[chatDir]
+	if sessions == nil {
+		return "", false
+	}
+	registeredName, _, ok := resolveAgentSession(sessions, agentName)
+	return registeredName, ok
+}
+
+// clearNotificationStateLocked drops cooldown/deferral state for a registered
+// agent key. Caller MUST hold o.mu.
+func (o *Orchestrator) clearNotificationStateLocked(chatDir, agentName string) {
+	key := notificationKey(chatDir, agentName)
+	delete(o.lastNotified, key)
+	if timer, ok := o.pendingTimers[key]; ok {
+		timer.Stop()
+		delete(o.pendingTimers, key)
+	}
+	delete(o.pendingMsgs, key)
+	delete(o.deferStartedAt, key)
+}
+
 func notificationKey(chatDir, agentName string) string {
 	return chatDir + ":" + agentName
 }
@@ -302,9 +327,20 @@ func (o *Orchestrator) snapshotAgentSessions(chatDir string) (sessionsCopy map[s
 
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return
+	}
+
 	o.mu.Lock()
 	if o.agentSessions[chatDir] == nil {
 		o.agentSessions[chatDir] = make(map[string]string)
+	}
+	for existingName := range o.agentSessions[chatDir] {
+		if existingName != agentName && sameAgentName(existingName, agentName) {
+			delete(o.agentSessions[chatDir], existingName)
+			o.clearNotificationStateLocked(chatDir, existingName)
+		}
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
 	o.mu.Unlock()
@@ -315,6 +351,9 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if registeredName, ok := o.registeredAgentNameLocked(chatDir, agentName); ok {
+		agentName = registeredName
+	}
 	o.unregisterAgentLocked(chatDir, agentName)
 }
 
@@ -324,6 +363,9 @@ func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 func (o *Orchestrator) UnregisterAgentSession(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if registeredName, ok := o.registeredAgentNameLocked(chatDir, agentName); ok {
+		agentName = registeredName
+	}
 	if sessions, ok := o.agentSessions[chatDir]; ok && sessions[agentName] != sessionID {
 		return
 	}
@@ -340,14 +382,7 @@ func (o *Orchestrator) unregisterAgentLocked(chatDir, agentName string) {
 		}
 	}
 	// F007: Clean up cooldown/deferral tracking for this agent
-	key := notificationKey(chatDir, agentName)
-	delete(o.lastNotified, key)
-	if timer, ok := o.pendingTimers[key]; ok {
-		timer.Stop()
-		delete(o.pendingTimers, key)
-	}
-	delete(o.pendingMsgs, key)
-	delete(o.deferStartedAt, key)
+	o.clearNotificationStateLocked(chatDir, agentName)
 }
 
 // AnalyzeMessage analyzes a message and decides what action to take

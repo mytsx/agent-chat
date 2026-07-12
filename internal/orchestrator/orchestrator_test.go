@@ -243,6 +243,55 @@ func TestUnregisterAgentSessionIgnoresStaleSession(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentReplacesCaseVariantRegistration(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-old")
+	o.RegisterAgent("/rooms/t", "pilot", "sess-new")
+
+	o.mu.Lock()
+	sessions := o.agentSessions["/rooms/t"]
+	_, hasOld := sessions["Pilot"]
+	gotNew := sessions["pilot"]
+	count := len(sessions)
+	o.mu.Unlock()
+	if hasOld || count != 1 || gotNew != "sess-new" {
+		t.Fatalf("case-variant registration left stale runtime entries: sessions=%v", sessions)
+	}
+
+	msg := types.Message{From: "Navigator", To: "PILOT", Content: "Can you inspect this?", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+	if len(*sent) != 1 {
+		t.Fatalf("expected one notification after case-variant replace, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-new" {
+		t.Fatalf("expected latest session to be notified, got %s", (*sent)[0].sessionID)
+	}
+	if !strings.Contains((*sent)[0].text, `read_messages("pilot")`) {
+		t.Fatalf("notification should use latest joined agent name, got %q", (*sent)[0].text)
+	}
+}
+
+func TestUnregisterAgentSessionMatchesCaseVariantName(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "Pilot", "sess-pilot")
+
+	o.UnregisterAgentSession("/rooms/team1", "pilot", "sess-other")
+	o.mu.Lock()
+	_, stillRegistered := o.agentSessions["/rooms/team1"]["Pilot"]
+	o.mu.Unlock()
+	if !stillRegistered {
+		t.Fatal("stale case-variant session unregister removed current mapping")
+	}
+
+	o.UnregisterAgentSession("/rooms/team1", "pilot", "sess-pilot")
+	o.mu.Lock()
+	_, roomExists := o.agentSessions["/rooms/team1"]
+	o.mu.Unlock()
+	if roomExists {
+		t.Fatal("case-variant unregister did not remove the matching registered session")
+	}
+}
+
 // ── ProcessMessage routing tests ──
 
 func TestProcessMessage_SystemSkipped(t *testing.T) {

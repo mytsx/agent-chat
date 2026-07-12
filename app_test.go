@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -70,6 +72,41 @@ func TestListAgentSessions_CaseInsensitiveAndFileMissing(t *testing.T) {
 	}
 	if got[0].SessionID != "sid-a" || !got[0].FileMissing {
 		t.Fatalf("session = %+v, want sid-a with FileMissing=true", got[0])
+	}
+}
+
+func TestListAgentSessions_TreatsNonRegularTranscriptAsMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store, err := team.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm, err := store.Create("MyTeam", "2x2", []team.AgentConfig{{Name: "alice", CLIType: "claude"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl, err := sessionlog.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{teamStore: store, sessionLog: sl}
+
+	const sid = "sid-dir"
+	const cwd = "/tmp/repo"
+	transcriptDir := filepath.Join(home, ".claude", "projects", "-tmp-repo", sid+".jsonl")
+	if err := os.MkdirAll(transcriptDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sl.Record(sid, "MyTeam", "alice", "claude", cwd)
+
+	got := a.ListAgentSessions(tm.ID, "alice")
+	if len(got) != 1 {
+		t.Fatalf("ListAgentSessions = %d, want 1", len(got))
+	}
+	if !got[0].FileMissing || got[0].MessageCount != 0 || got[0].Snippet != "" {
+		t.Fatalf("session for directory transcript = %+v, want FileMissing with empty stats", got[0])
 	}
 }
 
