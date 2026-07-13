@@ -184,6 +184,19 @@ async function replaceTerminalFromBackend(
   const newSessionID = await replaceBackendSession(sessionID);
   set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
 
+  // If the terminal was closed (removeTerminal) while the backend replace was in
+  // flight, the old sessionID is already gone from the store, so replaceSessionID's
+  // map() couldn't graft the new id in — the freshly-spawned backend PTY would leak.
+  // The user closed the terminal, so the new PTY should not survive: close it. Runs
+  // once per replace (single-flight coalesces callers), so no double-close (Gemini
+  // PR #77 high).
+  const tracked = (get().sessions[teamID] ?? []).some((t) => t.sessionID === newSessionID);
+  if (!tracked) {
+    CloseTerminal(newSessionID).catch((e) =>
+      console.error(`[${action}] orphaned PTY temizlenemedi (${newSessionID}):`, e)
+    );
+  }
+
   return newSessionID;
 }
 
