@@ -128,7 +128,7 @@ func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	pending := len(o.pendingMsgs[key])
@@ -164,7 +164,7 @@ func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	_, hasTimer := o.pendingTimers[key]
@@ -204,7 +204,7 @@ func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	pending := len(o.pendingMsgs[key])
@@ -246,7 +246,7 @@ func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	_, hasDefer := o.deferStartedAt[key]
@@ -279,7 +279,7 @@ func TestFlushPending_StaleSessionDropped(t *testing.T) {
 	o.mu.Unlock()
 
 	// An old timer fires with the STALE sessionID.
-	o.flushPending("/rooms/t", "agent-1", "sess-OLD")
+	o.flushPending("/rooms/t", "agent-1", "sess-OLD", nil)
 
 	o.mu.Lock()
 	remaining := len(o.pendingMsgs[key])
@@ -371,7 +371,7 @@ func TestFlushPending_RaceReDefersPreservingOrderAndCap(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	msgs := o.pendingMsgs[key]
@@ -405,7 +405,7 @@ func TestFlushPending_SingleMessageWording(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	if len(*sent) != 1 {
 		t.Fatalf("expected 1 send, got %d", len(*sent))

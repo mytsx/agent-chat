@@ -242,14 +242,16 @@ func notificationKey(chatDir, agentName string) string {
 // Caller MUST hold o.mu.
 func (o *Orchestrator) armFlushTimerLocked(key, chatDir, agentName, sessionID string, delay time.Duration) {
 	// The callback runs on time.AfterFunc's own goroutine and needs the *Timer it is
-	// about to be assigned. Passing it via a plain captured variable is a data race:
-	// this goroutine writes `timer` while the callback reads it, with no
-	// happens-before edge (a near-zero delay can fire the callback before the write is
-	// visible, yielding nil). Hand the pointer over through an atomic.Pointer so the
-	// store/load is synchronized.
+	// about to be assigned. A plain captured variable is a data race (write here vs.
+	// read in the callback, no happens-before edge). Pass the atomic.Pointer *itself*
+	// to flushPending, which Loads it AFTER acquiring o.mu: this function runs while
+	// the caller holds o.mu and Stores under that lock, so by the time the callback's
+	// flushPending takes o.mu the Store is guaranteed visible. Loading in the argument
+	// list instead (before the lock) could observe nil if the timer fires before Store
+	// runs, which would then skip the stale-timer cleanup and rot the pending queue.
 	var timerPtr atomic.Pointer[time.Timer]
 	timer := time.AfterFunc(delay, func() {
-		o.flushPending(chatDir, agentName, sessionID, timerPtr.Load())
+		o.flushPending(chatDir, agentName, sessionID, &timerPtr)
 	})
 	timerPtr.Store(timer)
 	o.pendingTimers[key] = timer
@@ -574,12 +576,8 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 // If the user still has a pending line it RE-ARMs the single timer (up to
 // maxDeferral); once the cap is exceeded it routes to the UI fallback instead of
 // corrupting the PTY input.
-func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string, expectedTimers ...*time.Timer) {
+func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string, timerPtr *atomic.Pointer[time.Timer]) {
 	key := notificationKey(chatDir, agentName)
-	var expectedTimer *time.Timer
-	if len(expectedTimers) > 0 {
-		expectedTimer = expectedTimers[0]
-	}
 
 	// Query pending-input OUTSIDE o.mu (lock ordering).
 	pending := o.hasPendingInput(sessionID)
@@ -592,6 +590,14 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string, expect
 		// owns the timer slot and pending messages remain for the same agent name,
 		// re-arm them against the current session; otherwise the slot would keep
 		// pointing at an already-fired stale timer and the pending queue could rot.
+		//
+		// Load the owning timer HERE, under o.mu (not in the caller's argument list):
+		// armFlushTimerLocked Stored it while holding o.mu, so acquiring o.mu makes the
+		// Store visible and the Load can never observe the early-fire nil.
+		var expectedTimer *time.Timer
+		if timerPtr != nil {
+			expectedTimer = timerPtr.Load()
+		}
 		if expectedTimer != nil && o.pendingTimers[key] == expectedTimer {
 			delete(o.pendingTimers, key)
 			if currentSession := o.agentSessions[chatDir][agentName]; currentSession != "" && len(o.pendingMsgs[key]) > 0 {

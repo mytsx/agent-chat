@@ -400,7 +400,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 		t.Errorf("expected 3 pending, got %d", pLen)
 	}
 
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111")
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil)
 
 	o.mu.Lock()
 	rp := len(o.pendingMsgs[key])
@@ -417,7 +417,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 
 func TestFlushPending_Empty(t *testing.T) {
 	o, _ := newTestOrchestrator()
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111") // should not panic
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil) // should not panic
 }
 
 func TestNotifyAgent_AfterCooldownExpired(t *testing.T) {
@@ -717,7 +717,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	}
 
 	// Manual flush (simulating timer expiry)
-	o.flushPending("/rooms/t", "bob", "sess-bob")
+	o.flushPending("/rooms/t", "bob", "sess-bob", nil)
 
 	if len(*sent) != 2 {
 		t.Errorf("after flush, expected 2 total sent notifications, got %d", len(*sent))
