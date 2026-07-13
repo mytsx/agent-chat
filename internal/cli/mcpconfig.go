@@ -151,7 +151,10 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 		}
 		if err := json.Unmarshal(data, &config); err != nil {
 			backupPath := configPath + ".bak"
-			os.WriteFile(backupPath, data, 0644)
+			// Preserve the original file's permissions on the backup: CLI config files
+			// (e.g. ~/.claude.json) can hold API keys/tokens at 0600, so a hardcoded
+			// 0644 backup would widen access and leak secrets.
+			os.WriteFile(backupPath, data, writeMode)
 			config = make(map[string]any)
 		}
 	} else if !os.IsNotExist(err) {
