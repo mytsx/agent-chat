@@ -789,3 +789,18 @@ func TestMultipleChatDirs(t *testing.T) {
 		t.Errorf("expected notification to bob in team1, got %s", (*sent)[0].sessionID)
 	}
 }
+
+func TestSanitizeNotificationPrompt_StripsControlAndFlattens(t *testing.T) {
+	got := sanitizeNotificationPrompt("hi\x1b[201~\nthere\ttab\x00")
+	for _, r := range got {
+		if r == '\x1b' || r == '\x00' || r == '\n' || r == '\t' {
+			t.Fatalf("sanitized prompt retains control/paste rune %q in %q", r, got)
+		}
+	}
+	if !strings.Contains(got, "hi") || !strings.Contains(got, "there") || !strings.Contains(got, "tab") {
+		t.Fatalf("sanitized prompt dropped visible content: %q", got)
+	}
+	if sanitizeNotificationPrompt("\x1b[201~\x00") != "" {
+		t.Fatalf("all-unsafe prompt should sanitize to empty")
+	}
+}
