@@ -308,12 +308,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
             aria-pressed={voiceState === "recording"}
             title={
               voiceState === "recording"
-                ? "Kaydediliyor… bırakınca yazılır"
+                ? "Recording… release to insert"
                 : voiceState === "transcribing"
-                ? "Çevriliyor…"
+                ? "Transcribing…"
                 : voiceError
                 ? voiceError
-                : "Bas-konuş (sesli prompt)"
+                : "Push to talk (voice prompt)"
             }
           >
             {voiceState === "recording" ? (
@@ -353,7 +353,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               onClick={onResume}
               disabled={!canResume}
               aria-label={canResume ? `Resume ${terminalLabel} session` : `No resumable session for ${terminalLabel}`}
-              title={canResume ? "Oturumdan devam et (--resume)" : "Devam edilebilir oturum hen\u00FCz yakalanmad\u0131"}
+              title={canResume ? "Resume session (--resume)" : "No resumable session captured yet"}
             >
               {"\u23EF"}
             </button>
