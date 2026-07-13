@@ -2,8 +2,31 @@ package mcpserver
 
 import (
 	"encoding/json"
+	"io"
+	"log"
 	"testing"
+
+	"desktop/internal/types"
 )
+
+// responseFromHub must not panic if the hub client ever returns (nil resp, nil err);
+// it should surface a clear error result instead of dereferencing resp.Success.
+func TestResponseFromHub_NilResponse(t *testing.T) {
+	t.Parallel()
+
+	h := &toolHandlers{logger: log.New(io.Discard, "", 0)}
+	call := func() (*types.Response, error) { return nil, nil }
+	resp, result, err := h.responseFromHub("tool", call)
+	if err != nil {
+		t.Fatalf("responseFromHub() err = %v, want nil", err)
+	}
+	if resp != nil {
+		t.Fatalf("responseFromHub() resp = %#v, want nil", resp)
+	}
+	if result == nil {
+		t.Fatal("responseFromHub(nil response) result = nil, want error result")
+	}
+}
 
 func TestInvalidNamesResult(t *testing.T) {
 	t.Parallel()

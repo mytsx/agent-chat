@@ -31,6 +31,14 @@ func TestEnsureSuccess(t *testing.T) {
 			t.Fatalf("ensureSuccess() error = %q, want %q", err.Error(), want)
 		}
 	})
+
+	t.Run("nil response returns error instead of panicking", func(t *testing.T) {
+		t.Parallel()
+		err := ensureSuccess("operation", nil)
+		if err == nil {
+			t.Fatal("ensureSuccess(nil) error = nil, want failure")
+		}
+	})
 }
 
 func TestDecodeSuccessData(t *testing.T) {

@@ -880,6 +880,12 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 	}
 
 	room := h.resolveRoom(req.Room)
+	// room feeds getOrCreateRoom → persistRoom (hub-state/{room}.json), so reject a
+	// traversal name here the same way clear_room/archive_room/delete_room do, rather
+	// than materializing an unvalidated room in memory that would be written to disk.
+	if !c.requireValidName(req, room) {
+		return
+	}
 
 	if data.To != "all" {
 		if !c.requireValidName(req, data.To) {
@@ -952,6 +958,11 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 	json.Unmarshal(req.Data, &data)
 
 	room := h.resolveRoom(req.Room)
+	// room feeds getOrCreateRoom → persistRoom (hub-state/{room}.json); validate it as a
+	// filename so a desktop-authorized caller can't materialize a traversal-named room.
+	if !c.requireValidName(req, room) {
+		return
+	}
 
 	if !c.requireJoinedRoomOrDesktop(req, room, "önce yetkili desktop identify veya join_room çağırmalısınız", "yalnızca katıldığınız odadan sorgulama yapabilirsiniz: %s") {
 		return

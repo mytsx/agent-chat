@@ -40,10 +40,19 @@ func TestNewStoreReportsCorruptPromptsJSON(t *testing.T) {
 			}
 
 			errPrefix := "load prompts"
-			if _, err := NewStore(dir); err == nil {
-				t.Fatal("NewStore must report corrupt prompts.json instead of starting with an empty store")
+			s, err := NewStore(dir)
+			if err == nil {
+				t.Fatal("NewStore must report corrupt prompts.json instead of silently starting empty")
 			} else if !strings.Contains(err.Error(), errPrefix) {
 				t.Fatalf("NewStore error = %q, want %q context", err, errPrefix)
+			}
+			// Even on corrupt JSON the store must be usable (non-nil, empty roster) so a
+			// caller that discards the error — e.g. startup — never nil derefs.
+			if s == nil {
+				t.Fatal("NewStore must return a usable store even when reporting corrupt JSON")
+			}
+			if got := s.List(); len(got) != 0 {
+				t.Fatalf("corrupt-JSON store should start empty, got %d prompts", len(got))
 			}
 		})
 	}

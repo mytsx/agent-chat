@@ -47,7 +47,12 @@ func NewStore(dataDir string) (*Store, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			s.prompts = []Prompt{}
 		} else {
-			return nil, fmt.Errorf("load prompts: %w", err)
+			// Corrupt/unreadable prompts.json: start empty so callers (including
+			// startup, which discards this error) always get a usable, non-nil store
+			// instead of a nil deref. The error is still returned; the bad file stays
+			// on disk untouched until the next successful save overwrites it.
+			s.prompts = []Prompt{}
+			return s, fmt.Errorf("load prompts: %w", err)
 		}
 	}
 

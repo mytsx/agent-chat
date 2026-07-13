@@ -140,6 +140,12 @@ func (c *HubClient) forgetPending(id string) {
 }
 
 func ensureSuccess(operation string, resp *types.Response) error {
+	// Send returns (non-nil resp, nil err) on success and (nil, err) on failure, so a
+	// nil resp here should be unreachable — guard anyway so a future transport change
+	// surfaces a clear error instead of a nil-pointer panic.
+	if resp == nil {
+		return fmt.Errorf("%s failed: hub'dan boş yanıt", operation)
+	}
 	if resp.Success {
 		return nil
 	}

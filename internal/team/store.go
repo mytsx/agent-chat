@@ -108,7 +108,13 @@ func NewStore(dataDir string) (*Store, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			s.teams = []Team{}
 		} else {
-			return nil, fmt.Errorf("load teams: %w", err)
+			// Corrupt/unreadable teams.json: start with an empty roster so callers
+			// (including startup, which discards this error) always get a usable,
+			// non-nil store instead of a nil deref. The error is still returned so
+			// callers can surface it; the bad file is left on disk untouched until
+			// the next successful save overwrites it.
+			s.teams = []Team{}
+			return s, fmt.Errorf("load teams: %w", err)
 		}
 	}
 

@@ -168,9 +168,19 @@ func (a *App) startup(ctx context.Context) {
 		runtime.EventsEmit(a.ctx, event, payload)
 	}
 
-	// Initialize stores
-	a.promptStore, _ = prompt.NewStore(a.dataDir)
-	a.teamStore, _ = team.NewStore(a.dataDir)
+	// Initialize stores. NewStore always returns a usable (non-nil) store even when
+	// the on-disk JSON is corrupt — it falls back to an empty roster and returns the
+	// error — so downstream use (seedPrompts, subscribeExistingTeams) can never nil
+	// deref. Log the error so a corrupt file isn't silently ignored.
+	var promptErr, teamErr error
+	a.promptStore, promptErr = prompt.NewStore(a.dataDir)
+	if promptErr != nil {
+		log.Printf("[STARTUP] prompt store yüklenemedi, boş store ile devam: %v", promptErr)
+	}
+	a.teamStore, teamErr = team.NewStore(a.dataDir)
+	if teamErr != nil {
+		log.Printf("[STARTUP] team store yüklenemedi, boş store ile devam: %v", teamErr)
+	}
 
 	// Seed prompts from existing files
 	a.seedPrompts()

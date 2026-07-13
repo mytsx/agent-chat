@@ -366,8 +366,20 @@ func TestNewStoreReportsCorruptTeamsJSON(t *testing.T) {
 				t.Fatalf("write corrupt teams.json failed: %v", err)
 			}
 
-			if _, err := NewStore(dir); err == nil {
-				t.Fatal("NewStore must report corrupt teams.json instead of starting with an empty store")
+			s, err := NewStore(dir)
+			if err == nil {
+				t.Fatal("NewStore must report corrupt teams.json instead of silently starting empty")
+			} else if !strings.Contains(err.Error(), "load teams") {
+				t.Fatalf("NewStore error = %q, want \"load teams\" context", err)
+			}
+			// Even on corrupt JSON the store must be usable (non-nil, empty roster) so a
+			// caller that discards the error — app.go startup, then subscribeExistingTeams
+			// → teamStore.List() — never nil derefs.
+			if s == nil {
+				t.Fatal("NewStore must return a usable store even when reporting corrupt JSON")
+			}
+			if got := s.List(); len(got) != 0 {
+				t.Fatalf("corrupt-JSON store should start empty, got %d teams", len(got))
 			}
 		})
 	}

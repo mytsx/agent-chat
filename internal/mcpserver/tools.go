@@ -79,6 +79,12 @@ func (h *toolHandlers) responseFromHub(tool string, call func() (*types.Response
 		result, resultErr := toolResultError(err)
 		return nil, result, resultErr
 	}
+	// The hub client returns (non-nil resp, nil err) on success, so a nil resp here is
+	// unreachable in normal operation; guard so a future client change surfaces a clear
+	// error instead of a nil-pointer panic on resp.Success below.
+	if resp == nil {
+		return nil, mcp.NewToolResultError("hub'dan boş yanıt alındı"), nil
+	}
 	if !resp.Success {
 		return nil, mcp.NewToolResultError(resp.Error), nil
 	}
