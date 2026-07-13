@@ -80,6 +80,52 @@ func TestPollOnce_AdvancesCursor(t *testing.T) {
 	}
 }
 
+// The graceful-exit command the app injects into a terminal's PTY on close
+// (/exit, /quit) must never be emitted as a room prompt: a CLI that records it in
+// its transcript would otherwise pollute the room history and session summaries
+// with a shutdown keystroke (Codex PR #76 P2). It carries no self-injection
+// fingerprint, so pollOnce recognizes it by exact content instead.
+func TestPollOnce_SuppressesGracefulExitCommand(t *testing.T) {
+	ad := &fakeAdapter{batches: [][]ParsedMessage{{
+		pm("gerçek kullanıcı mesajı", 1),
+		pm("/exit", 2), // app-injected graceful-exit command on Close()/CloseAll()
+	}}}
+	fp := newFingerprintStore()
+
+	var mu sync.Mutex
+	var emitted []string
+	cur := pollOnce(ad, "fake", Cursor{}, fp, truthyEmit(&emitted, &mu))
+
+	if len(emitted) != 1 || emitted[0] != "gerçek kullanıcı mesajı" {
+		t.Fatalf("emitted = %v, want only the real user message (exit command suppressed)", emitted)
+	}
+	if cur.Offset != 2 {
+		t.Fatalf("cursor = %d, want 2 (advanced past the suppressed exit command)", cur.Offset)
+	}
+}
+
+func TestIsCLIExitCommand(t *testing.T) {
+	tests := []struct {
+		content string
+		want    bool
+	}{
+		{"/exit", true},        // claude/copilot/codex
+		{"/quit", true},        // gemini
+		{"exit", true},         // shell
+		{"  /exit  ", true},    // surrounding whitespace trimmed
+		{"/exit şimdi", false}, // more than the bare command
+		{"ne yapar /exit?", false},
+		{"/exithch", false},
+		{"", false},
+		{"gerçek kullanıcı mesajı", false},
+	}
+	for _, tt := range tests {
+		if got := isCLIExitCommand(tt.content); got != tt.want {
+			t.Errorf("isCLIExitCommand(%q) = %v, want %v", tt.content, got, tt.want)
+		}
+	}
+}
+
 // When an emit FAILS (hub unavailable mid-RPC), the cursor must NOT advance past
 // the failed message — it is retried next tick rather than silently lost (#65).
 func TestPollOnce_EmitFailureKeepsCursorBeforeMessage(t *testing.T) {
