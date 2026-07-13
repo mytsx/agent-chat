@@ -8,25 +8,24 @@ import (
 	"time"
 )
 
-// cliExitCommands are the graceful-exit commands the app injects into a terminal's
-// PTY on close (see pty.gracefulExitCommand). Unlike startup/broadcast/prompt-send
-// injections these carry NO self-injection fingerprint, so a CLI that records the
-// command in its transcript would have it ingested and logged as a user_prompt,
-// polluting the room history and session summaries with a shutdown keystroke
-// (Codex PR #76 P2). Keep in sync with pty.gracefulExitCommand.
-var cliExitCommands = map[string]struct{}{
-	"/exit": {},
-	"/quit": {},
-	"exit":  {},
-}
-
-// isCLIExitCommand reports whether content is exactly one of the app-injected
-// graceful-exit commands (whitespace-trimmed). It matches the WHOLE trimmed content
-// so a genuine prompt that merely mentions /exit is still emitted — and a bare
-// /exit is never meaningful room content anyway, since it exits the CLI.
+// isCLIExitCommand reports whether content is exactly one of the graceful-exit
+// commands the app injects into a terminal's PTY on close (see
+// pty.gracefulExitCommand). Unlike startup/broadcast/prompt-send injections these
+// carry NO self-injection fingerprint, so a CLI that records the command in its
+// transcript would have it ingested and logged as a user_prompt, polluting room
+// history and session summaries with a shutdown keystroke (Codex PR #76 P2).
+//
+// The WHOLE trimmed content must match, so a genuine prompt that merely mentions
+// /exit is still emitted — and a bare /exit is never meaningful room content
+// anyway, since it exits the CLI. Keep the cases in sync with
+// pty.gracefulExitCommand.
 func isCLIExitCommand(content string) bool {
-	_, ok := cliExitCommands[strings.TrimSpace(content)]
-	return ok
+	switch strings.TrimSpace(content) {
+	case "/exit", "/quit", "exit":
+		return true
+	default:
+		return false
+	}
 }
 
 // pollInterval is how often a watcher re-reads its session file. 700ms balances

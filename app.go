@@ -1697,7 +1697,7 @@ func (a *App) logUserPrompt(sessionID, content string) {
 // pty.SanitizeCopilotInput); every other CLI receives the bracketed-paste text
 // verbatim, so it is already faithful and passes through unchanged.
 func deliveredForTranscript(cliType, content string) string {
-	if cliType == "copilot" {
+	if cliType == string(cli.CLICopilot) {
 		return ptymgr.SanitizeCopilotInput(content)
 	}
 	return content
