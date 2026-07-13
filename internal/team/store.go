@@ -93,6 +93,20 @@ func cloneTeam(t Team) Team {
 	return t
 }
 
+// normalizeRequiredName trims a required team/agent name, rejects it when blank, then
+// validates it. validation.ValidateName alone accepts an empty or whitespace-only
+// string, so a required identifier must be trimmed and blank-checked up front.
+func normalizeRequiredName(kind, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("%s adı gerekli", kind)
+	}
+	if err := validation.ValidateName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -124,9 +138,13 @@ func NewStore(dataDir string) (*Store, error) {
 func (s *Store) load() error {
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
-		return err
+		// Wrap with %w so NewStore's errors.Is(err, os.ErrNotExist) still matches.
+		return fmt.Errorf("read teams file %s: %w", s.filePath, err)
 	}
-	return json.Unmarshal(data, &s.teams)
+	if err := json.Unmarshal(data, &s.teams); err != nil {
+		return fmt.Errorf("parse teams file %s: %w", s.filePath, err)
+	}
+	return nil
 }
 
 // save serializes the teams to disk atomically (temp file + rename) so a crash
@@ -186,7 +204,8 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	if s == nil {
 		return Team{}, fmt.Errorf("team store unavailable")
 	}
-	if err := validation.ValidateName(name); err != nil {
+	name, err := normalizeRequiredName("takım", name)
+	if err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
 
@@ -231,7 +250,8 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 	if s == nil {
 		return Team{}, fmt.Errorf("team store unavailable")
 	}
-	if err := validation.ValidateName(name); err != nil {
+	name, err := normalizeRequiredName("takım", name)
+	if err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
 
@@ -275,9 +295,11 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 	if s == nil {
 		return Team{}, fmt.Errorf("team store unavailable")
 	}
-	if err := validation.ValidateName(cfg.Name); err != nil {
+	normName, err := normalizeRequiredName("agent", cfg.Name)
+	if err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
+	cfg.Name = normName
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -357,6 +379,9 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 	if s == nil {
 		return Team{}, fmt.Errorf("team store unavailable")
 	}
+	// Trim first: a whitespace-only manager clears the role (like ""), and a real
+	// name is stored trimmed so it matches the case-insensitive agent identity model.
+	managerAgent = strings.TrimSpace(managerAgent)
 	if managerAgent != "" {
 		if err := validation.ValidateName(managerAgent); err != nil {
 			return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
@@ -400,7 +425,8 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 	if s == nil {
 		return Team{}, fmt.Errorf("team store unavailable")
 	}
-	if err := validation.ValidateName(name); err != nil {
+	name, err := normalizeRequiredName("agent", name)
+	if err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
 

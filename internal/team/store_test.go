@@ -56,6 +56,44 @@ func TestNilTeamStoreMethodsAreSafe(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsBlankRequiredNames(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Create("", "2x2", nil); err == nil {
+		t.Fatal("Create(\"\") should fail — team name is required")
+	}
+	if _, err := s.Create("   ", "2x2", nil); err == nil {
+		t.Fatal("Create(whitespace-only) should fail")
+	}
+	tm, err := s.Create("RealTeam", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create valid: %v", err)
+	}
+	if _, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "  "}); err == nil {
+		t.Fatal("UpsertAgent(whitespace name) should fail")
+	}
+	if _, err := s.SetObserver(tm.ID, ""); err == nil {
+		t.Fatal("SetObserver(\"\") should fail")
+	}
+}
+
+func TestUpsertAgentTrimsName(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("T", "2x2", nil)
+	got, err := s.UpsertAgent(tm.ID, AgentConfig{Name: "  Bob  ", CLIType: "claude"})
+	if err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	found := false
+	for _, a := range got.Agents {
+		if a.Name == "Bob" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("agent name not trimmed to 'Bob': %+v", got.Agents)
+	}
+}
+
 func TestUpsertAgentAddsNewAgent(t *testing.T) {
 	s := newTestStore(t)
 	team, err := s.Create("TeamA", "2x2", nil)
