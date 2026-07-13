@@ -111,9 +111,14 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 
 	r.cleanupStaleLocked()
 
-	if _, exists := r.agents[agentName]; exists {
-		r.mu.Unlock()
-		return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", agentName)
+	// Reject a case-insensitive duplicate, not just an exact key match: the hub, team
+	// store and orchestrator treat agent names case-insensitively (sameAgentName), so
+	// letting 'Pilot' and ' pilot ' coexist would split manager/observer/identity logic.
+	for existing := range r.agents {
+		if sameAgentName(existing, agentName) {
+			r.mu.Unlock()
+			return types.Message{}, nil, fmt.Errorf("agent adı '%s' bu odada zaten kullanımda", existing)
+		}
 	}
 
 	isManager := strings.EqualFold(strings.TrimSpace(role), "manager")

@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"desktop/internal/types"
@@ -19,9 +20,14 @@ const (
 
 // Client represents a single WebSocket connection to the hub.
 type Client struct {
-	hub        *Hub
-	conn       *websocket.Conn
-	send       chan []byte
+	hub  *Hub
+	conn *websocket.Conn
+	send chan []byte
+	// sendMu serializes sendJSON against closeSend so a broadcast/handler that calls
+	// sendJSON while unregister/shutdown tears the client down can never send on a
+	// closed channel (which panics even inside a select). sendClosed latches the close.
+	sendMu     sync.Mutex
+	sendClosed bool
 	rooms      map[string]bool // subscribed rooms
 	clientType string          // "mcp" or "desktop"
 	// desktopAuthed is true only when client_type=desktop is validated with hub auth token.
@@ -146,11 +152,29 @@ func (c *Client) drainQueuedTextMessages() error {
 	return nil
 }
 
+// closeSend closes the outbound queue exactly once. Request handlers and broadcasts
+// can call sendJSON while unregister/shutdown tears the client down, so sends and the
+// close must be serialized (under sendMu) to avoid a send-on-closed-channel panic.
+func (c *Client) closeSend() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed {
+		return
+	}
+	c.sendClosed = true
+	close(c.send)
+}
+
 // sendJSON sends a JSON-encoded message to this client.
 func (c *Client) sendJSON(v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("sendJSON marshal error: %v", err)
+		return
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.sendClosed {
 		return
 	}
 	select {

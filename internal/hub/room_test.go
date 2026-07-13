@@ -17,6 +17,20 @@ func TestRoomJoin_DuplicateNameRejected(t *testing.T) {
 	}
 }
 
+func TestRoomJoin_DuplicateNameRejectedCaseInsensitive(t *testing.T) {
+	r := NewRoomState()
+
+	if _, _, err := r.Join("Pilot", "developer"); err != nil {
+		t.Fatalf("first join should succeed: %v", err)
+	}
+	if _, _, err := r.Join(" pilot ", "developer"); err == nil {
+		t.Fatalf("case-variant duplicate join should fail")
+	}
+	if got := len(r.GetAgents()); got != 1 {
+		t.Fatalf("case-variant duplicate should not add a second roster entry, got %d", got)
+	}
+}
+
 func TestRoomJoin_SecondManagerRejected(t *testing.T) {
 	r := NewRoomState()
 

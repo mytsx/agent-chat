@@ -86,6 +86,9 @@ type Hub struct {
 	inflightRequests sync.WaitGroup
 
 	listener net.Listener
+	// shutdownOnce makes Shutdown idempotent. App lifecycle hooks and tests may
+	// call it from multiple paths; closing done twice would otherwise panic.
+	shutdownOnce sync.Once
 }
 
 // New creates a new Hub.
@@ -129,7 +132,11 @@ func (h *Hub) Run(port int) error {
 	// Write port file
 	portPath := filepath.Join(h.dataDir, "hub.port")
 	if err := os.WriteFile(portPath, []byte(fmt.Sprintf("%d", actualPort)), 0644); err != nil {
-		h.logger.Printf("Failed to write hub.port: %v", err)
+		// Without a discoverable port file, MCP clients can't find the hub — fail loudly
+		// instead of serving on an unreachable port.
+		ln.Close()
+		h.listener = nil
+		return fmt.Errorf("write hub.port: %w", err)
 	}
 
 	// Start client manager
@@ -160,8 +167,13 @@ func (h *Hub) Port() int {
 	return h.listener.Addr().(*net.TCPAddr).Port
 }
 
-// Shutdown stops the hub gracefully.
+// Shutdown stops the hub gracefully. Idempotent: safe to call from multiple
+// lifecycle paths (a second call is a no-op rather than a double-close panic).
 func (h *Hub) Shutdown() {
+	h.shutdownOnce.Do(h.shutdown)
+}
+
+func (h *Hub) shutdown() {
 	close(h.done)
 
 	// Stop accepting new connections, then stop handling new requests and wait
@@ -207,7 +219,7 @@ func (h *Hub) Shutdown() {
 	// Close all client connections
 	h.mu.Lock()
 	for client := range h.clients {
-		close(client.send)
+		client.closeSend()
 		client.conn.Close()
 	}
 	h.mu.Unlock()
@@ -268,7 +280,7 @@ func (h *Hub) runClientManager() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				client.closeSend()
 				// Remove from room subscriptions
 				for room := range client.rooms {
 					if subs, ok := h.subs[room]; ok {
@@ -388,6 +400,22 @@ func (h *Hub) isConfiguredObserver(room, agentName string) bool {
 	return false
 }
 
+// roomSubscribers returns a point-in-time copy of a room's subscriber set. The
+// subscription map is mutated under h.mu by subscribe/join/unregister, so broadcast
+// callers must not keep iterating the map after releasing the lock (that would race
+// a concurrent map write → fatal "concurrent map iteration and map write").
+func (h *Hub) roomSubscribers(room string) []*Client {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	subs := h.subs[room]
+	clients := make([]*Client, 0, len(subs))
+	for client := range subs {
+		clients = append(clients, client)
+	}
+	return clients
+}
+
 // broadcastEvent sends an event to all subscribers of a room.
 func (h *Hub) broadcastEvent(room, eventName string, data map[string]any) {
 	eventData, _ := json.Marshal(data)
@@ -398,11 +426,7 @@ func (h *Hub) broadcastEvent(room, eventName string, data map[string]any) {
 		Data:  eventData,
 	}
 
-	h.mu.RLock()
-	subs := h.subs[room]
-	h.mu.RUnlock()
-
-	for client := range subs {
+	for _, client := range h.roomSubscribers(room) {
 		client.sendJSON(event)
 	}
 }
