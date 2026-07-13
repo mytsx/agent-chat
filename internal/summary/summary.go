@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"desktop/internal/sanitize"
 	"desktop/internal/validation"
 )
 
@@ -62,9 +63,19 @@ func docFromEpoch(room string, epoch int64, text string) Doc {
 	return Doc{
 		Room:      room,
 		Epoch:     strconv.FormatInt(epoch, 10),
-		Text:      text,
+		Text:      sanitizeSummaryText(text),
 		CreatedAt: time.Unix(epoch, 0).Format(time.RFC3339),
 	}
+}
+
+// sanitizeSummaryText strips bracketed-paste terminators, raw control/ESC bytes and
+// invisible bidi/format runes from a summary. The summary is injected into an agent's
+// PTY via bracketed paste at startup (#29), so an unsafe summary — built from
+// agent-authored room messages, or a tampered on-disk file — could otherwise close
+// paste mode early (ESC[201~) and run its tail as live keystrokes. Applied on both
+// write and read so legacy files are also cleaned.
+func sanitizeSummaryText(text string) string {
+	return sanitize.StripForTerminalPaste(text)
 }
 
 // Write persists text as a new immutable per-session summary and returns the
@@ -75,6 +86,7 @@ func Write(dataDir, room, text string) (Doc, error) {
 	if err != nil {
 		return Doc{}, err
 	}
+	text = sanitizeSummaryText(text)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return Doc{}, fmt.Errorf("summary: create dir: %w", err)
 	}
