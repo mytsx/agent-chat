@@ -115,6 +115,20 @@ func TestDiscoverHubAddrRejectsInvalidPortSources(t *testing.T) {
 	})
 }
 
+// The AGENT_CHAT_HUB_PORT env var reaches validateHubPort untrimmed (unlike the
+// hub.port file, which is trimmed at read time), so a whitespace-padded value must
+// still validate.
+func TestValidateHubPortToleratesWhitespace(t *testing.T) {
+	t.Parallel()
+
+	if err := validateHubPort("AGENT_CHAT_HUB_PORT", "  8080\n"); err != nil {
+		t.Fatalf("validateHubPort() rejected whitespace-padded port: %v", err)
+	}
+	if err := validateHubPort("AGENT_CHAT_HUB_PORT", "   "); err == nil {
+		t.Fatal("validateHubPort() accepted all-whitespace port, want empty diagnostic")
+	}
+}
+
 func TestConnectWithRetryIncludesLastDialError(t *testing.T) {
 	t.Parallel()
 

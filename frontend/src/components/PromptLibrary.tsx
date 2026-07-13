@@ -155,7 +155,7 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                           className="btn-sm btn-danger"
                           onClick={() => void handleDelete(p.id)}
                           disabled={!!deletingPromptId}
-                          aria-label={`${p.name} promptunu silmeyi onayla`}
+                          aria-label={`Confirm deleting ${p.name} prompt`}
                         >
                           {deletingPromptId === p.id ? "Deleting…" : "Confirm delete"}
                         </button>
@@ -181,7 +181,7 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                           setDeleteError(null);
                           setConfirmDeletePromptId(p.id);
                         }}
-                        aria-label={`${p.name} promptunu sil`}
+                        aria-label={`Delete ${p.name} prompt`}
                       >
                         Delete
                       </button>

@@ -87,3 +87,10 @@ func TestWhisperTranscribeErrorStatus(t *testing.T) {
 		t.Fatal("expected error on 401")
 	}
 }
+
+func TestNewWhisperClientHasBoundedTimeout(t *testing.T) {
+	c := NewWhisperClient("key")
+	if c.http.Timeout <= 0 {
+		t.Fatal("WhisperClient HTTP client must carry a bounded timeout so a hung OpenAI response can't block forever")
+	}
+}

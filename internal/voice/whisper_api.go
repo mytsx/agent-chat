@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // whisperEndpoint is the OpenAI transcription endpoint. A var (not const) so tests
@@ -22,9 +23,11 @@ type WhisperClient struct {
 	http   *http.Client
 }
 
-// NewWhisperClient builds a client bound to an API key.
+// NewWhisperClient builds a client bound to an API key. The HTTP client carries a
+// bounded timeout so a hung/slow OpenAI response can't block a transcription forever
+// — the per-request context still applies on top of it (whichever fires first wins).
 func NewWhisperClient(apiKey string) *WhisperClient {
-	return &WhisperClient{apiKey: strings.TrimSpace(apiKey), http: &http.Client{}}
+	return &WhisperClient{apiKey: strings.TrimSpace(apiKey), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 // Transcribe uploads wav as multipart/form-data (model=whisper-1, language=tr)

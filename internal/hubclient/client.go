@@ -72,6 +72,9 @@ func DiscoverHubAddr(dataDir string) (string, error) {
 }
 
 func validateHubPort(source, port string) error {
+	// Trim here (not just at the file-read site) so the AGENT_CHAT_HUB_PORT env var —
+	// which reaches this function untrimmed — tolerates stray surrounding whitespace.
+	port = strings.TrimSpace(port)
 	if port == "" {
 		return fmt.Errorf("%s is empty", source)
 	}

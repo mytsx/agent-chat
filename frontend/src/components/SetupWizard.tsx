@@ -201,7 +201,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
                 placeholder="Default directory"
                 readOnly
               />
-              <button type="button" className="btn-sm" onClick={handleBrowse} aria-label="Workspace klasörü seç">
+              <button type="button" className="btn-sm" onClick={handleBrowse} aria-label="Select workspace folder">
                 Browse
               </button>
             </div>

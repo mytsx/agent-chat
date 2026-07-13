@@ -274,12 +274,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
 
   const voiceButtonLabel =
     voiceState === "recording"
-      ? "Sesli prompt kaydediliyor — bırakınca yazılır"
+      ? "Recording voice prompt — release to insert"
       : voiceState === "transcribing"
-      ? "Sesli prompt çevriliyor"
+      ? "Transcribing voice prompt"
       : voiceError
-      ? `Sesli prompt hatası: ${voiceError}`
-      : "Sesli prompt — basılı tutarak konuş";
+      ? `Voice prompt error: ${voiceError}`
+      : "Voice prompt — hold to speak";
 
   return (
     <div className="terminal-pane">
@@ -352,7 +352,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               className="terminal-btn-resume"
               onClick={onResume}
               disabled={!canResume}
-              aria-label={canResume ? `${terminalLabel} oturumundan devam et` : `${terminalLabel} için devam edilebilir oturum yok`}
+              aria-label={canResume ? `Resume ${terminalLabel} session` : `No resumable session for ${terminalLabel}`}
               title={canResume ? "Oturumdan devam et (--resume)" : "Devam edilebilir oturum hen\u00FCz yakalanmad\u0131"}
             >
               {"\u23EF"}
@@ -363,7 +363,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-restart"
               onClick={onRestart}
-              aria-label={`${terminalLabel} terminalini yeniden başlat`}
+              aria-label={`Restart ${terminalLabel} terminal`}
               title="Restart terminal"
             >
               {"\u21BB"}
@@ -374,7 +374,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-focus"
               onClick={onToggleFocus}
-              aria-label={isFocused ? `${terminalLabel} terminalini ızgaraya geri al` : `${terminalLabel} terminalini büyüt`}
+              aria-label={isFocused ? `Restore ${terminalLabel} terminal to grid` : `Maximize ${terminalLabel} terminal`}
               title={isFocused ? "Restore" : "Maximize"}
             >
               {isFocused ? "\u25A3" : "\u25A1"}
@@ -385,7 +385,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-remove"
               onClick={onRemove}
-              aria-label={`${terminalLabel} terminalini kapat`}
+              aria-label={`Close ${terminalLabel} terminal`}
               title="Close terminal"
             >
               {"\u00D7"}
@@ -397,7 +397,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         className="terminal-container"
         ref={containerRef}
         role="region"
-        aria-label={`${terminalLabel} terminal oturumu`}
+        aria-label={`${terminalLabel} terminal session`}
       />
     </div>
   );
