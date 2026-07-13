@@ -128,10 +128,18 @@ func (c *Client) writeWebSocketMessage(messageType int, payload []byte) error {
 }
 
 func (c *Client) drainQueuedTextMessages() error {
-	// Drain queued messages — each as its own WebSocket frame.
+	// Drain queued messages — each as its own WebSocket frame. As the sole consumer
+	// this reads at most the len() snapshot, and a closed buffered channel still yields
+	// its buffered messages first — so nil never surfaces here in practice. The ok
+	// check is defense-in-depth: if send is closed mid-drain, stop instead of writing
+	// zero-value frames.
 	n := len(c.send)
 	for i := 0; i < n; i++ {
-		if err := c.writeTextMessage(<-c.send); err != nil {
+		msg, ok := <-c.send
+		if !ok {
+			break
+		}
+		if err := c.writeTextMessage(msg); err != nil {
 			return err
 		}
 	}
