@@ -22,6 +22,40 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// team.NewStore returns (nil, err) when os.MkdirAll fails, and app.go startup
+// discards that error, so a nil *Store can reach these methods. They must degrade
+// gracefully (no nil-pointer panic) exactly like prompt.Store does.
+func TestNilTeamStoreMethodsAreSafe(t *testing.T) {
+	var s *Store
+	if got := s.List(); got != nil {
+		t.Fatalf("nil List = %v, want nil", got)
+	}
+	if _, err := s.Get("missing"); err == nil {
+		t.Fatal("nil Get must return an error")
+	}
+	if _, err := s.Create("n", "2x2", nil); err == nil {
+		t.Fatal("nil Create must return an error")
+	}
+	if _, err := s.Update("id", "n", "2x2", nil); err == nil {
+		t.Fatal("nil Update must return an error")
+	}
+	if _, err := s.UpsertAgent("id", AgentConfig{Name: "A"}); err == nil {
+		t.Fatal("nil UpsertAgent must return an error")
+	}
+	if _, err := s.SetManager("id", "mgr"); err == nil {
+		t.Fatal("nil SetManager must return an error")
+	}
+	if _, err := s.SetObserver("id", "obs"); err == nil {
+		t.Fatal("nil SetObserver must return an error")
+	}
+	if _, err := s.SetCustomPrompt("id", "text"); err == nil {
+		t.Fatal("nil SetCustomPrompt must return an error")
+	}
+	if err := s.Delete("id"); err == nil {
+		t.Fatal("nil Delete must return an error")
+	}
+}
+
 func TestUpsertAgentAddsNewAgent(t *testing.T) {
 	s := newTestStore(t)
 	team, err := s.Create("TeamA", "2x2", nil)

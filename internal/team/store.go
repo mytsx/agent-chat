@@ -153,6 +153,9 @@ func (s *Store) save() error {
 
 // List returns all teams
 func (s *Store) List() []Team {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Team, len(s.teams))
@@ -164,6 +167,9 @@ func (s *Store) List() []Team {
 
 // Get returns a team by ID
 func (s *Store) Get(id string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -177,6 +183,9 @@ func (s *Store) Get(id string) (Team, error) {
 
 // Create creates a new team
 func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
@@ -219,6 +228,9 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 
 // Update updates a team
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
@@ -260,6 +272,9 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 // CreateTerminal never supply Role, so a naive upsert would erase a Role the user
 // set earlier (consumed by composeAgentPrompt). A non-empty cfg.Role overwrites.
 func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(cfg.Name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -339,6 +354,9 @@ func agentsWithoutObserverRole(agents []AgentConfig, agentName string) ([]AgentC
 
 // SetManager sets or clears manager agent for a team. Empty string clears manager.
 func (s *Store) SetManager(id, managerAgent string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if managerAgent != "" {
 		if err := validation.ValidateName(managerAgent); err != nil {
 			return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
@@ -379,6 +397,9 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 // this agent held it. The observer Role is what the hub's IsObserver gate and
 // broadcastRoleLookup read. Copy-on-write so concurrent readers don't race.
 func (s *Store) SetObserver(teamID, name string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -469,6 +490,9 @@ func sanitizeCharter(text string) string {
 // into each agent's PTY at startup. The charter is injected into new agents only;
 // already-running agents are unaffected (composeAgentPrompt runs at startup).
 func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -492,6 +516,9 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 
 // Delete deletes a team
 func (s *Store) Delete(id string) error {
+	if s == nil {
+		return fmt.Errorf("team store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
