@@ -1676,11 +1676,31 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	if a.isObserverAgent(sess.TeamID, sess.AgentName) {
 		return
 	}
+	// Record what the agent's PTY actually received, not the pre-injection payload:
+	// a Copilot session flattens the text to a single line (InjectText →
+	// pty.SanitizeCopilotInput), so logging the multi-line `delivered` verbatim would
+	// show the summary text the Copilot agent never saw (Codex PR #76 P3). Only the
+	// transcript copy is corrected here; the injection fingerprint intentionally keeps
+	// the un-flattened text because normalizeFingerprint already collapses whitespace,
+	// so the record and the CLI's flattened echo canonicalize to the same key (#65).
+	content = deliveredForTranscript(sess.CLIType, content)
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
 	// Tracked by promptLogN so GetRoomTranscript can drain in-flight logs first.
 	room, agent := a.logRoomForSession(sess), sess.AgentName
 	a.logPromptAsync(client, room, agent, content, fmt.Sprintf("agent=%s", agent), "prompt")
+}
+
+// deliveredForTranscript returns content as the target agent's PTY actually
+// received it, so the room transcript/summary reflects what the agent saw. Copilot
+// injection flattens newlines/tabs/control chars to single spaces (InjectText →
+// pty.SanitizeCopilotInput); every other CLI receives the bracketed-paste text
+// verbatim, so it is already faithful and passes through unchanged.
+func deliveredForTranscript(cliType, content string) string {
+	if cliType == "copilot" {
+		return ptymgr.SanitizeCopilotInput(content)
+	}
+	return content
 }
 
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single

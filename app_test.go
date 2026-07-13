@@ -685,3 +685,33 @@ func TestRoomNameOrDefault(t *testing.T) {
 		t.Errorf("named → %q, want TeamA", got)
 	}
 }
+
+// The room transcript (#29) must record a prompt as the agent's PTY actually
+// received it. Copilot injection flattens newlines/tabs/controls to single spaces
+// (InjectText → pty.SanitizeCopilotInput), so a multi-line prompt logged verbatim
+// would attribute text the Copilot agent never saw to the summary (Codex PR #76 P3).
+// Every other CLI receives the bracketed-paste text unchanged, so it passes through.
+func TestDeliveredForTranscript(t *testing.T) {
+	tests := []struct {
+		name    string
+		cliType string
+		content string
+		want    string
+	}{
+		{"copilot flattens newlines", "copilot", "line1\nline2", "line1 line2"},
+		{"copilot flattens tabs", "copilot", "a\tb", "a b"},
+		{"copilot collapses crlf", "copilot", "a\r\nb", "a b"},
+		{"copilot flattens control chars to space", "copilot", "a\x1bc", "a c"},
+		{"copilot passes single line unchanged", "copilot", "just one line", "just one line"},
+		{"claude keeps newlines verbatim", "claude", "line1\nline2", "line1\nline2"},
+		{"gemini keeps newlines verbatim", "gemini", "a\tb", "a\tb"},
+		{"shell keeps newlines verbatim", "shell", "a\nb", "a\nb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deliveredForTranscript(tt.cliType, tt.content); got != tt.want {
+				t.Fatalf("deliveredForTranscript(%q, %q) = %q, want %q", tt.cliType, tt.content, got, tt.want)
+			}
+		})
+	}
+}

@@ -32,8 +32,8 @@ func TestSanitizeCopilotInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sanitizeCopilotInput(tt.in); got != tt.want {
-				t.Fatalf("sanitizeCopilotInput(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := SanitizeCopilotInput(tt.in); got != tt.want {
+				t.Fatalf("SanitizeCopilotInput(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
