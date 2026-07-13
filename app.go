@@ -179,8 +179,8 @@ func (a *App) startup(ctx context.Context) {
 	if err := cli.EnsureMCPServerBinary(mcpServerBin, a.dataDir); err != nil {
 		log.Printf("MCP server setup error: %v", err)
 	} else {
-		for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot, cli.CLICodex} {
-			cli.ResetMCPConfig(ct, a.dataDir)
+		for _, err := range resetMCPConfigs(a.dataDir, cli.ResetMCPConfig) {
+			log.Printf("MCP config reset warning: %v", err)
 		}
 	}
 
@@ -201,6 +201,16 @@ func (a *App) startup(ctx context.Context) {
 
 	// Monitor hub process
 	a.monitorHub()
+}
+
+func resetMCPConfigs(dataDir string, reset func(cli.CLIType, string) error) []error {
+	var errs []error
+	for _, ct := range []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot, cli.CLICodex} {
+		if err := reset(ct, dataDir); err != nil {
+			errs = append(errs, fmt.Errorf("%s MCP config reset: %w", ct, err))
+		}
+	}
+	return errs
 }
 
 func newHubAuthToken() (string, error) {

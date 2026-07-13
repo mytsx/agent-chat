@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -47,5 +49,23 @@ func TestPickNearestPostSpawn_IgnoresPreSpawnOnly(t *testing.T) {
 func TestPickNearestPostSpawn_Empty(t *testing.T) {
 	if got := pickNearestPostSpawn(nil, time.Now()); got != "" {
 		t.Fatalf("got %q, want empty for no candidates", got)
+	}
+}
+
+func TestNearestSessionFileAfter_IgnoresNonRegularCandidate(t *testing.T) {
+	dir := t.TempDir()
+	spawn := time.Now()
+	target := writeFile(t, dir, "target.jsonl", "{}\n")
+	symlink := filepath.Join(dir, "session-symlink.jsonl")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	got, err := nearestSessionFileAfter(dir, "session-*.jsonl", spawn.UnixNano(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("nearestSessionFileAfter = %q, want no regular candidate", got)
 	}
 }

@@ -28,6 +28,7 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
   const [creating, setCreating] = useState(false);
   const [knownAgents, setKnownAgents] = useState<string[]>([]);
   const [agentSessions, setAgentSessions] = useState<SessionInfo[]>([]);
+  const [loadingAgentSessions, setLoadingAgentSessions] = useState(false);
   const [resumeID, setResumeID] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const fieldId = (name: string) => `setup-${teamID}-${slotIndex}-${name}`;
@@ -74,19 +75,27 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
     // the new agent/CLI by handleCreate (Codex P2).
     setAgentSessions([]);
     if (!trimmed) {
+      setLoadingAgentSessions(false);
       return;
     }
     let active = true;
+    setLoadingAgentSessions(true);
     const timer = setTimeout(() => {
       listAgentSessions(teamID, trimmed).then((sessions) => {
         // Only resumable-as-configured sessions: the picker resumes under selectedCLI,
         // so a Claude session under a now-Codex selection can't be opened (Codex P2).
-        if (active) setAgentSessions(sessions.filter((s) => s.cliType === selectedCLI));
+        if (active) {
+          setAgentSessions(sessions.filter((s) => s.cliType === selectedCLI));
+          setLoadingAgentSessions(false);
+        }
       }).catch((err) => {
         // Background autocomplete: log but don't alert per-keystroke (would spam); an
         // empty list degrades gracefully to "no past sessions".
         console.error("[SetupWizard] listAgentSessions failed:", err);
-        if (active) setAgentSessions([]);
+        if (active) {
+          setAgentSessions([]);
+          setLoadingAgentSessions(false);
+        }
       });
     }, 300);
     return () => {
@@ -177,6 +186,16 @@ export default function SetupWizard({ slotIndex, teamID, onCreated }: Props) {
                 ))}
               </select>
             </div>
+          )}
+          {loadingAgentSessions && (
+            <span className="wizard-hint" role="status" aria-live="polite">
+              Geçmiş oturumlar aranıyor…
+            </span>
+          )}
+          {!loadingAgentSessions && agentName.trim() && agentSessions.length === 0 && (
+            <span className="wizard-hint" role="status" aria-live="polite">
+              Bu agent/CLI için devam edilebilir geçmiş oturum yok; yeni terminal açılacak.
+            </span>
           )}
 
           <div className="wizard-field">

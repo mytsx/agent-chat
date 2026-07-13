@@ -8,11 +8,55 @@ import (
 	"sync"
 	"testing"
 
+	"desktop/internal/cli"
 	"desktop/internal/prompt"
 	ptymgr "desktop/internal/pty"
 	"desktop/internal/sessionlog"
 	"desktop/internal/team"
 )
+
+func TestResetMCPConfigsReportsPerCLIWarnings(t *testing.T) {
+	var calls []cli.CLIType
+	failures := map[cli.CLIType]bool{
+		cli.CLIGemini:  true,
+		cli.CLICopilot: true,
+	}
+
+	errs := resetMCPConfigs("/tmp/agent-chat-test", func(ct cli.CLIType, dataDir string) error {
+		calls = append(calls, ct)
+		if dataDir != "/tmp/agent-chat-test" {
+			t.Fatalf("dataDir = %q, want test data dir", dataDir)
+		}
+		if failures[ct] {
+			return fmt.Errorf("boom-%s", ct)
+		}
+		return nil
+	})
+
+	wantCalls := []cli.CLIType{cli.CLIClaude, cli.CLIGemini, cli.CLICopilot, cli.CLICodex}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("reset calls = %v, want %v", calls, wantCalls)
+	}
+	for i, want := range wantCalls {
+		if calls[i] != want {
+			t.Fatalf("reset calls = %v, want %v", calls, wantCalls)
+		}
+	}
+	if len(errs) != 2 {
+		t.Fatalf("errors = %v, want 2", errs)
+	}
+	for _, want := range []string{"gemini MCP config reset: boom-gemini", "copilot MCP config reset: boom-copilot"} {
+		found := false
+		for _, err := range errs {
+			if err != nil && strings.Contains(err.Error(), want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("errors = %v, missing %q", errs, want)
+		}
+	}
+}
 
 func TestListKnownAgents_UnionAndCaseInsensitiveDedup(t *testing.T) {
 	store, err := team.NewStore(t.TempDir())

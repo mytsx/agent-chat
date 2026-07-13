@@ -64,7 +64,7 @@ func nearestSessionFileAfter(dir, glob string, spawnedAtUnixNano int64, claimed 
 			continue
 		}
 		info, ierr := e.Info()
-		if ierr != nil || info.ModTime().Before(cutoff) {
+		if ierr != nil || !info.Mode().IsRegular() || info.ModTime().Before(cutoff) {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
