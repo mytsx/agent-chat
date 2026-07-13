@@ -26,7 +26,11 @@ class ErrorBoundary extends Component<
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 20, color: "#f85149", fontFamily: "monospace" }}>
+        <div
+          role="alert"
+          aria-live="assertive"
+          style={{ padding: 20, color: "#f85149", fontFamily: "monospace" }}
+        >
           <h2>Runtime Error</h2>
           <pre>{this.state.error}</pre>
         </div>
@@ -95,9 +99,14 @@ function AppContent() {
   useEffect(() => {
     if (!ready) return;
 
+    let cancelled = false;
     let cleanupFn = () => {};
 
     import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      // If the effect was cleaned up before this dynamic import resolved, don't
+      // register listeners — the cleanup already ran and would never run again,
+      // leaking EventsOn subscriptions across unmount/remount.
+      if (cancelled) return;
       EventsOn("messages:new", (data: MessagesNewEvent) => {
         if (data?.chatDir && data?.messages) {
           addMessages(data.chatDir, data.messages);
@@ -152,7 +161,10 @@ function AppContent() {
       if (import.meta.env.DEV) console.warn("Failed to load Wails runtime:", e);
     });
 
-    return () => cleanupFn();
+    return () => {
+      cancelled = true;
+      cleanupFn();
+    };
   }, [ready]);
 
   // Load messages/agents when active team changes
@@ -202,7 +214,7 @@ function AppContent() {
       </button>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       {worktreeNotice && (
-        <div className="worktree-notice">
+        <div className="worktree-notice" role="status" aria-live="polite">
           <span>
             <strong>{worktreeNotice.agentName}</strong> worktree&apos;si kirli olduğu için korunuyor: <code>{worktreeNotice.worktreeDir}</code>
           </span>
@@ -210,7 +222,13 @@ function AppContent() {
         </div>
       )}
       {deferredNotices.map((notice) => (
-        <div key={notice.id} className="deferred-notice" title={notice.prompt}>
+        <div
+          key={notice.id}
+          className="deferred-notice"
+          role="status"
+          aria-live="polite"
+          title={notice.prompt}
+        >
           <span>
             🔔 <strong>{notice.agentName}</strong> için yeni mesaj bildirimi siz yazarken ertelendi ve terminale otomatik iletilemedi — agent&apos;a elle haber verebilir veya <code>read_messages</code> demesini bekleyebilirsiniz.
           </span>

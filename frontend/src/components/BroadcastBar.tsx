@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import {
@@ -28,6 +28,27 @@ export default function BroadcastBar() {
   const busyVoiceRef = useRef(false);
   const startedRef = useRef(false);
   const releasePendingRef = useRef(false);
+  // Guards async voice callbacks after the bar unmounts. Broadcast capture uses
+  // the same single backend recorder as terminal push-to-talk, so a route/app
+  // teardown while recording must stop it instead of leaving ffmpeg alive.
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const shouldStopCapture = recordingRef.current || releasePendingRef.current;
+      recordingRef.current = false;
+      busyVoiceRef.current = false;
+      startedRef.current = false;
+      releasePendingRef.current = false;
+      if (shouldStopCapture) {
+        StopBroadcastVoiceCapture().catch((e) => {
+          if (import.meta.env.DEV) console.warn("StopBroadcastVoiceCapture cleanup failed:", e);
+        });
+      }
+    };
+  }, []);
 
   const appendTranscript = (chunk: string) => {
     const trimmed = chunk.trim();
@@ -40,18 +61,29 @@ export default function BroadcastBar() {
   };
 
   const finishVoiceStop = () => {
+    if (!mountedRef.current) return;
     setVoiceState("transcribing");
     StopBroadcastVoiceCapture()
       .then((transcript) => {
         busyVoiceRef.current = false;
-        setVoiceState((s) => (s === "transcribing" ? "idle" : s));
-        appendTranscript(transcript || "");
+        if (mountedRef.current) {
+          setVoiceState((s) => (s === "transcribing" ? "idle" : s));
+          appendTranscript(transcript || "");
+        }
       })
       .catch((e) => {
         busyVoiceRef.current = false;
-        setVoiceState("error");
-        setVoiceError(errorToString(e));
+        if (mountedRef.current) {
+          setVoiceState("error");
+          setVoiceError(errorToString(e));
+        }
       });
+  };
+
+  const stopVoiceAfterUnmount = (context: string) => {
+    StopBroadcastVoiceCapture().catch((e) => {
+      if (import.meta.env.DEV) console.warn(`StopBroadcastVoiceCapture ${context} failed:`, e);
+    });
   };
 
   const startVoice = () => {
@@ -64,6 +96,10 @@ export default function BroadcastBar() {
     setVoiceError("");
     StartBroadcastVoiceCapture()
       .then(() => {
+        if (!mountedRef.current) {
+          stopVoiceAfterUnmount("after unmount");
+          return;
+        }
         startedRef.current = true;
         if (releasePendingRef.current) {
           releasePendingRef.current = false;
@@ -74,8 +110,10 @@ export default function BroadcastBar() {
         recordingRef.current = false;
         busyVoiceRef.current = false;
         releasePendingRef.current = false;
-        setVoiceState("error");
-        setVoiceError(errorToString(e));
+        if (mountedRef.current) {
+          setVoiceState("error");
+          setVoiceError(errorToString(e));
+        }
       });
   };
 

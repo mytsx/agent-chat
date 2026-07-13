@@ -46,8 +46,29 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // recorder that isn't installed yet and ffmpeg is left running (Codex P2).
   const startedRef = useRef(false);
   const releasePendingRef = useRef(false);
+  // Guards async voice callbacks after this pane unmounts/restarts. Without this,
+  // a pending start/stop promise can update a replaced pane, and an active recorder
+  // can be left running if the terminal is closed mid-recording.
+  const mountedRef = useRef(true);
   const [recSecs, setRecSecs] = useState(0);
   const terminalLabel = agentName || "Terminal";
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const shouldStopCapture = recordingRef.current || releasePendingRef.current;
+      recordingRef.current = false;
+      busyRef.current = false;
+      startedRef.current = false;
+      releasePendingRef.current = false;
+      if (shouldStopCapture) {
+        StopVoiceCapture(sessionID).catch((e) => {
+          if (import.meta.env.DEV) console.warn("StopVoiceCapture cleanup failed:", e);
+        });
+      }
+    };
+  }, [sessionID]);
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -208,18 +229,28 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // pane in "transcribing" forever (Codex P2). On success it refocuses the terminal so
   // the dictated line can be edited/submitted immediately (Codex P2).
   const finishStop = () => {
+    if (!mountedRef.current) return;
     setVoiceState("transcribing");
     StopVoiceCapture(sessionID)
       .then(() => {
         busyRef.current = false;
-        setVoiceState((s) => (s === "transcribing" ? "idle" : s));
-        termRef.current?.focus();
+        if (mountedRef.current) {
+          setVoiceState((s) => (s === "transcribing" ? "idle" : s));
+          termRef.current?.focus();
+        }
       })
       .catch((e) => {
         busyRef.current = false;
-        setVoiceState("error");
-        setVoiceError(errorToString(e));
+        if (mountedRef.current) {
+          setVoiceState("error");
+          setVoiceError(errorToString(e));
+        }
       });
+  };
+  const stopVoiceAfterUnmount = (context: string) => {
+    StopVoiceCapture(sessionID).catch((e) => {
+      if (import.meta.env.DEV) console.warn(`StopVoiceCapture ${context} failed:`, e);
+    });
   };
   const startVoice = () => {
     if (busyRef.current) return; // block while recording OR still transcribing
@@ -231,6 +262,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     setVoiceError("");
     StartVoiceCapture(sessionID)
       .then(() => {
+        if (!mountedRef.current) {
+          stopVoiceAfterUnmount("after unmount");
+          return;
+        }
         startedRef.current = true;
         // If the user already released during this in-flight start, the deferred
         // stop runs now that the backend is actually recording (Codex P2).
@@ -243,8 +278,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         recordingRef.current = false;
         busyRef.current = false;
         releasePendingRef.current = false;
-        setVoiceState("error");
-        setVoiceError(errorToString(e));
+        if (mountedRef.current) {
+          setVoiceState("error");
+          setVoiceError(errorToString(e));
+        }
       });
   };
   const stopVoice = () => {
