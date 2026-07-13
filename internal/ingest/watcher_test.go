@@ -111,7 +111,7 @@ func TestIsCLIExitCommand(t *testing.T) {
 	}{
 		{"/exit", true},        // claude/copilot/codex
 		{"/quit", true},        // gemini
-		{"exit", true},         // shell
+		{"exit", false},        // shell exit isn't ingested (no adapter); a real AI "exit" prompt must pass through (Codex PR #77)
 		{"  /exit  ", true},    // surrounding whitespace trimmed
 		{"/exit şimdi", false}, // more than the bare command
 		{"ne yapar /exit?", false},

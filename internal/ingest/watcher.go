@@ -9,19 +9,23 @@ import (
 )
 
 // isCLIExitCommand reports whether content is exactly one of the graceful-exit
-// commands the app injects into a terminal's PTY on close (see
+// commands the app injects into an AI CLI's PTY on close (see
 // pty.gracefulExitCommand). Unlike startup/broadcast/prompt-send injections these
 // carry NO self-injection fingerprint, so a CLI that records the command in its
 // transcript would have it ingested and logged as a user_prompt, polluting room
 // history and session summaries with a shutdown keystroke (Codex PR #76 P2).
 //
+// Only the AI shutdown commands "/exit" (Claude/Copilot/Codex) and "/quit" (Gemini)
+// belong here. The shell variant is bare "exit", but a shell session has no ingest
+// adapter (AdapterFor → nil) so it is never watched — including "exit" would instead
+// wrongly drop a real AI user prompt whose entire content is "exit" (Codex PR #77).
+//
 // The WHOLE trimmed content must match, so a genuine prompt that merely mentions
-// /exit is still emitted — and a bare /exit is never meaningful room content
-// anyway, since it exits the CLI. Keep the cases in sync with
-// pty.gracefulExitCommand.
+// /exit is still emitted — and a bare /exit is never meaningful room content anyway,
+// since it exits the CLI.
 func isCLIExitCommand(content string) bool {
 	switch strings.TrimSpace(content) {
-	case "/exit", "/quit", "exit":
+	case "/exit", "/quit":
 		return true
 	default:
 		return false
