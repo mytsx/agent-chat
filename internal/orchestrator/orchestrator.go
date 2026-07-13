@@ -241,10 +241,17 @@ func notificationKey(chatDir, agentName string) string {
 // armFlushTimerLocked schedules a pending-notification flush for the agent.
 // Caller MUST hold o.mu.
 func (o *Orchestrator) armFlushTimerLocked(key, chatDir, agentName, sessionID string, delay time.Duration) {
-	var timer *time.Timer
-	timer = time.AfterFunc(delay, func() {
-		o.flushPending(chatDir, agentName, sessionID, timer)
+	// The callback runs on time.AfterFunc's own goroutine and needs the *Timer it is
+	// about to be assigned. Passing it via a plain captured variable is a data race:
+	// this goroutine writes `timer` while the callback reads it, with no
+	// happens-before edge (a near-zero delay can fire the callback before the write is
+	// visible, yielding nil). Hand the pointer over through an atomic.Pointer so the
+	// store/load is synchronized.
+	var timerPtr atomic.Pointer[time.Timer]
+	timer := time.AfterFunc(delay, func() {
+		o.flushPending(chatDir, agentName, sessionID, timerPtr.Load())
 	})
+	timerPtr.Store(timer)
 	o.pendingTimers[key] = timer
 }
 

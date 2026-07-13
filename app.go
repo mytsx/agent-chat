@@ -177,9 +177,18 @@ func (a *App) startup(ctx context.Context) {
 	if promptErr != nil {
 		log.Printf("[STARTUP] prompt store yüklenemedi, boş store ile devam: %v", promptErr)
 	}
+	// NewStore returns nil only when os.MkdirAll fails. The store methods are already
+	// nil-safe, but guarantee a non-nil store anyway so a future method or direct field
+	// access can't nil-deref (belt-and-suspenders; the empty store degrades gracefully).
+	if a.promptStore == nil {
+		a.promptStore = &prompt.Store{}
+	}
 	a.teamStore, teamErr = team.NewStore(a.dataDir)
 	if teamErr != nil {
 		log.Printf("[STARTUP] team store yüklenemedi, boş store ile devam: %v", teamErr)
+	}
+	if a.teamStore == nil {
+		a.teamStore = &team.Store{}
 	}
 
 	// Seed prompts from existing files
