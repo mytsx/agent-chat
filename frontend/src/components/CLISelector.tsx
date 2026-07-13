@@ -33,6 +33,10 @@ export default function CLISelector({ availableCLIs, selected, onSelect }: Props
                 : undefined
             }
             disabled={!c.available}
+            aria-pressed={isSelected}
+            aria-label={
+              c.available ? `${c.name} CLI seç` : `${c.name} CLI yüklü değil`
+            }
             onClick={() => onSelect(cliType)}
             title={c.available ? c.name : `${c.name} (not installed)`}
           >

@@ -144,12 +144,21 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) error {
 	// Read existing config or start fresh
 	config := make(map[string]any)
+	writeMode := os.FileMode(0644)
 	if data, err := os.ReadFile(configPath); err == nil {
+		if info, statErr := os.Stat(configPath); statErr == nil {
+			writeMode = info.Mode().Perm()
+		}
 		if err := json.Unmarshal(data, &config); err != nil {
 			backupPath := configPath + ".bak"
-			os.WriteFile(backupPath, data, 0644)
+			// Preserve the original file's permissions on the backup: CLI config files
+			// (e.g. ~/.claude.json) can hold API keys/tokens at 0600, so a hardcoded
+			// 0644 backup would widen access and leak secrets.
+			os.WriteFile(backupPath, data, writeMode)
 			config = make(map[string]any)
 		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
 	}
 
 	// --- 1. Update global mcpServers ---
@@ -184,7 +193,7 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0644)
+	return os.WriteFile(configPath, out, writeMode)
 }
 
 // cleanProjectMCPOverrides removes "agent-chat" from all per-project mcpServers

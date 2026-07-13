@@ -53,6 +53,33 @@ interface TeamsState {
   removeTeamLocal: (id: string) => void;
 }
 
+function replaceTeam(teams: Team[], id: string, updated: Team): Team[] {
+  return teams.map((team) => (team.id === id ? updated : team));
+}
+
+function removeTeam(teams: Team[], id: string): Team[] {
+  return teams.filter((team) => team.id !== id);
+}
+
+function nextActiveTeamID(
+  teams: Team[],
+  currentActiveID: string | null,
+  removedID: string
+): string | null {
+  return currentActiveID === removedID ? (teams[0]?.id ?? null) : currentActiveID;
+}
+
+function removeTeamState(
+  state: TeamsState,
+  id: string
+): Pick<TeamsState, "teams" | "activeTeamID"> {
+  const teams = removeTeam(state.teams, id);
+  return {
+    teams,
+    activeTeamID: nextActiveTeamID(teams, state.activeTeamID, id),
+  };
+}
+
 export const useTeams = create<TeamsState>((set, get) => ({
   teams: [],
   activeTeamID: null,
@@ -69,6 +96,7 @@ export const useTeams = create<TeamsState>((set, get) => ({
     } catch (e) {
       if (import.meta.env.DEV) console.warn("Failed to load teams:", e);
       set({ loading: false });
+      throw e;
     }
   },
 
@@ -86,28 +114,28 @@ export const useTeams = create<TeamsState>((set, get) => ({
   updateTeam: async (id, name, gridLayout, agents) => {
     const t = await UpdateTeam(id, name, gridLayout, agents);
     set((s) => ({
-      teams: s.teams.map((team) => (team.id === id ? t : team)),
+      teams: replaceTeam(s.teams, id, t),
     }));
   },
 
   setTeamManager: async (id, managerAgent) => {
     const t = await SetTeamManager(id, managerAgent);
     set((s) => ({
-      teams: s.teams.map((team) => (team.id === id ? t : team)),
+      teams: replaceTeam(s.teams, id, t),
     }));
   },
 
   setTeamObserver: async (id, agentName) => {
     const t = await SetTeamObserver(id, agentName);
     set((s) => ({
-      teams: s.teams.map((team) => (team.id === id ? t : team)),
+      teams: replaceTeam(s.teams, id, t),
     }));
   },
 
   setCustomPrompt: async (id, text) => {
     const t = await SetCustomPrompt(id, text);
     set((s) => ({
-      teams: s.teams.map((team) => (team.id === id ? t : team)),
+      teams: replaceTeam(s.teams, id, t),
     }));
   },
 
@@ -125,29 +153,14 @@ export const useTeams = create<TeamsState>((set, get) => ({
   refreshTeam: async (id) => {
     const t = await GetTeam(id);
     set((s) => ({
-      teams: s.teams.map((team) => (team.id === id ? t : team)),
+      teams: replaceTeam(s.teams, id, t),
     }));
   },
 
   deleteTeam: async (id) => {
     await DeleteTeam(id);
-    set((s) => {
-      const teams = s.teams.filter((t) => t.id !== id);
-      return {
-        teams,
-        activeTeamID:
-          s.activeTeamID === id ? (teams[0]?.id ?? null) : s.activeTeamID,
-      };
-    });
+    set((s) => removeTeamState(s, id));
   },
 
-  removeTeamLocal: (id) =>
-    set((s) => {
-      const teams = s.teams.filter((t) => t.id !== id);
-      return {
-        teams,
-        activeTeamID:
-          s.activeTeamID === id ? (teams[0]?.id ?? null) : s.activeTeamID,
-      };
-    }),
+  removeTeamLocal: (id) => set((s) => removeTeamState(s, id)),
 }));

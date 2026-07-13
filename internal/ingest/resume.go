@@ -37,14 +37,14 @@ func ResumeSeedFor(cliType, sessionID string) *ResumeSeed {
 // point it at a t.TempDir() instead of touching the developer's real ~/.copilot
 // (Copilot review).
 func resumeSeedForRoot(home, cliType, sessionID string) *ResumeSeed {
-	if sessionID == "" {
+	if !safeSessionIDComponent(sessionID) {
 		return nil
 	}
 	switch cliType {
 	case "copilot":
 		p := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
 		info, err := os.Stat(p)
-		if err != nil {
+		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
 		return &ResumeSeed{Path: p, Cur: Cursor{Offset: info.Size()}}

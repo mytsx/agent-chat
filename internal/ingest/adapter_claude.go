@@ -24,28 +24,22 @@ type claudeLine struct {
 }
 
 func (claudeAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
-	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []ParsedMessage
-	for _, line := range lines {
+	return parseCompleteJSONLUserMessages(path, cur, func(line []byte) (string, string, bool) {
 		var cl claudeLine
-		if json.Unmarshal(line.Data, &cl) != nil {
-			continue // skip a corrupt line, keep the rest
+		if json.Unmarshal(line, &cl) != nil {
+			return "", "", false // skip a corrupt line, keep the rest
 		}
 		if cl.Type != "user" {
-			continue
+			return "", "", false
 		}
 		var content string
 		// Only a JSON string content is a human-typed message; an array is a
 		// tool_result envelope, not human text.
 		if json.Unmarshal(cl.Message.Content, &content) != nil {
-			continue
+			return "", "", false
 		}
-		if content == "" {
-			continue
-		}
-		out = append(out, ParsedMessage{Content: content, Timestamp: cl.Timestamp, After: Cursor{Offset: line.OffsetAfter}})
-	}
-	return out, Cursor{Offset: next}, err
+		return content, cl.Timestamp, true
+	})
 }
 
 // claudeSlug turns a cwd into Claude's project folder name: every non-alphanumeric

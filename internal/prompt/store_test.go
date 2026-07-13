@@ -1,6 +1,85 @@
 package prompt
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestNewStoreReturnsMkdirError(t *testing.T) {
+	base := t.TempDir()
+	blockedParent := filepath.Join(base, "not-a-dir")
+	if err := os.WriteFile(blockedParent, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(filepath.Join(blockedParent, "prompts"))
+	if err == nil {
+		t.Fatal("NewStore returned nil error for an uncreatable data dir")
+	}
+	if !strings.Contains(err.Error(), "create prompt data dir") {
+		t.Fatalf("NewStore error = %q, want prompt data dir context", err)
+	}
+}
+
+func TestNewStoreReportsCorruptPromptsJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"truncated json", `[{"id":"p1","name":"Broken"}`},
+		{"wrong top-level shape", `{"id":"p1","name":"Broken"}`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "prompts.json"), []byte(c.raw), 0o644); err != nil {
+				t.Fatalf("write corrupt prompts.json failed: %v", err)
+			}
+
+			errPrefix := "load prompts"
+			s, err := NewStore(dir)
+			if err == nil {
+				t.Fatal("NewStore must report corrupt prompts.json instead of silently starting empty")
+			} else if !strings.Contains(err.Error(), errPrefix) {
+				t.Fatalf("NewStore error = %q, want %q context", err, errPrefix)
+			}
+			// Even on corrupt JSON the store must be usable (non-nil, empty roster) so a
+			// caller that discards the error — e.g. startup — never nil derefs.
+			if s == nil {
+				t.Fatal("NewStore must return a usable store even when reporting corrupt JSON")
+			}
+			if got := s.List(); len(got) != 0 {
+				t.Fatalf("corrupt-JSON store should start empty, got %d prompts", len(got))
+			}
+		})
+	}
+}
+
+func TestNilStoreMethodsAreSafe(t *testing.T) {
+	var s *Store
+	if got := s.List(); got != nil {
+		t.Fatalf("nil List = %v, want nil", got)
+	}
+	if _, err := s.Get("missing"); err == nil {
+		t.Fatal("nil Get must return an error")
+	}
+	if _, err := s.Create("n", "c", "task", nil); err == nil {
+		t.Fatal("nil Create must return an error")
+	}
+	if _, err := s.Update("id", "n", "c", "task", nil); err == nil {
+		t.Fatal("nil Update must return an error")
+	}
+	if err := s.Delete("id"); err == nil {
+		t.Fatal("nil Delete must return an error")
+	}
+	s.Seed("base", "manager")
+	if _, created, err := s.SeedIfMissingByName("n", "c", "task", nil); err == nil || created {
+		t.Fatalf("nil SeedIfMissingByName = created %v, err %v; want created=false with error", created, err)
+	}
+}
 
 func TestSeedIfMissingByName_CreatesWhenAbsent(t *testing.T) {
 	s, err := NewStore(t.TempDir())
@@ -65,5 +144,63 @@ func TestSeedIfMissingByName_RunsEvenWhenStoreNonEmpty(t *testing.T) {
 	}
 	if !created {
 		t.Fatal("expected SeedIfMissingByName to seed even when the store is non-empty")
+	}
+}
+
+func TestSaveFailuresRollbackInMemoryState(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, err := s.Create("Existing", "original", "system", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Point filePath at a directory so the temp write can succeed but the atomic
+	// rename fails. Mutators must roll their in-memory changes back when disk
+	// persistence fails, otherwise future saves would silently include failed edits.
+	s.filePath = t.TempDir()
+
+	if _, err := s.Create("New", "content", "task", nil); err == nil {
+		t.Fatal("expected Create to fail")
+	}
+	if prompts := s.List(); len(prompts) != 1 || prompts[0].ID != existing.ID {
+		t.Fatalf("Create rollback left prompts = %#v", prompts)
+	}
+
+	if _, err := s.Update(existing.ID, "Changed", "changed", "task", []string{"x"}); err == nil {
+		t.Fatal("expected Update to fail")
+	}
+	got, err := s.Get(existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Existing" || got.Content != "original" || got.Category != "system" || len(got.Tags) != 0 {
+		t.Fatalf("Update rollback left prompt = %#v", got)
+	}
+
+	if err := s.Delete(existing.ID); err == nil {
+		t.Fatal("expected Delete to fail")
+	}
+	if prompts := s.List(); len(prompts) != 1 || prompts[0].ID != existing.ID {
+		t.Fatalf("Delete rollback left prompts = %#v", prompts)
+	}
+}
+
+func TestSeedRollsBackWhenSaveFails(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Point filePath at a directory so Seed's temp write can succeed but the final
+	// atomic rename fails. Seed has no error return, so it must still keep memory
+	// aligned with disk rather than exposing prompts that were never persisted.
+	s.filePath = t.TempDir()
+	s.Seed("base", "manager")
+
+	if prompts := s.List(); len(prompts) != 0 {
+		t.Fatalf("failed Seed was kept in memory: %#v", prompts)
 	}
 }

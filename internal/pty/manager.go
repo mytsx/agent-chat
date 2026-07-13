@@ -63,6 +63,17 @@ type Manager struct {
 	onOutput OutputHandler
 }
 
+func sessionNotFoundError(sessionID string) error {
+	return fmt.Errorf("session not found: %s", sessionID)
+}
+
+func (m *Manager) lookupSession(sessionID string) (*PTYSession, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	session, ok := m.sessions[sessionID]
+	return session, ok
+}
+
 // NewManager creates a new PTY manager
 func NewManager(onOutput OutputHandler) *Manager {
 	return &Manager{
@@ -229,12 +240,9 @@ func validUTF8Len(b []byte) int {
 // ensures this write is not interleaved with a concurrent notification
 // injection (see WriteAtomic) or another Write.
 func (m *Manager) Write(sessionID string, data []byte) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
 	}
 
 	session.writeMu.Lock()
@@ -248,12 +256,9 @@ func (m *Manager) Write(sessionID string, data []byte) error {
 // raw PTY writes — the mutex is already held, so do NOT call Manager.Write from
 // inside fn (it would deadlock).
 func (m *Manager) WriteAtomic(sessionID string, fn func(write func([]byte) error) error) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
 	}
 
 	session.writeMu.Lock()
@@ -285,9 +290,7 @@ func (m *Manager) writeLocked(session *PTYSession, data []byte) error {
 func (m *Manager) WaitForIdle(sessionID string, idleDuration, maxWait time.Duration) bool {
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
-		m.mu.RLock()
-		session, ok := m.sessions[sessionID]
-		m.mu.RUnlock()
+		session, ok := m.lookupSession(sessionID)
 		if !ok {
 			return false
 		}
@@ -307,9 +310,7 @@ func (m *Manager) WaitForIdle(sessionID string, idleDuration, maxWait time.Durat
 // Used by the orchestrator to defer notification injection while the user is
 // actively typing, so notifications don't split the user's half-typed input.
 func (m *Manager) RegisterUserInput(sessionID string) {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
 		return
 	}
@@ -324,11 +325,9 @@ func (m *Manager) RegisterUserInput(sessionID string) {
 // so a racing keystroke can't have its flag update separated from its write and
 // clobbered (review CX4).
 func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
 	}
 
 	session.writeMu.Lock()
@@ -340,6 +339,28 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 		session.lastUserInputNano.Store(time.Now().UnixNano())
 	}
 	return err
+}
+
+const (
+	bracketPasteOpen  = "\x1b[200~"
+	bracketPasteClose = "\x1b[201~"
+)
+
+func sanitizeCopilotInput(text string) string {
+	flat := strings.ReplaceAll(text, "\r\n", " ")
+	return strings.Map(func(r rune) rune {
+		if sanitize.IsInvisibleFormat(r) {
+			return -1
+		}
+		if sanitize.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, flat)
+}
+
+func sanitizeBracketedPasteInput(text string) string {
+	return sanitize.StripForTerminalPaste(text)
 }
 
 // InjectText writes text into a session's input line as if the user typed it,
@@ -355,11 +376,9 @@ func (m *Manager) WriteUserInput(sessionID string, data []byte, submit bool) err
 // The whole sequence runs under the per-session write mutex so it lands as one
 // uninterrupted block relative to user keystrokes and other injections.
 func (m *Manager) InjectText(sessionID, text string, submit bool) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
 	}
 
 	session.writeMu.Lock()
@@ -375,16 +394,7 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// text literal (review: Codex P2 + completeness sweep). Invisible bidi/format
 		// controls are dropped outright (Trojan-Source hygiene). \r\n collapses to a
 		// single space first so a CRLF doesn't become two.
-		flat := strings.ReplaceAll(text, "\r\n", " ")
-		flat = strings.Map(func(r rune) rune {
-			if sanitize.IsInvisibleFormat(r) {
-				return -1
-			}
-			if sanitize.IsControl(r) {
-				return ' '
-			}
-			return r
-		}, flat)
+		flat := sanitizeCopilotInput(text)
 		// Nothing left after sanitization (e.g. an all-invisible payload): no-op so
 		// we never write a focus-in or leave a sticky pending flag for content that
 		// was never visible.
@@ -413,32 +423,13 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// markers the user's text itself contains so an embedded close sequence can't
 		// end paste mode early and let the tail run as live input (review:
 		// completeness sweep — paste integrity).
-		const (
-			bracketOpen  = "\x1b[200~"
-			bracketClose = "\x1b[201~"
-		)
-		safe := strings.ReplaceAll(text, bracketOpen, "")
-		safe = strings.ReplaceAll(safe, bracketClose, "")
-		// Strip control/format runes that survive the marker removal: C0/C1/DEL (a
-		// stray ESC could still start an escape sequence inside the paste) and the
-		// invisible Unicode format set (Trojan-Source). \n and \t are preserved —
-		// paste mode delivers multiline content literally.
-		safe = strings.Map(func(r rune) rune {
-			switch r {
-			case '\n', '\t':
-				return r
-			}
-			if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
-				return -1
-			}
-			return r
-		}, safe)
+		safe := sanitizeBracketedPasteInput(text)
 		// Nothing left after sanitization: no-op rather than writing an empty paste
 		// (and, for submit=true, a blank Enter) or leaving a sticky pending flag.
 		if safe == "" {
 			return nil
 		}
-		if err := m.writeLocked(session, []byte(bracketOpen+safe+bracketClose)); err != nil {
+		if err := m.writeLocked(session, []byte(bracketPasteOpen+safe+bracketPasteClose)); err != nil {
 			return err
 		}
 		if submit {
@@ -465,9 +456,7 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 // Enter and submitted their line). After this, HasPendingInput reports false,
 // so a pending notification can be injected safely.
 func (m *Manager) ClearUserInput(sessionID string) {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
 		return
 	}
@@ -481,9 +470,7 @@ func (m *Manager) ClearUserInput(sessionID string) {
 // so injecting into it would corrupt it (issue #15 review: C3). Returns false
 // for unknown sessions or when the buffer is empty.
 func (m *Manager) HasPendingInput(sessionID string) bool {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
 		return false
 	}
@@ -492,12 +479,12 @@ func (m *Manager) HasPendingInput(sessionID string) bool {
 
 // Resize resizes a PTY session
 func (m *Manager) Resize(sessionID string, cols, rows uint16) error {
-	m.mu.RLock()
-	session, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-
+	session, ok := m.lookupSession(sessionID)
 	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
+	}
+	if cols == 0 || rows == 0 {
+		return fmt.Errorf("invalid terminal size for session %s: cols and rows must be positive", sessionID)
 	}
 
 	return pty.Setsize(session.PTY, &pty.Winsize{
@@ -529,7 +516,7 @@ func (m *Manager) Close(sessionID string) error {
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("session not found: %s", sessionID)
+		return sessionNotFoundError(sessionID)
 	}
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
@@ -572,32 +559,26 @@ func (m *Manager) Close(sessionID string) error {
 
 // GetSession returns session info
 func (m *Manager) GetSession(sessionID string) *PTYSession {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.sessions[sessionID]
+	session, _ := m.lookupSession(sessionID)
+	return session
 }
 
 // SetCLISessionID records the CLI session ID for a terminal (#40). No-op for an
 // unknown session.
 func (m *Manager) SetCLISessionID(sessionID, id string) {
-	m.mu.RLock()
-	s := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if s != nil {
-		s.cliSessionID.Store(&id)
+	if session, ok := m.lookupSession(sessionID); ok {
+		session.cliSessionID.Store(&id)
 	}
 }
 
 // GetCLISessionID returns the captured CLI session ID for a terminal, or "" if
 // none was captured or the session is unknown (#40).
 func (m *Manager) GetCLISessionID(sessionID string) string {
-	m.mu.RLock()
-	s := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if s == nil {
+	session, ok := m.lookupSession(sessionID)
+	if !ok {
 		return ""
 	}
-	if p := s.cliSessionID.Load(); p != nil {
+	if p := session.cliSessionID.Load(); p != nil {
 		return *p
 	}
 	return ""
@@ -607,13 +588,11 @@ func (m *Manager) GetCLISessionID(sessionID string) string {
 // (0, false) if the session is unknown or still running. Lets the close path pin the
 // history window to the real exit time instead of a later UI-close (#40 Faz-2).
 func (m *Manager) SessionExitedAt(sessionID string) (float64, bool) {
-	m.mu.RLock()
-	s := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if s == nil {
+	session, ok := m.lookupSession(sessionID)
+	if !ok {
 		return 0, false
 	}
-	if nano := s.exitedAtNano.Load(); nano > 0 {
+	if nano := session.exitedAtNano.Load(); nano > 0 {
 		return float64(nano) / 1e9, true
 	}
 	return 0, false
@@ -625,10 +604,8 @@ func (m *Manager) SessionExitedAt(sessionID string) (float64, bool) {
 // channel never fires in a select). Used by the ingest watcher so it stops when
 // its terminal's CLI dies on its own (#65).
 func (m *Manager) SessionDone(sessionID string) <-chan struct{} {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if s, ok := m.sessions[sessionID]; ok {
-		return s.done
+	if session, ok := m.lookupSession(sessionID); ok {
+		return session.done
 	}
 	return nil
 }

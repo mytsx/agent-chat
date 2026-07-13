@@ -94,6 +94,40 @@ func TestListNewestFirst(t *testing.T) {
 	}
 }
 
+func TestListAndLatestSortEpochsNumerically(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "ancient-room"
+	dir := filepath.Join(dataDir, "hub-state", "summaries", room)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "999.md"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "1000.md"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	docs, err := List(dataDir, room)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("List len = %d, want 2", len(docs))
+	}
+	if docs[0].Epoch != "1000" || docs[0].Text != "new" {
+		t.Fatalf("List[0] = (%q, %q), want newest epoch 1000", docs[0].Epoch, docs[0].Text)
+	}
+
+	latest, ok, err := Latest(dataDir, room)
+	if err != nil || !ok {
+		t.Fatalf("Latest = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	if latest.Epoch != "1000" || latest.Text != "new" {
+		t.Fatalf("Latest = (%q, %q), want newest epoch 1000", latest.Epoch, latest.Text)
+	}
+}
+
 // Concurrent writes to the same room must each get a distinct epoch and survive:
 // none may overwrite another. Guards the epoch-collision TOCTOU (os.Stat-then-write
 // is not atomic; os.Rename overwrites on POSIX) — without serialization, racing

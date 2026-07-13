@@ -22,6 +22,40 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// team.NewStore returns (nil, err) when os.MkdirAll fails, and app.go startup
+// discards that error, so a nil *Store can reach these methods. They must degrade
+// gracefully (no nil-pointer panic) exactly like prompt.Store does.
+func TestNilTeamStoreMethodsAreSafe(t *testing.T) {
+	var s *Store
+	if got := s.List(); got != nil {
+		t.Fatalf("nil List = %v, want nil", got)
+	}
+	if _, err := s.Get("missing"); err == nil {
+		t.Fatal("nil Get must return an error")
+	}
+	if _, err := s.Create("n", "2x2", nil); err == nil {
+		t.Fatal("nil Create must return an error")
+	}
+	if _, err := s.Update("id", "n", "2x2", nil); err == nil {
+		t.Fatal("nil Update must return an error")
+	}
+	if _, err := s.UpsertAgent("id", AgentConfig{Name: "A"}); err == nil {
+		t.Fatal("nil UpsertAgent must return an error")
+	}
+	if _, err := s.SetManager("id", "mgr"); err == nil {
+		t.Fatal("nil SetManager must return an error")
+	}
+	if _, err := s.SetObserver("id", "obs"); err == nil {
+		t.Fatal("nil SetObserver must return an error")
+	}
+	if _, err := s.SetCustomPrompt("id", "text"); err == nil {
+		t.Fatal("nil SetCustomPrompt must return an error")
+	}
+	if err := s.Delete("id"); err == nil {
+		t.Fatal("nil Delete must return an error")
+	}
+}
+
 func TestUpsertAgentAddsNewAgent(t *testing.T) {
 	s := newTestStore(t)
 	team, err := s.Create("TeamA", "2x2", nil)
@@ -219,6 +253,88 @@ func TestAgentConfigSerializationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTeamStoreDefensiveCopiesAgentSlices(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+
+	agents := []AgentConfig{{Name: "agent-a", Role: "writer"}}
+	tm, err := s.Create("TeamA", "2x2", agents)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	agents[0].Role = "mutated-after-create"
+	got, _ := s.Get(tm.ID)
+	if got.Agents[0].Role != "writer" {
+		t.Fatalf("Create retained caller-owned agents slice: %+v", got.Agents)
+	}
+	tm.Agents[0].Role = "mutated-create-result"
+	gotAfterCreateResultMutation, _ := s.Get(tm.ID)
+	if gotAfterCreateResultMutation.Agents[0].Role != "writer" {
+		t.Fatalf("Create returned the store's agents backing array: %+v", gotAfterCreateResultMutation.Agents)
+	}
+
+	got.Agents[0].Role = "mutated-get-result"
+	gotAgain, _ := s.Get(tm.ID)
+	if gotAgain.Agents[0].Role != "writer" {
+		t.Fatalf("Get exposed the store's agents backing array: %+v", gotAgain.Agents)
+	}
+
+	listed := s.List()
+	listed[0].Agents[0].Role = "mutated-list-result"
+	listedAgain := s.List()
+	if listedAgain[0].Agents[0].Role != "writer" {
+		t.Fatalf("List exposed the store's agents backing array: %+v", listedAgain[0].Agents)
+	}
+
+	updatedAgents := []AgentConfig{{Name: "agent-b", Role: "reviewer"}}
+	if _, err := s.Update(tm.ID, "TeamA", "2x2", updatedAgents); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	updatedAgents[0].Role = "mutated-after-update"
+	updated, _ := s.Get(tm.ID)
+	if updated.Agents[0].Role != "reviewer" {
+		t.Fatalf("Update retained caller-owned agents slice: %+v", updated.Agents)
+	}
+
+	s2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("reload NewStore failed: %v", err)
+	}
+	reloaded, _ := s2.Get(tm.ID)
+	if reloaded.Agents[0].Role != "reviewer" {
+		t.Fatalf("memory/disk diverged after external mutation: %+v", reloaded.Agents)
+	}
+}
+
+func TestCreateRejectsCaseInsensitiveDuplicateTeamName(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.Create("Alpha", "2x2", nil); err != nil {
+		t.Fatalf("Create Alpha failed: %v", err)
+	}
+	if _, err := s.Create("alpha", "2x2", nil); err == nil {
+		t.Fatal("expected case-insensitive duplicate team name error, got nil")
+	}
+}
+
+func TestUpdateAllowsSameTeamNameAndRejectsOtherCaseDuplicate(t *testing.T) {
+	s := newTestStore(t)
+	alpha, err := s.Create("Alpha", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create Alpha failed: %v", err)
+	}
+	beta, err := s.Create("Beta", "2x2", nil)
+	if err != nil {
+		t.Fatalf("Create Beta failed: %v", err)
+	}
+
+	if _, err := s.Update(alpha.ID, "alpha", "2x3", nil); err != nil {
+		t.Fatalf("Update should allow a case-only rename of the same team: %v", err)
+	}
+	if _, err := s.Update(beta.ID, "ALPHA", "2x2", nil); err == nil {
+		t.Fatal("expected update to reject another team's case-insensitive name collision")
+	}
+}
+
 func jsonHasKey(raw []byte, key string) bool {
 	var arr []map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err != nil {
@@ -265,6 +381,41 @@ func TestLoadLegacyTeamsJSON(t *testing.T) {
 	}
 	if team.Agents[0].SlotIndex != 0 || team.Agents[0].UseWorktree != false {
 		t.Fatalf("legacy zero-values wrong: %+v", team.Agents[0])
+	}
+}
+
+func TestNewStoreReportsCorruptTeamsJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"truncated json", `[{"id":"t1","name":"Broken"}`},
+		{"wrong top-level shape", `{"id":"t1","name":"Broken"}`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "teams.json"), []byte(c.raw), 0o644); err != nil {
+				t.Fatalf("write corrupt teams.json failed: %v", err)
+			}
+
+			s, err := NewStore(dir)
+			if err == nil {
+				t.Fatal("NewStore must report corrupt teams.json instead of silently starting empty")
+			} else if !strings.Contains(err.Error(), "load teams") {
+				t.Fatalf("NewStore error = %q, want \"load teams\" context", err)
+			}
+			// Even on corrupt JSON the store must be usable (non-nil, empty roster) so a
+			// caller that discards the error — app.go startup, then subscribeExistingTeams
+			// → teamStore.List() — never nil derefs.
+			if s == nil {
+				t.Fatal("NewStore must return a usable store even when reporting corrupt JSON")
+			}
+			if got := s.List(); len(got) != 0 {
+				t.Fatalf("corrupt-JSON store should start empty, got %d teams", len(got))
+			}
+		})
 	}
 }
 
@@ -557,6 +708,154 @@ func TestSanitizeCharterStripsMarkerStraddlingCap(t *testing.T) {
 // SetCustomPrompt writes the room charter via a targeted single-field endpoint
 // (SetManager pattern) rather than the positional Update, which would reset the
 // charter on every grid-layout change. The value must round-trip through Get.
+func TestSetManagerClearsObserverRoleCaseInsensitive(t *testing.T) {
+	s := newTestStore(t)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{
+		{Name: "Pilot", Role: RoleObserver, CLIType: "claude"},
+	})
+
+	updated, err := s.SetManager(tm.ID, "pilot")
+	if err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+	if updated.ManagerAgent != "pilot" {
+		t.Fatalf("ManagerAgent = %q, want %q", updated.ManagerAgent, "pilot")
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0].Role != "" {
+		t.Fatalf("manager observer role was not cleared: %+v", updated.Agents)
+	}
+}
+
+func TestSetManagerSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: "Lead", CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("seed SetManager failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("no-op SetManager should succeed: %v", err)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read sentinel failed: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("unchanged SetManager rewrote the file: %s", raw)
+	}
+}
+
+func TestSetManagerWritesWhenUnchangedManagerClearsObserver(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	s.mu.Lock()
+	s.teams[0].ManagerAgent = "Pilot"
+	s.mu.Unlock()
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-SHOULD-BE-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	updated, err := s.SetManager(tm.ID, "Pilot")
+	if err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+	if updated.Agents[0].Role != "" {
+		t.Fatalf("observer role was not cleared for unchanged manager: %+v", updated.Agents)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read rewritten file failed: %v", err)
+	}
+	if bytes.Equal(raw, sentinel) {
+		t.Fatal("SetManager skipped write even though it cleared observer role")
+	}
+}
+
+func TestSetObserverSkipsWriteWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-NOT-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	if _, err := s.SetObserver(tm.ID, "pilot"); err != nil {
+		t.Fatalf("no-op SetObserver should succeed: %v", err)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read sentinel failed: %v", err)
+	}
+	if !bytes.Equal(raw, sentinel) {
+		t.Fatalf("unchanged SetObserver rewrote the file: %s", raw)
+	}
+}
+
+func TestSetObserverWritesWhenClearingManager(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	tm, err := s.Create("TeamA", "2x2", []AgentConfig{{Name: "Pilot", Role: RoleObserver, CLIType: "claude"}})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := s.SetManager(tm.ID, "Pilot"); err != nil {
+		t.Fatalf("SetManager failed: %v", err)
+	}
+
+	filePath := filepath.Join(dir, "teams.json")
+	sentinel := []byte("SENTINEL-SHOULD-BE-REWRITTEN")
+	if err := os.WriteFile(filePath, sentinel, 0o644); err != nil {
+		t.Fatalf("write sentinel failed: %v", err)
+	}
+	updated, err := s.SetObserver(tm.ID, "pilot")
+	if err != nil {
+		t.Fatalf("SetObserver failed: %v", err)
+	}
+	if updated.ManagerAgent != "" {
+		t.Fatalf("observer should clear manager assignment, got %q", updated.ManagerAgent)
+	}
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read rewritten file failed: %v", err)
+	}
+	if bytes.Equal(raw, sentinel) {
+		t.Fatal("SetObserver skipped write even though it cleared manager assignment")
+	}
+}
+
 func TestSetCustomPromptRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	tm, err := s.Create("TeamA", "2x2", nil)
@@ -730,6 +1029,88 @@ func TestSetCustomPromptRollsBackOnSaveFailure(t *testing.T) {
 	got, _ := s.Get(tm.ID)
 	if got.CustomPrompt != "ilk misyon" {
 		t.Fatalf("CustomPrompt not rolled back in memory: got %q, want %q", got.CustomPrompt, "ilk misyon")
+	}
+}
+
+func TestUpdateRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := NewStore(dir)
+	tm, _ := s.Create("TeamA", "2x2", []AgentConfig{{Name: "agent-a", SlotIndex: 1}})
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.Update(tm.ID, "TeamB", "1x1", []AgentConfig{{Name: "agent-b", SlotIndex: 2}}); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	got, _ := s.Get(tm.ID)
+	if got.Name != "TeamA" || got.GridLayout != "2x2" || len(got.Agents) != 1 || got.Agents[0].Name != "agent-a" {
+		t.Fatalf("Update did not roll back in memory: %+v", got)
+	}
+}
+
+func TestCreateRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if _, err := s.Create("TeamA", "2x2", nil); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	if got := s.List(); len(got) != 0 {
+		t.Fatalf("Create did not roll back in memory: %+v", got)
+	}
+}
+
+func TestNewStoreReturnsDataDirCreationError(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("file"), 0o644); err != nil {
+		t.Fatalf("write sentinel file: %v", err)
+	}
+
+	if _, err := NewStore(filepath.Join(notDir, "teams-data")); err == nil {
+		t.Fatal("NewStore must surface data-dir creation errors instead of starting with an unsaveable empty store")
+	}
+}
+
+func TestDeleteRollsBackOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	a, err := s.Create("TeamA", "2x2", nil)
+	if err != nil {
+		t.Fatalf("create TeamA failed: %v", err)
+	}
+	b, err := s.Create("TeamB", "1x1", nil)
+	if err != nil {
+		t.Fatalf("create TeamB failed: %v", err)
+	}
+
+	// Remove the data dir so save()'s temp-file write fails.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	if err := s.Delete(a.ID); err == nil {
+		t.Fatal("expected save failure, got nil")
+	}
+	if _, err := s.Get(a.ID); err != nil {
+		t.Fatalf("Delete did not roll back removed team in memory: %v", err)
+	}
+	if _, err := s.Get(b.ID); err != nil {
+		t.Fatalf("Delete rollback lost unaffected team: %v", err)
 	}
 }
 

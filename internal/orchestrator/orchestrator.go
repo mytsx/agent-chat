@@ -234,6 +234,48 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 	return ok && sessions[agentName] == sessionID
 }
 
+func notificationKey(chatDir, agentName string) string {
+	return chatDir + ":" + agentName
+}
+
+// armFlushTimerLocked schedules a pending-notification flush for the agent.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) armFlushTimerLocked(key, chatDir, agentName, sessionID string, delay time.Duration) {
+	// The callback runs on time.AfterFunc's own goroutine and needs the *Timer it is
+	// about to be assigned. A plain captured variable is a data race (write here vs.
+	// read in the callback, no happens-before edge). Pass the atomic.Pointer *itself*
+	// to flushPending, which Loads it AFTER acquiring o.mu: this function runs while
+	// the caller holds o.mu and Stores under that lock, so by the time the callback's
+	// flushPending takes o.mu the Store is guaranteed visible. Loading in the argument
+	// list instead (before the lock) could observe nil if the timer fires before Store
+	// runs, which would then skip the stale-timer cleanup and rot the pending queue.
+	var timerPtr atomic.Pointer[time.Timer]
+	timer := time.AfterFunc(delay, func() {
+		o.flushPending(chatDir, agentName, sessionID, &timerPtr)
+	})
+	timerPtr.Store(timer)
+	o.pendingTimers[key] = timer
+}
+
+// snapshotAgentSessions returns a copy of the registered sessions for chatDir so
+// callers can release o.mu before notifying agents. registeredDirs is populated
+// only when chatDir has no sessions, for diagnostics.
+func (o *Orchestrator) snapshotAgentSessions(chatDir string) (sessionsCopy map[string]string, registeredDirs []string, ok bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	sessions := o.agentSessions[chatDir]
+	if sessions == nil {
+		return nil, mapKeys(o.agentSessions), false
+	}
+
+	sessionsCopy = make(map[string]string, len(sessions))
+	for agent, sessionID := range sessions {
+		sessionsCopy[agent] = sessionID
+	}
+	return sessionsCopy, nil, true
+}
+
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
@@ -245,15 +287,36 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	log.Printf("[ORCH] RegisterAgent: chatDir=%s agent=%s session=%s", chatDir, agentName, ptymgr.ShortID(sessionID))
 }
 
-// UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state
+// UnregisterAgent removes an agent's PTY session mapping and cleans up cooldown state.
 func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.unregisterAgentLocked(chatDir, agentName)
+}
+
+// UnregisterAgentSession removes an agent mapping only when it still points to
+// sessionID. Use this from PTY/session close paths so closing a stale terminal
+// cannot unregister a newer restarted session for the same room/agent.
+func (o *Orchestrator) UnregisterAgentSession(chatDir, agentName, sessionID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if sessions, ok := o.agentSessions[chatDir]; ok && sessions[agentName] != sessionID {
+		return
+	}
+	o.unregisterAgentLocked(chatDir, agentName)
+}
+
+// unregisterAgentLocked removes an agent's PTY session mapping and cleans up
+// cooldown/deferral state. Caller MUST hold o.mu.
+func (o *Orchestrator) unregisterAgentLocked(chatDir, agentName string) {
 	if sessions, ok := o.agentSessions[chatDir]; ok {
 		delete(sessions, agentName)
+		if len(sessions) == 0 {
+			delete(o.agentSessions, chatDir)
+		}
 	}
 	// F007: Clean up cooldown/deferral tracking for this agent
-	key := chatDir + ":" + agentName
+	key := notificationKey(chatDir, agentName)
 	delete(o.lastNotified, key)
 	if timer, ok := o.pendingTimers[key]; ok {
 		timer.Stop()
@@ -268,40 +331,8 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	content := msg.Content
 	contentLower := strings.ToLower(content)
 	expectsReply := msg.ExpectsReply
-
-	// Is it a question?
-	isQuestion := false
-	for _, p := range questionPatterns {
-		if strings.Contains(contentLower, p) {
-			isQuestion = true
-			break
-		}
-	}
-
-	// Is it a short acknowledgment? Sorular zaten notify edilir ve ack olamaz
-	// (isAck = isShort && hasAck && !isQuestion), bu yüzden soru ise ack taramasını
-	// tamamen atla.
-	// isShort: mesaj ack olacak kadar kısa mı? Rune sayımı O(N), byte uzunluğu
-	// O(1). UTF-8'de her rune 1..4 byte olduğundan byte uzunluğu çoğu durumu
-	// kesin belirler: byteLen<AckMsgMaxLength ise rune sayısı da kesin küçüktür;
-	// byteLen>=AckMsgMaxLength*UTFMax ise kesin büyüktür. Yalnız bu iki sınır
-	// arasındaki gri bölgede gerçek rune sayımı gerekir — böylece kısa (yaygın)
-	// ve uzun mesajlarda tam tarama atlanır. (utf8.RuneCountInString < ... ile
-	// birebir aynı sonucu verir; eşdeğerlik testle doğrulandı.)
-	isAck := false
-	if !isQuestion {
-		byteLen := len(content)
-		isShort := byteLen < AckMsgMaxLength ||
-			(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
-		if isShort {
-			for _, p := range ackPatterns {
-				if matchesAckPattern(contentLower, p) {
-					isAck = true
-					break
-				}
-			}
-		}
-	}
+	isQuestion := containsQuestionPattern(contentLower)
+	isAck := !isQuestion && isShortContent(content) && containsAckPattern(contentLower)
 
 	// Decision
 	if isAck && !expectsReply {
@@ -316,12 +347,46 @@ func AnalyzeMessage(msg types.Message) AnalysisResult {
 	return AnalysisResult{Action: "notify", Reason: "Informational", IsQuestion: false}
 }
 
+func containsQuestionPattern(contentLower string) bool {
+	for _, p := range questionPatterns {
+		if strings.Contains(contentLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAckPattern(contentLower string) bool {
+	for _, p := range ackPatterns {
+		if matchesAckPattern(contentLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isShortContent reports whether a message is short enough to be considered an
+// acknowledgment. Rune counting is O(N), while byte length is O(1). In UTF-8,
+// every rune is 1..4 bytes, so byteLen<AckMsgMaxLength is definitely short and
+// byteLen>=AckMsgMaxLength*UTFMax is definitely long. Only the gray zone needs
+// a full rune count. This preserves the previous utf8.RuneCountInString result.
+func isShortContent(content string) bool {
+	byteLen := len(content)
+	return byteLen < AckMsgMaxLength ||
+		(byteLen < AckMsgMaxLength*utf8.UTFMax && utf8.RuneCountInString(content) < AckMsgMaxLength)
+}
+
 // buildPrompt builds the single-message notification text.
 func buildPrompt(isBroadcast bool, fromAgent, agentName string) string {
+	kind := "New message"
 	if isBroadcast {
-		return fmt.Sprintf("[agent-chat] Broadcast from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+		kind = "Broadcast"
 	}
-	return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.", fromAgent, agentName)
+	return formatSingleNotificationPrompt(kind, fromAgent, agentName)
+}
+
+func formatSingleNotificationPrompt(kind, fromAgent, agentName string) string {
+	return fmt.Sprintf("[agent-chat] %s from %s. read_messages(\"%s\") to read and respond.", kind, fromAgent, agentName)
 }
 
 // buildBatchedPrompt builds the notification text for a batch of pending msgs,
@@ -337,8 +402,7 @@ func buildBatchedPrompt(pending []pendingNotification, agentName string) string 
 		senders = append(senders, p.from)
 	}
 	if len(pending) == 1 {
-		return fmt.Sprintf("[agent-chat] New message from %s. read_messages(\"%s\") to read and respond.",
-			senders[0], agentName)
+		return formatSingleNotificationPrompt("New message", senders[0], agentName)
 	}
 	return fmt.Sprintf("[agent-chat] %d new messages from %s. read_messages(\"%s\") to read and respond.",
 		len(pending), strings.Join(senders, ", "), agentName)
@@ -464,9 +528,7 @@ func (o *Orchestrator) queueLocked(key, chatDir, agentName, sessionID, fromAgent
 				delay = rem
 			}
 		}
-		o.pendingTimers[key] = time.AfterFunc(delay, func() {
-			o.flushPending(chatDir, agentName, sessionID)
-		})
+		o.armFlushTimerLocked(key, chatDir, agentName, sessionID, delay)
 	}
 }
 
@@ -474,7 +536,7 @@ func (o *Orchestrator) queueLocked(key, chatDir, agentName, sessionID, fromAgent
 // window and defers while the user has a pending input line; otherwise it
 // injects immediately.
 func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent string, isBroadcast bool) {
-	key := chatDir + ":" + agentName
+	key := notificationKey(chatDir, agentName)
 
 	// Query pending-input OUTSIDE o.mu (lock ordering: never hold o.mu while
 	// locking pty.Manager.mu).
@@ -514,8 +576,8 @@ func (o *Orchestrator) notifyAgent(chatDir, agentName, sessionID, fromAgent stri
 // If the user still has a pending line it RE-ARMs the single timer (up to
 // maxDeferral); once the cap is exceeded it routes to the UI fallback instead of
 // corrupting the PTY input.
-func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
-	key := chatDir + ":" + agentName
+func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string, timerPtr *atomic.Pointer[time.Timer]) {
+	key := notificationKey(chatDir, agentName)
 
 	// Query pending-input OUTSIDE o.mu (lock ordering).
 	pending := o.hasPendingInput(sessionID)
@@ -524,7 +586,24 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 	if !o.isCurrentSessionLocked(chatDir, agentName, sessionID) {
 		// The agent was unregistered or restarted (now bound to a different
 		// sessionID) since this timer was armed. This callback is stale — drop it
-		// without touching the new session's pending state/timer (review GR2).
+		// without flushing to the old session (review GR2). If this callback still
+		// owns the timer slot and pending messages remain for the same agent name,
+		// re-arm them against the current session; otherwise the slot would keep
+		// pointing at an already-fired stale timer and the pending queue could rot.
+		//
+		// Load the owning timer HERE, under o.mu (not in the caller's argument list):
+		// armFlushTimerLocked Stored it while holding o.mu, so acquiring o.mu makes the
+		// Store visible and the Load can never observe the early-fire nil.
+		var expectedTimer *time.Timer
+		if timerPtr != nil {
+			expectedTimer = timerPtr.Load()
+		}
+		if expectedTimer != nil && o.pendingTimers[key] == expectedTimer {
+			delete(o.pendingTimers, key)
+			if currentSession := o.agentSessions[chatDir][agentName]; currentSession != "" && len(o.pendingMsgs[key]) > 0 {
+				o.armFlushTimerLocked(key, chatDir, agentName, currentSession, o.reArmInterval)
+			}
+		}
 		o.mu.Unlock()
 		return
 	}
@@ -549,9 +628,7 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 			if tm := o.pendingTimers[key]; tm != nil {
 				tm.Stop()
 			}
-			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
-				o.flushPending(chatDir, agentName, sessionID)
-			})
+			o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
 			o.mu.Unlock()
 			log.Printf("[ORCH] Notification deferred (pending input) agent=%s", agentName)
 			return
@@ -622,9 +699,7 @@ func (o *Orchestrator) flushPending(chatDir, agentName, sessionID string) {
 			o.deferStartedAt[key] = startedAt
 		}
 		if _, exists := o.pendingTimers[key]; !exists {
-			o.pendingTimers[key] = time.AfterFunc(o.reArmInterval, func() {
-				o.flushPending(chatDir, agentName, sessionID)
-			})
+			o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
 		}
 		o.mu.Unlock()
 		log.Printf("[ORCH] Flush raced into pending input, re-deferred agent=%s", agentName)
@@ -652,18 +727,11 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 
 	// Manager-routed messages must always notify the manager target, even for ACK-like content.
 	if msg.RoutedByManager {
-		o.mu.Lock()
-		sessions := o.agentSessions[chatDir]
-		if sessions == nil {
-			o.mu.Unlock()
+		sessionsCopy, _, ok := o.snapshotAgentSessions(chatDir)
+		if !ok {
 			log.Printf("[ORCH] No agent sessions for chatDir=%s (manager-routed)", chatDir)
 			return
 		}
-		sessionsCopy := make(map[string]string, len(sessions))
-		for k, v := range sessions {
-			sessionsCopy[k] = v
-		}
-		o.mu.Unlock()
 
 		target := msg.To
 		if sessionID, ok := sessionsCopy[target]; ok {
@@ -682,19 +750,11 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 	}
 
 	// Snapshot sessions under lock to avoid race with RegisterAgent/UnregisterAgent
-	o.mu.Lock()
-	sessions := o.agentSessions[chatDir]
-	if sessions == nil {
-		log.Printf("[ORCH] No agent sessions for chatDir=%s (registered dirs: %v)", chatDir, mapKeys(o.agentSessions))
-		o.mu.Unlock()
+	sessionsCopy, registeredDirs, ok := o.snapshotAgentSessions(chatDir)
+	if !ok {
+		log.Printf("[ORCH] No agent sessions for chatDir=%s (registered dirs: %v)", chatDir, registeredDirs)
 		return
 	}
-	// Copy map so we can release the lock before sending notifications
-	sessionsCopy := make(map[string]string, len(sessions))
-	for k, v := range sessions {
-		sessionsCopy[k] = v
-	}
-	o.mu.Unlock()
 
 	log.Printf("[ORCH] Registered agents for chatDir: %v", mapKeys(sessionsCopy))
 

@@ -28,25 +28,22 @@ type codexLine struct {
 }
 
 func (codexAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
-	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []ParsedMessage
-	for _, line := range lines {
+	return parseCompleteJSONLUserMessages(path, cur, func(line []byte) (string, string, bool) {
 		var cl codexLine
-		if json.Unmarshal(line.Data, &cl) != nil {
-			continue
+		if json.Unmarshal(line, &cl) != nil {
+			return "", "", false
 		}
-		after := Cursor{Offset: line.OffsetAfter}
 		switch {
 		case cl.Type == "event_msg" && cl.Payload.Type == "user_message" && cl.Payload.Message != "":
-			out = append(out, ParsedMessage{Content: cl.Payload.Message, Timestamp: cl.Timestamp, After: after})
+			return cl.Payload.Message, cl.Timestamp, true
 		case cl.Type == "message" && cl.Role == "user":
 			var s string
 			if json.Unmarshal(cl.Content, &s) == nil && s != "" {
-				out = append(out, ParsedMessage{Content: s, Timestamp: cl.Timestamp, After: after})
+				return s, cl.Timestamp, true
 			}
 		}
-	}
-	return out, Cursor{Offset: next}, err
+		return "", "", false
+	})
 }
 
 func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
@@ -108,35 +105,33 @@ func (codexAdapter) SessionID(path string) string {
 // codexFileID returns the session id recorded in a rollout's first line
 // (session_meta.payload.id), or "" if it can't be read.
 func codexFileID(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	line, _ := bufio.NewReader(f).ReadBytes('\n')
-	var meta struct {
-		Payload struct {
-			ID string `json:"id"`
-		} `json:"payload"`
-	}
-	_ = json.Unmarshal(line, &meta)
-	return meta.Payload.ID
+	return readCodexFileMeta(path).id
 }
 
 // codexFileCwd returns the cwd recorded in a rollout's first line
 // (session_meta.payload.cwd), or "" if it can't be read.
 func codexFileCwd(path string) string {
+	return readCodexFileMeta(path).cwd
+}
+
+type codexFileMeta struct {
+	id  string
+	cwd string
+}
+
+func readCodexFileMeta(path string) codexFileMeta {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return codexFileMeta{}
 	}
 	defer f.Close()
 	line, _ := bufio.NewReader(f).ReadBytes('\n')
 	var meta struct {
 		Payload struct {
+			ID  string `json:"id"`
 			Cwd string `json:"cwd"`
 		} `json:"payload"`
 	}
 	_ = json.Unmarshal(line, &meta)
-	return meta.Payload.Cwd
+	return codexFileMeta{id: meta.Payload.ID, cwd: meta.Payload.Cwd}
 }

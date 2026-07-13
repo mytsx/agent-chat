@@ -85,6 +85,55 @@ function syncLayoutWithSessions(layout: LayoutItem[], sessions: TerminalSession[
   return existing;
 }
 
+function buildFixedGridSlotRows(
+  sessions: TerminalSession[],
+  capacity: number,
+  cols: number,
+  rows: number
+): GridSlot[][] {
+  const slotMap = new Map<number, TerminalSession>();
+  for (const session of sessions) {
+    slotMap.set(session.slotIndex, session);
+  }
+
+  const slots: GridSlot[] = [];
+  for (let i = 0; i < capacity; i++) {
+    const session = slotMap.get(i);
+    slots.push(session ? { type: "terminal", session } : { type: "wizard", slotIndex: i });
+  }
+
+  const slotRows: GridSlot[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const row = slots.slice(r * cols, (r + 1) * cols);
+    if (row.length > 0) {
+      slotRows.push(row);
+    }
+  }
+
+  return slotRows;
+}
+
+function nextCustomSlotIndex(sessions: TerminalSession[]): number {
+  return sessions.length > 0
+    ? Math.max(...sessions.map((session) => session.slotIndex)) + 1
+    : 0;
+}
+
+function gridSlotKey(slot: GridSlot): string {
+  return slot.type === "terminal" ? slot.session.sessionID : `wizard-${slot.slotIndex}`;
+}
+
+function terminalCountLabel(isCustomMode: boolean, terminalCount: number, capacity: number): string {
+  if (isCustomMode) {
+    return `${terminalCount} terminal${terminalCount !== 1 ? "s" : ""}`;
+  }
+  return `${terminalCount}/${capacity}`;
+}
+
+function reportTerminalActionFailure(action: string, err: unknown) {
+  console.error(`[${action}] failed:`, err);
+}
+
 function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
   if (typeof window === "undefined") {
     return {};
@@ -204,29 +253,37 @@ export default function TerminalGrid() {
 
   if (!team) return <div className="terminal-grid-empty">No team selected</div>;
 
-  // Build slot array for fixed grids (skip for custom mode — capacity is Infinity)
-  const slots: GridSlot[] = [];
-  const slotRows: GridSlot[][] = [];
-  if (!isCustomLayout(team.grid_layout)) {
-    const slotMap = new Map<number, TerminalSession>();
-    for (const s of teamSessions) {
-      slotMap.set(s.slotIndex, s);
-    }
-    for (let i = 0; i < capacity; i++) {
-      const session = slotMap.get(i);
-      if (session) {
-        slots.push({ type: "terminal", session });
-      } else {
-        slots.push({ type: "wizard", slotIndex: i });
-      }
-    }
-    for (let r = 0; r < rows; r++) {
-      const row = slots.slice(r * cols, (r + 1) * cols);
-      if (row.length > 0) {
-        slotRows.push(row);
-      }
-    }
-  }
+  const slotRows = isCustomMode
+    ? []
+    : buildFixedGridSlotRows(teamSessions, capacity, cols, rows);
+
+  const renderTerminalPane = (
+    session: TerminalSession,
+    options: { isFocused?: boolean; onRemove?: () => void; teamID?: string } = {}
+  ) => {
+    const actionTeamID = options.teamID ?? session.teamID;
+    return (
+      <TerminalPane
+        sessionID={session.sessionID}
+        agentName={session.agentName}
+        cliType={session.cliType}
+        isFocused={options.isFocused ?? false}
+        onToggleFocus={() => toggleFocusSession(session.sessionID)}
+        onRemove={options.onRemove}
+        onRestart={() =>
+          restartTerminal(actionTeamID, session.sessionID).catch((err) =>
+            reportTerminalActionFailure("restart", err)
+          )
+        }
+        onResume={() =>
+          resumeTerminal(actionTeamID, session.sessionID).catch((err) =>
+            reportTerminalActionFailure("resume", err)
+          )
+        }
+        canResume={!!session.cliSessionID}
+      />
+    );
+  };
 
   const renderFocusedMode = () => {
     const focused = teamSessions.find((s) => s.sessionID === focusedSessionID);
@@ -242,60 +299,36 @@ export default function TerminalGrid() {
               flex: 1,
             }}
           >
-            <TerminalPane
-              sessionID={s.sessionID}
-              agentName={s.agentName}
-              cliType={s.cliType}
-              isFocused={s.sessionID === focusedSessionID}
-              onToggleFocus={() => toggleFocusSession(s.sessionID)}
-              onRestart={() => restartTerminal(s.teamID, s.sessionID).catch(err => console.error("[restart] failed:", err))}
-              onResume={() => resumeTerminal(s.teamID, s.sessionID).catch(err => console.error("[resume] failed:", err))}
-              canResume={!!s.cliSessionID}
-            />
+            {renderTerminalPane(s, { isFocused: s.sessionID === focusedSessionID })}
           </div>
         ))}
       </div>
     );
   };
 
+  const renderSetupWizard = (slotIndex: number, onCreated: () => void = () => {}) => (
+    <SetupWizard
+      slotIndex={slotIndex}
+      teamID={team.id}
+      onCreated={onCreated}
+    />
+  );
+
   const renderSlot = (slot: GridSlot) => {
     if (slot.type === "terminal") {
-      return (
-        <TerminalPane
-          sessionID={slot.session.sessionID}
-          agentName={slot.session.agentName}
-          cliType={slot.session.cliType}
-          isFocused={false}
-          onToggleFocus={() => toggleFocusSession(slot.session.sessionID)}
-          onRestart={() => restartTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[restart] failed:", err))}
-          onResume={() => resumeTerminal(slot.session.teamID, slot.session.sessionID).catch(err => console.error("[resume] failed:", err))}
-          canResume={!!slot.session.cliSessionID}
-        />
-      );
+      return renderTerminalPane(slot.session);
     }
-    return (
-      <SetupWizard
-        slotIndex={slot.slotIndex}
-        teamID={team.id}
-        onCreated={() => {}}
-      />
-    );
+    return renderSetupWizard(slot.slotIndex);
   };
 
   const renderCustomMode = () => {
-    const nextSlotIndex = teamSessions.length > 0
-      ? Math.max(...teamSessions.map((s) => s.slotIndex)) + 1
-      : 0;
+    const nextSlotIndex = nextCustomSlotIndex(teamSessions);
 
     if (teamSessions.length === 0) {
       return (
         <div className="custom-layout-shell">
           <div className="custom-layout-empty">
-            <SetupWizard
-              slotIndex={nextSlotIndex}
-              teamID={team.id}
-              onCreated={() => setShowCustomSetup(false)}
-            />
+            {renderSetupWizard(nextSlotIndex, () => setShowCustomSetup(false))}
           </div>
         </div>
       );
@@ -320,32 +353,20 @@ export default function TerminalGrid() {
           >
             {teamSessions.map((s) => (
               <div key={s.sessionID} className="custom-grid-item">
-                <TerminalPane
-                  sessionID={s.sessionID}
-                  agentName={s.agentName}
-                  cliType={s.cliType}
-                  isFocused={false}
-                  onToggleFocus={() => toggleFocusSession(s.sessionID)}
-                  onRemove={() =>
+                {renderTerminalPane(s, {
+                  teamID: team.id,
+                  onRemove: () =>
                     removeTerminal(team.id, s.sessionID).catch((err) =>
-                      console.error("[remove] failed:", err)
-                    )
-                  }
-                  onRestart={() => restartTerminal(team.id, s.sessionID).catch(err => console.error("[restart] failed:", err))}
-                  onResume={() => resumeTerminal(team.id, s.sessionID).catch(err => console.error("[resume] failed:", err))}
-                  canResume={!!s.cliSessionID}
-                />
+                      reportTerminalActionFailure("remove", err)
+                    ),
+                })}
               </div>
             ))}
           </FreeformGrid>
         </div>
         {showCustomSetup && (
           <div className="custom-setup-drawer">
-            <SetupWizard
-              slotIndex={nextSlotIndex}
-              teamID={team.id}
-              onCreated={() => setShowCustomSetup(false)}
-            />
+            {renderSetupWizard(nextSlotIndex, () => setShowCustomSetup(false))}
           </div>
         )}
       </div>
@@ -357,17 +378,11 @@ export default function TerminalGrid() {
       <PanelGroup orientation="vertical" className="terminal-panel-group">
         {slotRows.map((rowSlots, rowIdx) => (
           <PanelGroupRow key={rowIdx} rowIdx={rowIdx}>
-            {rowSlots.map((slot, colIdx) => {
-              const key =
-                slot.type === "terminal"
-                  ? slot.session.sessionID
-                  : `wizard-${slot.slotIndex}`;
-              return (
-                <PanelItem key={key} colIdx={colIdx}>
-                  {renderSlot(slot)}
-                </PanelItem>
-              );
-            })}
+            {rowSlots.map((slot, colIdx) => (
+              <PanelItem key={gridSlotKey(slot)} colIdx={colIdx}>
+                {renderSlot(slot)}
+              </PanelItem>
+            ))}
           </PanelGroupRow>
         ))}
       </PanelGroup>
@@ -409,9 +424,7 @@ export default function TerminalGrid() {
             </button>
           )}
           <span className="terminal-count">
-            {isCustomMode
-              ? `${teamSessions.length} terminal${teamSessions.length !== 1 ? "s" : ""}`
-              : `${teamSessions.length}/${capacity}`}
+            {terminalCountLabel(isCustomMode, teamSessions.length, capacity)}
           </span>
         </div>
       </div>
@@ -449,7 +462,11 @@ function PanelGroupRow({
   return (
     <>
       {rowIdx > 0 && (
-        <PanelResizeHandle className="resize-handle resize-handle-horizontal" />
+        <PanelResizeHandle
+          className="resize-handle resize-handle-horizontal"
+          aria-label={`Resize terminal row ${rowIdx}`}
+          title="Resize terminal rows"
+        />
       )}
       <Panel minSize="10%">
         <PanelGroup orientation="horizontal" className="terminal-panel-row">
@@ -471,7 +488,11 @@ function PanelItem({
   return (
     <>
       {colIdx > 0 && (
-        <PanelResizeHandle className="resize-handle resize-handle-vertical" />
+        <PanelResizeHandle
+          className="resize-handle resize-handle-vertical"
+          aria-label={`Resize terminal column ${colIdx}`}
+          title="Resize terminal columns"
+        />
       )}
       <Panel minSize="10%">{children}</Panel>
     </>

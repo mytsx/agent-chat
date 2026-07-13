@@ -70,6 +70,43 @@ func TestGeminiParse_SkipsReparseWhenMtimeUnchanged(t *testing.T) {
 	}
 }
 
+func TestGeminiParse_ResetStaleCountAfterReplacement(t *testing.T) {
+	dir := t.TempDir()
+	oldObj := `{"messages":[` +
+		`{"timestamp":"t1","type":"user","content":[{"text":"old one"}]},` +
+		`{"timestamp":"t2","type":"user","content":[{"text":"old two"}]}` +
+		`]}`
+	p := writeFile(t, dir, "session-x.json", oldObj)
+	oldTime := time.Now().Add(-time.Minute)
+	os.Chtimes(p, oldTime, oldTime)
+
+	_, cur, err := geminiAdapter{}.ParseNewUserMessages(p, Cursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Count != 2 {
+		t.Fatalf("seed cursor count = %d, want 2", cur.Count)
+	}
+
+	newObj := `{"messages":[{"timestamp":"t3","type":"user","content":[{"text":"new after replacement"}]}]}`
+	if err := os.WriteFile(p, []byte(newObj), 0644); err != nil {
+		t.Fatal(err)
+	}
+	newTime := oldTime.Add(time.Minute)
+	os.Chtimes(p, newTime, newTime)
+
+	msgs, next, err := geminiAdapter{}.ParseNewUserMessages(p, cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "new after replacement" {
+		t.Fatalf("got %+v, want replacement transcript message", msgs)
+	}
+	if next.Count != 1 || next.ModTime != newTime.UnixNano() {
+		t.Fatalf("next cursor = %+v, want count=1 modtime=%d", next, newTime.UnixNano())
+	}
+}
+
 func TestGeminiDiscover_Sha256Folder(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

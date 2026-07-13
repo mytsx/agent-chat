@@ -76,6 +76,35 @@ func (r *RoomState) nextID() int {
 	return r.messages[len(r.messages)-1].ID + 1
 }
 
+func archiveDropped(dropped []types.Message, fn func([]types.Message)) {
+	if len(dropped) > 0 && fn != nil {
+		fn(dropped)
+	}
+}
+
+// touchAgentLastSeenLocked refreshes an active roster entry. Must hold r.mu.
+func (r *RoomState) touchAgentLastSeenLocked(agentName string) {
+	if agent, ok := r.agents[agentName]; ok {
+		agent.LastSeen = types.Now()
+		r.agents[agentName] = agent
+		r.dirty = true
+	}
+}
+
+// touchAgentLastSeenByIdentityLocked refreshes the roster entry matching
+// agentName with the same case-insensitive identity rules used for manager and
+// observer roles. Must hold r.mu.
+func (r *RoomState) touchAgentLastSeenByIdentityLocked(agentName string) {
+	for name, agent := range r.agents {
+		if sameAgentName(name, agentName) {
+			agent.LastSeen = types.Now()
+			r.agents[name] = agent
+			r.dirty = true
+			return
+		}
+	}
+}
+
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
@@ -134,9 +163,7 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 	fn := r.archiveFn
 	r.mu.Unlock()
 
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
+	archiveDropped(dropped, fn)
 	return sysMsg, agentsCopy, nil
 }
 
@@ -145,10 +172,7 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	r.mu.Lock()
 
 	// Update sender's last_seen
-	if agent, ok := r.agents[from]; ok {
-		agent.LastSeen = types.Now()
-		r.agents[from] = agent
-	}
+	r.touchAgentLastSeenLocked(from)
 
 	msgType := "broadcast"
 	if to != "all" {
@@ -173,9 +197,7 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	fn := r.archiveFn
 	r.mu.Unlock()
 
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
+	archiveDropped(dropped, fn)
 	return msg, nil
 }
 
@@ -211,9 +233,7 @@ func (r *RoomState) LogUserPrompt(from, to, content, ts string) types.Message {
 	fn := r.archiveFn
 	r.mu.Unlock()
 
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
+	archiveDropped(dropped, fn)
 	return msg
 }
 
@@ -323,11 +343,7 @@ func (r *RoomState) ListAgents(agentName string) map[string]types.Agent {
 	r.cleanupStaleLocked()
 
 	if agentName != "" {
-		if agent, ok := r.agents[agentName]; ok {
-			agent.LastSeen = types.Now()
-			r.agents[agentName] = agent
-			r.dirty = true
-		}
+		r.touchAgentLastSeenLocked(agentName)
 	}
 
 	return r.copyAgentsLocked()
@@ -363,9 +379,7 @@ func (r *RoomState) Leave(agentName string) (types.Message, bool) {
 	fn := r.archiveFn
 	r.mu.Unlock()
 
-	if len(dropped) > 0 && fn != nil {
-		fn(dropped)
-	}
+	archiveDropped(dropped, fn)
 	return sysMsg, true
 }
 
@@ -384,6 +398,7 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 	active := r.getActiveManagerLocked()
 	if sameAgentName(active, agentName) {
 		r.managerLastSeen = types.Now()
+		r.touchAgentLastSeenByIdentityLocked(active)
 	}
 	return active
 }
@@ -395,11 +410,7 @@ func (r *RoomState) GetActiveManagerAndTouch(agentName string) string {
 func (r *RoomState) TouchAgentLastSeen(agentName string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if agent, ok := r.agents[agentName]; ok {
-		agent.LastSeen = types.Now()
-		r.agents[agentName] = agent
-		r.dirty = true
-	}
+	r.touchAgentLastSeenLocked(agentName)
 }
 
 // IsObserver reports whether the named agent is currently in the room roster with
@@ -424,6 +435,7 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 	defer r.mu.Unlock()
 	if r.isActiveManagerLocked(agentName) {
 		r.managerLastSeen = types.Now()
+		r.touchAgentLastSeenByIdentityLocked(agentName)
 		return true
 	}
 	return false
@@ -486,11 +498,7 @@ func (r *RoomState) GetLastMessageID(agentName string) int {
 	defer r.mu.Unlock()
 
 	if agentName != "" {
-		if agent, ok := r.agents[agentName]; ok {
-			agent.LastSeen = types.Now()
-			r.agents[agentName] = agent
-			r.dirty = true
-		}
+		r.touchAgentLastSeenLocked(agentName)
 	}
 
 	// Return the last AGENT-VISIBLE message ID. user_prompt records are filtered

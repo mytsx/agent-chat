@@ -3,6 +3,9 @@ package cli
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -26,19 +29,18 @@ func ensureFullPATH() {
 		home + "/.cargo/bin",
 	}
 
-	// Also try to resolve nvm current node path
-	if nvmDir := os.Getenv("NVM_DIR"); nvmDir == "" && home != "" {
-		entries, _ := os.ReadDir(home + "/.nvm/versions/node")
-		if len(entries) > 0 {
-			// Pick the last entry (usually highest version)
-			last := entries[len(entries)-1]
-			extraDirs = append(extraDirs, home+"/.nvm/versions/node/"+last.Name()+"/bin")
-		}
+	// Also try to resolve nvm-installed Node versions. os.ReadDir is lexical, so
+	// picking the last entry chooses v9 over v20 and can make Finder-launched CLI
+	// terminals miss modern node-based tools. Add semantic-newest bins first so PATH
+	// resolution sees the newest installed version.
+	if os.Getenv("NVM_DIR") == "" && home != "" {
+		extraDirs = append(extraDirs, nvmNodeVersionDirs(home)...)
 	}
 
 	currentPATH := os.Getenv("PATH")
+	pathSeparator := string(os.PathListSeparator)
 	pathSet := make(map[string]bool)
-	for _, p := range strings.Split(currentPATH, ":") {
+	for _, p := range filepath.SplitList(currentPATH) {
 		pathSet[p] = true
 	}
 
@@ -55,9 +57,71 @@ func ensureFullPATH() {
 	}
 
 	if len(toAdd) > 0 {
-		newPATH := currentPATH + ":" + strings.Join(toAdd, ":")
+		newPATH := strings.Join(toAdd, pathSeparator)
+		if currentPATH != "" {
+			newPATH = currentPATH + pathSeparator + newPATH
+		}
 		os.Setenv("PATH", newPATH)
 	}
+}
+
+func nvmNodeVersionDirs(home string) []string {
+	base := filepath.Join(home, ".nvm", "versions", "node")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	type versionDir struct {
+		name  string
+		parts []int
+	}
+	var versions []versionDir
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "v") {
+			continue
+		}
+		binDir := filepath.Join(base, entry.Name(), "bin")
+		if fi, err := os.Stat(binDir); err != nil || !fi.IsDir() {
+			continue
+		}
+		versions = append(versions, versionDir{name: entry.Name(), parts: parseNodeVersion(entry.Name())})
+	}
+	sort.SliceStable(versions, func(i, j int) bool {
+		for p := 0; p < len(versions[i].parts) || p < len(versions[j].parts); p++ {
+			iv, jv := 0, 0
+			if p < len(versions[i].parts) {
+				iv = versions[i].parts[p]
+			}
+			if p < len(versions[j].parts) {
+				jv = versions[j].parts[p]
+			}
+			if iv != jv {
+				return iv > jv
+			}
+		}
+		return versions[i].name > versions[j].name
+	})
+	dirs := make([]string, 0, len(versions))
+	for _, v := range versions {
+		dirs = append(dirs, filepath.Join(base, v.name, "bin"))
+	}
+	return dirs
+}
+
+func parseNodeVersion(name string) []int {
+	name = strings.TrimPrefix(name, "v")
+	fields := strings.Split(name, ".")
+	parts := make([]int, len(fields))
+	for i, field := range fields {
+		// Be tolerant of suffixes like v20.11.1-nightly while preserving useful
+		// numeric ordering for normal nvm directory names.
+		field = strings.TrimLeftFunc(field, func(r rune) bool { return r < '0' || r > '9' })
+		field = strings.TrimRightFunc(field, func(r rune) bool { return r < '0' || r > '9' })
+		if n, err := strconv.Atoi(field); err == nil {
+			parts[i] = n
+		}
+	}
+	return parts
 }
 
 // CLIType represents a supported CLI tool

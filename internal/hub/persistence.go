@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"desktop/internal/validation"
 )
 
 const persistInterval = 5 * time.Second
@@ -115,6 +117,17 @@ func (h *Hub) persistAll() {
 }
 
 func (h *Hub) persistRoom(name string, room *RoomState) {
+	// name becomes the hub-state/{name}.json path segment below. Every other
+	// file-touching path (session.go, summary.go, archive.go, delete_room) already
+	// rejects traversal names; this is the last write path that could turn an
+	// unvalidated in-memory room (materialized via getOrCreateRoom) into a write
+	// outside hub-state. Handlers validate the room before getOrCreateRoom, so this
+	// guard is defense-in-depth and should never fire in normal operation.
+	if err := validation.ValidateName(name); err != nil {
+		h.logger.Printf("persistRoom: geçersiz oda adı %q atlanıyor: %v", name, err)
+		return
+	}
+
 	stateDir := filepath.Join(h.dataDir, "hub-state")
 	os.MkdirAll(stateDir, 0700)
 

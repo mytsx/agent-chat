@@ -101,31 +101,49 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.writeWebSocketMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if c.writeTextMessage(message) != nil || c.drainQueuedTextMessages() != nil {
 				return
-			}
-
-			// Drain queued messages — each as its own WebSocket frame
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				if err := c.conn.WriteMessage(websocket.TextMessage, <-c.send); err != nil {
-					return
-				}
 			}
 
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if c.writeWebSocketMessage(websocket.PingMessage, nil) != nil {
 				return
 			}
 		}
 	}
+}
+
+func (c *Client) writeTextMessage(message []byte) error {
+	return c.writeWebSocketMessage(websocket.TextMessage, message)
+}
+
+func (c *Client) writeWebSocketMessage(messageType int, payload []byte) error {
+	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.conn.WriteMessage(messageType, payload)
+}
+
+func (c *Client) drainQueuedTextMessages() error {
+	// Drain queued messages — each as its own WebSocket frame. As the sole consumer
+	// this reads at most the len() snapshot, and a closed buffered channel still yields
+	// its buffered messages first — so nil never surfaces here in practice. The ok
+	// check is defense-in-depth: if send is closed mid-drain, stop instead of writing
+	// zero-value frames.
+	n := len(c.send)
+	for i := 0; i < n; i++ {
+		msg, ok := <-c.send
+		if !ok {
+			break
+		}
+		if err := c.writeTextMessage(msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sendJSON sends a JSON-encoded message to this client.
@@ -141,6 +159,25 @@ func (c *Client) sendJSON(v any) {
 		// Client buffer full, drop
 		c.hub.logger.Printf("Client send buffer full, dropping message for %s", c.agentName)
 	}
+}
+
+// sendSuccess sends a successful response with an optional JSON payload.
+func (c *Client) sendSuccess(id, reqType string, payload any) {
+	resp := types.Response{ID: id, RequestType: reqType, Success: true}
+	if payload != nil {
+		resp.Data, _ = json.Marshal(payload)
+	}
+	c.sendJSON(resp)
+}
+
+// sendOK sends a standard ok=true success response.
+func (c *Client) sendOK(id, reqType string) {
+	c.sendSuccess(id, reqType, map[string]bool{"ok": true})
+}
+
+// sendText sends a text-only success response.
+func (c *Client) sendText(id, reqType, text string) {
+	c.sendSuccess(id, reqType, map[string]string{"text": text})
 }
 
 // sendError sends an error response.

@@ -128,7 +128,7 @@ func TestFlushPending_ReArmsWhilePending(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	pending := len(o.pendingMsgs[key])
@@ -164,7 +164,7 @@ func TestFlushPending_EmptyQueueDoesNotReArm(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	_, hasTimer := o.pendingTimers[key]
@@ -204,7 +204,7 @@ func TestFlushPending_FallbackWhenMaxDeferralExceeded(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	pending := len(o.pendingMsgs[key])
@@ -246,7 +246,7 @@ func TestFlushPending_SendsWhenInputCleared(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	_, hasDefer := o.deferStartedAt[key]
@@ -279,7 +279,7 @@ func TestFlushPending_StaleSessionDropped(t *testing.T) {
 	o.mu.Unlock()
 
 	// An old timer fires with the STALE sessionID.
-	o.flushPending("/rooms/t", "agent-1", "sess-OLD")
+	o.flushPending("/rooms/t", "agent-1", "sess-OLD", nil)
 
 	o.mu.Lock()
 	remaining := len(o.pendingMsgs[key])
@@ -293,6 +293,57 @@ func TestFlushPending_StaleSessionDropped(t *testing.T) {
 	}
 	if remaining != 1 {
 		t.Errorf("stale flush must leave the new session's pending intact, got %d", remaining)
+	}
+}
+
+func TestFlushPending_StaleSessionReArmsForCurrentSession(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.pendingInputFunc = func(string) bool { return false }
+	o.reArmInterval = time.Hour
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-OLD")
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.armFlushTimerLocked(key, "/rooms/t", "agent-1", "sess-OLD", time.Millisecond)
+	oldTimer := o.pendingTimers[key]
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-NEW")
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	var remaining int
+	var rearmed *time.Timer
+	for time.Now().Before(deadline) {
+		o.mu.Lock()
+		remaining = len(o.pendingMsgs[key])
+		rearmed = o.pendingTimers[key]
+		o.mu.Unlock()
+		if rearmed != oldTimer {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	o.mu.Lock()
+	rearmed = o.pendingTimers[key]
+	if rearmed != nil {
+		rearmed.Stop()
+	}
+	o.mu.Unlock()
+	oldTimer.Stop()
+
+	if len(*sent) != 0 {
+		t.Errorf("stale session: must not flush to the old session, got %d", len(*sent))
+	}
+	if remaining != 1 {
+		t.Errorf("stale flush must leave pending for the new session, got %d", remaining)
+	}
+	if rearmed == nil {
+		t.Fatal("stale flush must re-arm a timer for the current session")
+	}
+	if rearmed == oldTimer {
+		t.Fatal("stale flush left the timer slot pointing at the already-fired old timer")
 	}
 }
 
@@ -320,7 +371,7 @@ func TestFlushPending_RaceReDefersPreservingOrderAndCap(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	o.mu.Lock()
 	msgs := o.pendingMsgs[key]
@@ -354,7 +405,7 @@ func TestFlushPending_SingleMessageWording(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", "sess-1")
+	o.flushPending("/rooms/t", "agent-1", "sess-1", nil)
 
 	if len(*sent) != 1 {
 		t.Fatalf("expected 1 send, got %d", len(*sent))

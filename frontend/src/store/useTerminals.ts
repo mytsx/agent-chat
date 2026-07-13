@@ -1,5 +1,6 @@
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import { CLIInfo, CLIType, TerminalSession, SessionInfo } from "../lib/types";
+import { focusAfterSessionRemove, focusAfterSessionReplace } from "../lib/terminalFocus";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
 import {
@@ -62,6 +63,150 @@ interface TerminalsState {
   listAgentSessions: (teamID: string, agentName: string) => Promise<SessionInfo[]>;
 }
 
+type GetTerminalsState = StoreApi<TerminalsState>["getState"];
+type SetTerminalsState = StoreApi<TerminalsState>["setState"];
+type TerminalLifecycleAction = "restartTerminal" | "resumeTerminal";
+
+function drainPendingCLISessionID(
+  pendingBySession: Record<string, string>,
+  sessionID: string
+): [string | undefined, Record<string, string>] {
+  const cliSessionID = pendingBySession[sessionID];
+  if (cliSessionID === undefined) {
+    return [undefined, pendingBySession];
+  }
+  const next = { ...pendingBySession };
+  delete next[sessionID];
+  return [cliSessionID, next];
+}
+
+function attachPendingCLISessionID(
+  session: TerminalSession,
+  pendingBySession: Record<string, string>
+): [TerminalSession, Record<string, string>] {
+  const [cliSessionID, pending] = drainPendingCLISessionID(pendingBySession, session.sessionID);
+  return [cliSessionID === undefined ? session : { ...session, cliSessionID }, pending];
+}
+
+function replaceSessionID(
+  list: TerminalSession[],
+  oldSessionID: string,
+  newSessionID: string,
+  cliSessionID: string | undefined
+): TerminalSession[] {
+  return list.map((terminal) =>
+    terminal.sessionID === oldSessionID
+      ? { ...terminal, sessionID: newSessionID, cliSessionID }
+      : terminal
+  );
+}
+
+function setTeamSessions(
+  sessionsByTeam: Record<string, TerminalSession[]>,
+  teamID: string,
+  sessions: TerminalSession[]
+): Record<string, TerminalSession[]> {
+  return {
+    ...sessionsByTeam,
+    [teamID]: sessions,
+  };
+}
+
+async function refreshTeamAfterTerminalChange(teamID: string, logPrefix: string): Promise<void> {
+  try {
+    await useTeams.getState().refreshTeam(teamID);
+  } catch (e) {
+    console.error(logPrefix, e);
+  }
+}
+
+function requireExistingSession(
+  sessions: TerminalSession[],
+  teamID: string,
+  sessionID: string,
+  action: TerminalLifecycleAction
+): void {
+  if (sessions.some((session) => session.sessionID === sessionID)) {
+    return;
+  }
+  console.error(`[${action}] session ${sessionID} not found in team ${teamID}`);
+  throw new Error("Session not found");
+}
+
+function replaceRestartedSessionState(
+  state: TerminalsState,
+  teamID: string,
+  oldSessionID: string,
+  newSessionID: string
+): Partial<TerminalsState> {
+  const [captured, pending] = drainPendingCLISessionID(state.pendingCLISessionIDs, newSessionID);
+  return {
+    sessions: setTeamSessions(
+      state.sessions,
+      teamID,
+      replaceSessionID(
+        state.sessions[teamID] ?? [],
+        oldSessionID,
+        newSessionID,
+        captured
+      )
+    ),
+    pendingCLISessionIDs: pending,
+    focusedSessionID: focusAfterSessionReplace(
+      state.focusedSessionID,
+      oldSessionID,
+      newSessionID
+    ),
+  };
+}
+
+async function replaceTerminalFromBackend(
+  get: GetTerminalsState,
+  set: SetTerminalsState,
+  teamID: string,
+  sessionID: string,
+  action: TerminalLifecycleAction,
+  replaceBackendSession: (sessionID: string) => Promise<string>
+): Promise<string> {
+  const teamSessions = get().sessions[teamID] ?? [];
+  requireExistingSession(teamSessions, teamID, sessionID, action);
+
+  const newSessionID = await replaceBackendSession(sessionID);
+  set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
+
+  return newSessionID;
+}
+
+function attachPendingCLISessionIDs(
+  sessions: TerminalSession[],
+  pendingBySession: Record<string, string>
+): [TerminalSession[], Record<string, string>] {
+  let pending = pendingBySession;
+  const attached = sessions.map((session) => {
+    const [nextSession, nextPending] = attachPendingCLISessionID(session, pending);
+    pending = nextPending;
+    return nextSession;
+  });
+  return [attached, pending];
+}
+
+function appendSessionState(
+  state: TerminalsState,
+  session: TerminalSession
+): Partial<TerminalsState> {
+  const [[attached], pending] = attachPendingCLISessionIDs(
+    [session],
+    state.pendingCLISessionIDs
+  );
+  return {
+    sessions: setTeamSessions(state.sessions, session.teamID, [
+      ...(state.sessions[session.teamID] ?? []),
+      attached,
+    ]),
+    pendingCLISessionIDs: pending,
+  };
+}
+
 export const useTerminals = create<TerminalsState>((set, get) => ({
   sessions: {},
   pendingCLISessionIDs: {},
@@ -96,37 +241,19 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       useWorktree,
       resolvedSlotIndex
     );
-    set((s) => {
-      // Apply any resume id captured before this row existed (#40, Codex P2).
-      const pendingID = s.pendingCLISessionIDs[sessionID];
-      const session: TerminalSession = {
-        sessionID,
-        teamID,
-        agentName,
-        cliType,
-        index: currentSessions.length,
-        slotIndex: resolvedSlotIndex,
-        ...(pendingID !== undefined ? { cliSessionID: pendingID } : {}),
-      };
-      const pending = { ...s.pendingCLISessionIDs };
-      delete pending[sessionID];
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: [...(s.sessions[teamID] ?? []), session],
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
+    set((s) => appendSessionState(s, {
+      sessionID,
+      teamID,
+      agentName,
+      cliType,
+      index: currentSessions.length,
+      slotIndex: resolvedSlotIndex,
+    }));
 
     // Backend persisted this agent into the team via UpsertAgent; re-pull the
     // team so later grid updates don't echo a stale agents array. The PTY is
     // already running, so a refresh failure must not fail the whole creation.
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[addTerminal] refreshTeam failed:", e);
-    }
+    await refreshTeamAfterTerminalChange(teamID, "[addTerminal] refreshTeam failed:");
 
     return sessionID;
   },
@@ -158,18 +285,15 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         // Drain buffered resume ids whose event beat the row insertion: this batch
         // path awaits every backend create before adding any rows, so a fast CLI's
         // captured id can arrive first (#40, Codex P2).
-        const pending = { ...s.pendingCLISessionIDs };
-        const applied = newSessions.map((sess) => {
-          const pid = pending[sess.sessionID];
-          if (pid === undefined) return sess;
-          delete pending[sess.sessionID];
-          return { ...sess, cliSessionID: pid };
-        });
+        const [applied, pending] = attachPendingCLISessionIDs(
+          newSessions,
+          s.pendingCLISessionIDs
+        );
         return {
-          sessions: {
-            ...s.sessions,
-            [teamID]: [...(s.sessions[teamID] ?? []), ...applied],
-          },
+          sessions: setTeamSessions(s.sessions, teamID, [
+            ...(s.sessions[teamID] ?? []),
+            ...applied,
+          ]),
           pendingCLISessionIDs: pending,
         };
       });
@@ -178,11 +302,7 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // OpenTeamFromConfig re-persists each agent (CreateTerminal → UpsertAgent),
     // possibly migrating legacy slot indices; refresh so the team store matches.
     // PTYs are already running, so a refresh failure must not fail the batch.
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[openTeamFromConfigResume] refreshTeam failed:", e);
-    }
+    await refreshTeamAfterTerminalChange(teamID, "[openTeamFromConfigResume] refreshTeam failed:");
 
     return results;
   },
@@ -198,12 +318,12 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       }
     }
     set((s) => ({
-      sessions: {
-        ...s.sessions,
-        [teamID]: (s.sessions[teamID] ?? []).filter(
-          (t) => t.sessionID !== sessionID
-        ),
-      },
+      sessions: setTeamSessions(
+        s.sessions,
+        teamID,
+        (s.sessions[teamID] ?? []).filter((t) => t.sessionID !== sessionID)
+      ),
+      focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, [sessionID]),
     }));
   },
 
@@ -217,9 +337,13 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       }
     }
     set((s) => {
+      const removedSessionIDs = (s.sessions[teamID] ?? []).map((session) => session.sessionID);
       const sessions = { ...s.sessions };
       delete sessions[teamID];
-      return { sessions };
+      return {
+        sessions,
+        focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, removedSessionIDs),
+      };
     });
   },
 
@@ -240,100 +364,50 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   restartTerminal: async (teamID, sessionID) => {
-    const teamSessions = get().sessions[teamID] ?? [];
-    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
-    if (!oldSession) {
-      console.error(`[restartTerminal] session ${sessionID} not found in team ${teamID}`);
-      throw new Error("Session not found");
-    }
-
-    const newSessionID = await RestartTerminal(sessionID);
-
     // Replace old session with new one, preserving slotIndex. cliSessionID resets
     // to whatever was buffered for newSessionID (normally undefined → resume button
     // disabled until the new PTY captures an id; a stale old id must NOT carry over,
     // or ResumeTerminal would fall back to another fresh restart — #40 Codex P3).
     // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
     // captured id is never lost if its event raced this replacement (#40 Codex P2).
-    set((s) => {
-      const pending = { ...s.pendingCLISessionIDs };
-      const captured = pending[newSessionID];
-      delete pending[newSessionID];
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-            t.sessionID === sessionID
-              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
-              : t
-          ),
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
-
-    return newSessionID;
+    return replaceTerminalFromBackend(get, set, teamID, sessionID, "restartTerminal", RestartTerminal);
   },
 
   resumeTerminal: async (teamID, sessionID) => {
-    const teamSessions = get().sessions[teamID] ?? [];
-    const oldSession = teamSessions.find((s) => s.sessionID === sessionID);
-    if (!oldSession) {
-      console.error(`[resumeTerminal] session ${sessionID} not found in team ${teamID}`);
-      throw new Error("Session not found");
-    }
-
-    const newSessionID = await ResumeTerminal(sessionID);
-
     // Replace old session with new one, preserving slotIndex. cliSessionID resets to
     // whatever was buffered for newSessionID (normally undefined until the resumed
     // PTY captures its new id; the resumed CLI regenerates its session id). Draining
     // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
     // isn't lost if its event raced this replacement (#40 Codex P2).
-    set((s) => {
-      const pending = { ...s.pendingCLISessionIDs };
-      const captured = pending[newSessionID];
-      delete pending[newSessionID];
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: (s.sessions[teamID] ?? []).map((t) =>
-            t.sessionID === sessionID
-              ? { ...t, sessionID: newSessionID, cliSessionID: captured }
-              : t
-          ),
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
-
-    return newSessionID;
+    return replaceTerminalFromBackend(get, set, teamID, sessionID, "resumeTerminal", ResumeTerminal);
   },
 
   setCLISessionID: (sessionID, cliSessionID) => {
     set((state) => {
-      let matched = false;
-      const next: Record<string, TerminalSession[]> = {};
-      for (const [tid, list] of Object.entries(state.sessions)) {
-        next[tid] = list.map((s) => {
-          if (s.sessionID === sessionID) {
-            matched = true;
-            return { ...s, cliSessionID };
-          }
-          return s;
-        });
-      }
-      if (matched) {
-        // Applied directly; also drop any stale buffered id for this session.
-        if (state.pendingCLISessionIDs[sessionID] === undefined) {
-          return { sessions: next };
+      for (const [teamID, list] of Object.entries(state.sessions)) {
+        const index = list.findIndex((s) => s.sessionID === sessionID);
+        if (index === -1) {
+          continue;
         }
-        const pending = { ...state.pendingCLISessionIDs };
-        delete pending[sessionID];
-        return { sessions: next, pendingCLISessionIDs: pending };
+
+        const [, pending] = drainPendingCLISessionID(state.pendingCLISessionIDs, sessionID);
+        if (list[index].cliSessionID === cliSessionID && pending === state.pendingCLISessionIDs) {
+          return state;
+        }
+
+        const nextList = [...list];
+        nextList[index] = { ...nextList[index], cliSessionID };
+        return {
+          sessions: setTeamSessions(state.sessions, teamID, nextList),
+          pendingCLISessionIDs: pending,
+        };
       }
+
       // The session row isn't in the store yet — buffer the id and apply it when
       // the session is added (addTerminal / openTeamFromConfig) (#40, Codex P2).
+      if (state.pendingCLISessionIDs[sessionID] === cliSessionID) {
+        return state;
+      }
       return {
         pendingCLISessionIDs: {
           ...state.pendingCLISessionIDs,
@@ -350,32 +424,15 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   createTerminalResume: async (teamID, agentName, workDir, cliType, promptId, slotIndex, useWorktree, resumeID) => {
     const currentSessions = get().sessions[teamID] ?? [];
     const sessionID = await CreateTerminalResume(teamID, agentName, workDir, cliType, promptId, useWorktree, slotIndex, resumeID);
-    set((s) => {
-      const pendingID = s.pendingCLISessionIDs[sessionID];
-      const session: TerminalSession = {
-        sessionID,
-        teamID,
-        agentName,
-        cliType,
-        index: currentSessions.length,
-        slotIndex,
-        ...(pendingID !== undefined ? { cliSessionID: pendingID } : {}),
-      };
-      const pending = { ...s.pendingCLISessionIDs };
-      delete pending[sessionID];
-      return {
-        sessions: {
-          ...s.sessions,
-          [teamID]: [...(s.sessions[teamID] ?? []), session],
-        },
-        pendingCLISessionIDs: pending,
-      };
-    });
-    try {
-      await useTeams.getState().refreshTeam(teamID);
-    } catch (e) {
-      console.error("[createTerminalResume] refreshTeam:", e);
-    }
+    set((s) => appendSessionState(s, {
+      sessionID,
+      teamID,
+      agentName,
+      cliType,
+      index: currentSessions.length,
+      slotIndex,
+    }));
+    await refreshTeamAfterTerminalChange(teamID, "[createTerminalResume] refreshTeam:");
     return sessionID;
   },
 

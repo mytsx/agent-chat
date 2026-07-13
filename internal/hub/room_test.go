@@ -53,11 +53,29 @@ func TestRoomTouchManagerHeartbeat_CaseInsensitive(t *testing.T) {
 	if _, _, err := r.Join("Pilot", "manager"); err != nil {
 		t.Fatalf("manager join should succeed: %v", err)
 	}
+	r.mu.Lock()
+	staleRosterSeen := types.Now() - float64(staleTimeout) - 1
+	agent := r.agents["Pilot"]
+	agent.LastSeen = staleRosterSeen
+	r.agents["Pilot"] = agent
+	r.mu.Unlock()
 
 	// The manager is locked under its join spelling ("Pilot"), but a caller may
 	// pass the configured spelling ("pilot"). Manager identity is casing-independent.
 	if !r.TouchManagerHeartbeat("pilot") {
 		t.Fatalf("TouchManagerHeartbeat should recognize a case-variant manager name")
+	}
+	r.mu.RLock()
+	refreshedRosterSeen := r.agents["Pilot"].LastSeen
+	r.mu.RUnlock()
+	if refreshedRosterSeen <= staleRosterSeen {
+		t.Fatalf("manager heartbeat should refresh roster LastSeen too, got %v <= %v", refreshedRosterSeen, staleRosterSeen)
+	}
+
+	// A subsequent stale cleanup must not evict a manager that is still actively
+	// polling read_all_messages and refreshing only the manager heartbeat path.
+	if got := r.ListAgents(""); len(got) != 1 {
+		t.Fatalf("active manager should remain in roster after cleanup, got %#v", got)
 	}
 }
 
@@ -71,6 +89,10 @@ func TestRoomGetActiveManagerAndTouch_CaseInsensitiveRefresh(t *testing.T) {
 	r.mu.Lock()
 	stale := types.Now() - 100
 	r.managerLastSeen = stale
+	staleRosterSeen := types.Now() - float64(staleTimeout) - 1
+	agent := r.agents["Pilot"]
+	agent.LastSeen = staleRosterSeen
+	r.agents["Pilot"] = agent
 	r.mu.Unlock()
 
 	if active := r.GetActiveManagerAndTouch("pilot"); active != "Pilot" {
@@ -79,9 +101,13 @@ func TestRoomGetActiveManagerAndTouch_CaseInsensitiveRefresh(t *testing.T) {
 
 	r.mu.RLock()
 	refreshed := r.managerLastSeen
+	refreshedRosterSeen := r.agents["Pilot"].LastSeen
 	r.mu.RUnlock()
 	if refreshed <= stale {
 		t.Fatalf("expected heartbeat refresh for case-variant manager name, lastSeen %v not refreshed from %v", refreshed, stale)
+	}
+	if refreshedRosterSeen <= staleRosterSeen {
+		t.Fatalf("expected roster LastSeen refresh for active manager, got %v <= %v", refreshedRosterSeen, staleRosterSeen)
 	}
 }
 

@@ -23,6 +23,9 @@ func EnsureMCPServerBinary(binaryData []byte, dataDir string) error {
 	// Quick check: if file exists and content matches, just ensure signing
 	if existing, err := os.ReadFile(binPath); err == nil {
 		if bytes.Equal(existing, binaryData) {
+			if err := os.Chmod(binPath, 0755); err != nil {
+				return err
+			}
 			if runtime.GOOS == "darwin" {
 				ensureSigned(binPath)
 			}
@@ -37,6 +40,9 @@ func EnsureMCPServerBinary(binaryData []byte, dataDir string) error {
 	}
 
 	if err := os.WriteFile(binPath, binaryData, 0755); err != nil {
+		return err
+	}
+	if err := os.Chmod(binPath, 0755); err != nil {
 		return err
 	}
 

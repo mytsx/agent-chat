@@ -13,6 +13,29 @@ type jsonlLine struct {
 	OffsetAfter int64
 }
 
+// jsonlMessageExtractor is the adapter-specific part of the common JSONL shape:
+// decode one complete record and return a human-typed user message, if this line
+// represents one. Unknown/corrupt/non-user records should return ok=false so a
+// parser can keep scanning the rest of the transcript.
+type jsonlMessageExtractor func(line []byte) (content, timestamp string, ok bool)
+
+// parseCompleteJSONLUserMessages contains the shared JSONL adapter contract used
+// by Claude, Codex, and Copilot: read only newline-terminated records, skip any
+// record the adapter extractor does not recognize, and attach a per-message
+// cursor immediately after the complete line so emit failures retry precisely.
+func parseCompleteJSONLUserMessages(path string, cur Cursor, extract jsonlMessageExtractor) ([]ParsedMessage, Cursor, error) {
+	lines, next, err := readCompleteJSONLines(path, cur.Offset)
+	var out []ParsedMessage
+	for _, line := range lines {
+		content, timestamp, ok := extract(line.Data)
+		if !ok || content == "" {
+			continue
+		}
+		out = append(out, ParsedMessage{Content: content, Timestamp: timestamp, After: Cursor{Offset: line.OffsetAfter}})
+	}
+	return out, Cursor{Offset: next}, err
+}
+
 // readCompleteJSONLines reads a JSONL file from byteOffset and returns each
 // COMPLETE (newline-terminated) line, plus the offset just past the last complete
 // line. A partial final line — one the CLI is still mid-writing, with no trailing
@@ -32,6 +55,16 @@ func readCompleteJSONLines(path string, byteOffset int64) ([]jsonlLine, int64, e
 		return nil, byteOffset, err
 	}
 	defer f.Close()
+
+	if info, err := f.Stat(); err == nil {
+		// JSONL transcripts are normally append-only, but a CLI can truncate or
+		// replace a session file at the same path during cleanup/resume. A committed
+		// cursor from the previous contents would otherwise seek past EOF forever and
+		// miss every new complete line in the replacement file.
+		if byteOffset < 0 || byteOffset > info.Size() {
+			byteOffset = 0
+		}
+	}
 
 	if _, err := f.Seek(byteOffset, io.SeekStart); err != nil {
 		return nil, byteOffset, err

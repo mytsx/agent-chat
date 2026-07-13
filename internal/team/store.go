@@ -2,6 +2,7 @@ package team
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,7 +56,20 @@ func (t Team) IsManagerAgent(name string) bool {
 	if mgr == "" {
 		return false
 	}
-	return strings.EqualFold(mgr, strings.TrimSpace(name))
+	return sameAgentName(mgr, name)
+}
+
+func sameAgentName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+func hasTeamNameCollision(teams []Team, name, excludeID string) bool {
+	for _, team := range teams {
+		if team.ID != excludeID && strings.EqualFold(team.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // Store manages team/tab persistence
@@ -65,9 +79,25 @@ type Store struct {
 	teams    []Team
 }
 
+func cloneAgents(agents []AgentConfig) []AgentConfig {
+	if agents == nil {
+		return nil
+	}
+	cloned := make([]AgentConfig, len(agents))
+	copy(cloned, agents)
+	return cloned
+}
+
+func cloneTeam(t Team) Team {
+	t.Agents = cloneAgents(t.Agents)
+	return t
+}
+
 // NewStore creates a new team store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0700)
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("create team data dir: %w", err)
+	}
 	fp := filepath.Join(dataDir, "teams.json")
 
 	s := &Store{
@@ -75,7 +105,17 @@ func NewStore(dataDir string) (*Store, error) {
 	}
 
 	if err := s.load(); err != nil {
-		s.teams = []Team{}
+		if errors.Is(err, os.ErrNotExist) {
+			s.teams = []Team{}
+		} else {
+			// Corrupt/unreadable teams.json: start with an empty roster so callers
+			// (including startup, which discards this error) always get a usable,
+			// non-nil store instead of a nil deref. The error is still returned so
+			// callers can surface it; the bad file is left on disk untouched until
+			// the next successful save overwrites it.
+			s.teams = []Team{}
+			return s, fmt.Errorf("load teams: %w", err)
+		}
 	}
 
 	return s, nil
@@ -113,21 +153,29 @@ func (s *Store) save() error {
 
 // List returns all teams
 func (s *Store) List() []Team {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Team, len(s.teams))
-	copy(result, s.teams)
+	for i, team := range s.teams {
+		result[i] = cloneTeam(team)
+	}
 	return result
 }
 
 // Get returns a team by ID
 func (s *Store) Get(id string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, t := range s.teams {
 		if t.ID == id {
-			return t, nil
+			return cloneTeam(t), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -135,6 +183,9 @@ func (s *Store) Get(id string) (Team, error) {
 
 // Create creates a new team
 func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
@@ -145,10 +196,8 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	// EqualFold: team names become room filenames; on case-insensitive filesystems
 	// (macOS/Windows) "Alpha" and "alpha" collide on the same file, so reject names that
 	// differ only by case to prevent data-losing collisions.
-	for _, existing := range s.teams {
-		if strings.EqualFold(existing.Name, name) {
-			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
-		}
+	if hasTeamNameCollision(s.teams, name, "") {
+		return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
 	}
 
 	id := uuid.New().String()
@@ -158,25 +207,30 @@ func (s *Store) Create(name, gridLayout string, agents []AgentConfig) (Team, err
 	t := Team{
 		ID:         id,
 		Name:       name,
-		Agents:     agents,
+		Agents:     cloneAgents(agents),
 		GridLayout: gridLayout,
 		ChatDir:    chatDir,
 		CreatedAt:  time.Now().Format(time.RFC3339),
 	}
 
+	prev := s.teams
 	s.teams = append(s.teams, t)
 	if err := s.save(); err != nil {
+		s.teams = prev // roll back so memory matches disk
 		return Team{}, err
 	}
 
 	// Create chat directory
 	os.MkdirAll(chatDir, 0700)
 
-	return t, nil
+	return cloneTeam(t), nil
 }
 
 // Update updates a team
 func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid team name: %w", err)
 	}
@@ -187,22 +241,22 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 	// Same filesystem-collision guard as Create, but excluding the team being renamed:
 	// a rename that case-insensitively matches a DIFFERENT team would map both to the
 	// same room file on macOS/Windows.
-	for _, t := range s.teams {
-		if t.ID != id && strings.EqualFold(t.Name, name) {
-			return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
-		}
+	if hasTeamNameCollision(s.teams, name, id) {
+		return Team{}, fmt.Errorf("aynı adda takım zaten var: %s", name)
 	}
 
 	for i, t := range s.teams {
 		if t.ID == id {
+			prev := s.teams[i]
 			s.teams[i].Name = name
 			s.teams[i].GridLayout = gridLayout
-			s.teams[i].Agents = agents
+			s.teams[i].Agents = cloneAgents(agents)
 
 			if err := s.save(); err != nil {
+				s.teams[i] = prev // roll back so memory matches disk
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -218,6 +272,9 @@ func (s *Store) Update(id, name, gridLayout string, agents []AgentConfig) (Team,
 // CreateTerminal never supply Role, so a naive upsert would erase a Role the user
 // set earlier (consumed by composeAgentPrompt). A non-empty cfg.Role overwrites.
 func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(cfg.Name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -231,7 +288,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 		}
 		prev := t.Agents // keep the old slice for rollback
 		for j, existing := range t.Agents {
-			if strings.EqualFold(strings.TrimSpace(existing.Name), strings.TrimSpace(cfg.Name)) {
+			if sameAgentName(existing.Name, cfg.Name) {
 				// Match is case-insensitive, but keep the stored Name's original
 				// casing: Team.ManagerAgent holds that spelling and resolveManagerIntent
 				// compares it case-sensitively, so a case-only re-create must not
@@ -245,12 +302,11 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 				// reopens N agents (each → CreateTerminal → UpsertAgent); without this
 				// an unchanged batch would rewrite teams.json N times.
 				if existing == cfg {
-					return s.teams[i], nil
+					return cloneTeam(s.teams[i]), nil
 				}
-				// Copy-on-write: Get()/List() hand out a Team sharing this backing
-				// array, so mutate a fresh copy instead of the shared one to avoid a
-				// data race with concurrent readers (matches the whole-slice replace
-				// the Update method already does).
+				// Copy-on-write: mutate a fresh slice instead of the shared one so any
+				// stale in-process Team values cannot observe a partial update, and so
+				// concurrent readers never race with an in-place Agents mutation.
 				updated := make([]AgentConfig, len(prev))
 				copy(updated, prev)
 				updated[j] = cfg
@@ -259,7 +315,7 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 					s.teams[i].Agents = prev // roll back so memory matches disk
 					return Team{}, err
 				}
-				return s.teams[i], nil
+				return cloneTeam(s.teams[i]), nil
 			}
 		}
 		// Not found: append into a fresh slice (don't append in place — append may
@@ -272,13 +328,35 @@ func (s *Store) UpsertAgent(teamID string, cfg AgentConfig) (Team, error) {
 			s.teams[i].Agents = prev // roll back append
 			return Team{}, err
 		}
-		return s.teams[i], nil
+		return cloneTeam(s.teams[i]), nil
 	}
 	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
 
+func agentsWithoutObserverRole(agents []AgentConfig, agentName string) ([]AgentConfig, bool) {
+	if agentName == "" {
+		return agents, false
+	}
+	for i, agent := range agents {
+		if !sameAgentName(agent.Name, agentName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(agent.Role), RoleObserver) {
+			return agents, false
+		}
+		updated := make([]AgentConfig, len(agents))
+		copy(updated, agents)
+		updated[i].Role = ""
+		return updated, true
+	}
+	return agents, false
+}
+
 // SetManager sets or clears manager agent for a team. Empty string clears manager.
 func (s *Store) SetManager(id, managerAgent string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if managerAgent != "" {
 		if err := validation.ValidateName(managerAgent); err != nil {
 			return Team{}, fmt.Errorf("invalid manager agent name: %w", err)
@@ -297,25 +375,17 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 			// observer Role on the new manager, else broadcastRoleLookup would wrongly
 			// skip the manager from broadcasts. Copy-on-write so concurrent readers of
 			// the shared Agents slice don't race.
-			if managerAgent != "" {
-				for j, a := range t.Agents {
-					if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(managerAgent)) {
-						if strings.EqualFold(strings.TrimSpace(a.Role), RoleObserver) {
-							updated := make([]AgentConfig, len(prevAgents))
-							copy(updated, prevAgents)
-							updated[j].Role = ""
-							s.teams[i].Agents = updated
-						}
-						break
-					}
-				}
+			updatedAgents, agentsChanged := agentsWithoutObserverRole(t.Agents, managerAgent)
+			s.teams[i].Agents = updatedAgents
+			if prevMgr == managerAgent && !agentsChanged {
+				return cloneTeam(s.teams[i]), nil
 			}
 			if err := s.save(); err != nil {
 				s.teams[i].ManagerAgent = prevMgr
 				s.teams[i].Agents = prevAgents
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -327,6 +397,9 @@ func (s *Store) SetManager(id, managerAgent string) (Team, error) {
 // this agent held it. The observer Role is what the hub's IsObserver gate and
 // broadcastRoleLookup read. Copy-on-write so concurrent readers don't race.
 func (s *Store) SetObserver(teamID, name string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	if err := validation.ValidateName(name); err != nil {
 		return Team{}, fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -344,20 +417,30 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 		updated := make([]AgentConfig, len(prevAgents))
 		copy(updated, prevAgents)
 		found := false
+		agentsChanged := false
 		for j, a := range updated {
-			if strings.EqualFold(strings.TrimSpace(a.Name), strings.TrimSpace(name)) {
-				updated[j].Role = RoleObserver
+			if sameAgentName(a.Name, name) {
+				if updated[j].Role != RoleObserver {
+					updated[j].Role = RoleObserver
+					agentsChanged = true
+				}
 				found = true
 				break
 			}
 		}
 		if !found {
 			updated = append(updated, AgentConfig{Name: name, Role: RoleObserver})
+			agentsChanged = true
 		}
 		s.teams[i].Agents = updated
 		// Mutual exclusion: an observer is not a manager.
+		managerChanged := false
 		if s.teams[i].IsManagerAgent(name) {
 			s.teams[i].ManagerAgent = ""
+			managerChanged = true
+		}
+		if !agentsChanged && !managerChanged {
+			return cloneTeam(s.teams[i]), nil
 		}
 
 		if err := s.save(); err != nil {
@@ -365,7 +448,7 @@ func (s *Store) SetObserver(teamID, name string) (Team, error) {
 			s.teams[i].ManagerAgent = prevMgr
 			return Team{}, err
 		}
-		return s.teams[i], nil
+		return cloneTeam(s.teams[i]), nil
 	}
 	return Team{}, fmt.Errorf("team not found: %s", teamID)
 }
@@ -407,6 +490,9 @@ func sanitizeCharter(text string) string {
 // into each agent's PTY at startup. The charter is injected into new agents only;
 // already-running agents are unaffected (composeAgentPrompt runs at startup).
 func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
+	if s == nil {
+		return Team{}, fmt.Errorf("team store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -414,7 +500,7 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 		if t.ID == id {
 			sanitized := sanitizeCharter(text)
 			if s.teams[i].CustomPrompt == sanitized {
-				return s.teams[i], nil // no-op: skip the disk write (matches UpsertAgent)
+				return cloneTeam(s.teams[i]), nil // no-op: skip the disk write (matches UpsertAgent)
 			}
 			prev := s.teams[i].CustomPrompt
 			s.teams[i].CustomPrompt = sanitized
@@ -422,7 +508,7 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 				s.teams[i].CustomPrompt = prev // roll back so memory matches disk
 				return Team{}, err
 			}
-			return s.teams[i], nil
+			return cloneTeam(s.teams[i]), nil
 		}
 	}
 	return Team{}, fmt.Errorf("team not found: %s", id)
@@ -430,13 +516,24 @@ func (s *Store) SetCustomPrompt(id, text string) (Team, error) {
 
 // Delete deletes a team
 func (s *Store) Delete(id string) error {
+	if s == nil {
+		return fmt.Errorf("team store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for i, t := range s.teams {
 		if t.ID == id {
-			s.teams = append(s.teams[:i], s.teams[i+1:]...)
-			return s.save()
+			prev := s.teams
+			updated := make([]Team, 0, len(prev)-1)
+			updated = append(updated, prev[:i]...)
+			updated = append(updated, prev[i+1:]...)
+			s.teams = updated
+			if err := s.save(); err != nil {
+				s.teams = prev // roll back so memory matches disk
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("team not found: %s", id)

@@ -130,7 +130,50 @@ func TestAnalyzeMessage_EmptyContent(t *testing.T) {
 	msg := types.Message{Content: "", Type: "direct", ExpectsReply: false}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
-		t.Errorf("empty content should default to notify, got %s", r.Action)
+		t.Errorf("empty content should notify, got %s", r.Action)
+	}
+}
+
+func TestNotificationPromptsPreserveText(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "direct single",
+			got:  buildPrompt(false, "backend", "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "broadcast single",
+			got:  buildPrompt(true, "backend", "frontend"),
+			want: `[agent-chat] Broadcast from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched single",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched multiple",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+				{from: "mobile"},
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] 3 new messages from backend, mobile. read_messages("frontend") to read and respond.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("prompt mismatch\nwant: %s\n got: %s", tt.want, tt.got)
+			}
+		})
 	}
 }
 
@@ -172,6 +215,32 @@ func TestRegisterUnregisterAgent(t *testing.T) {
 func TestUnregisterNonexistent(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.UnregisterAgent("/rooms/team1", "ghost") // should not panic
+}
+
+func TestUnregisterLastAgentRemovesChatDir(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-1234-5678")
+
+	o.UnregisterAgent("/rooms/team1", "agent-1")
+
+	if _, exists := o.agentSessions["/rooms/team1"]; exists {
+		t.Fatal("last unregister should remove the empty chatDir entry")
+	}
+}
+
+func TestUnregisterAgentSessionIgnoresStaleSession(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-old")
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-new")
+
+	o.UnregisterAgentSession("/rooms/team1", "agent-1", "sess-old")
+
+	o.mu.Lock()
+	got := o.agentSessions["/rooms/team1"]["agent-1"]
+	o.mu.Unlock()
+	if got != "sess-new" {
+		t.Fatalf("stale session unregister removed current mapping: got %q", got)
+	}
 }
 
 // ── ProcessMessage routing tests ──
@@ -331,7 +400,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 		t.Errorf("expected 3 pending, got %d", pLen)
 	}
 
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111")
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil)
 
 	o.mu.Lock()
 	rp := len(o.pendingMsgs[key])
@@ -348,7 +417,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 
 func TestFlushPending_Empty(t *testing.T) {
 	o, _ := newTestOrchestrator()
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111") // should not panic
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil) // should not panic
 }
 
 func TestNotifyAgent_AfterCooldownExpired(t *testing.T) {
@@ -648,7 +717,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	}
 
 	// Manual flush (simulating timer expiry)
-	o.flushPending("/rooms/t", "bob", "sess-bob")
+	o.flushPending("/rooms/t", "bob", "sess-bob", nil)
 
 	if len(*sent) != 2 {
 		t.Errorf("after flush, expected 2 total sent notifications, got %d", len(*sent))

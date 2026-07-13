@@ -78,3 +78,28 @@ func TestCopilotDiscover_IgnoresOtherCwd(t *testing.T) {
 		t.Fatalf("DiscoverFile = %q, want %q (must ignore the newer wrong-cwd session)", got, fmine)
 	}
 }
+
+func TestCopilotDiscover_IgnoresNonRegularTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	base := filepath.Join(home, ".copilot", "session-state")
+	dir := filepath.Join(base, "uuid-dir")
+	eventsDir := filepath.Join(dir, "events.jsonl")
+	if err := os.MkdirAll(eventsDir, 0755); err != nil {
+		t.Fatalf("mkdir events.jsonl dir: %v", err)
+	}
+	const cwd = "/work/repo"
+	writeFile(t, dir, "workspace.yaml", "cwd: "+cwd+"\n")
+	spawn := time.Now()
+	if err := os.Chtimes(eventsDir, spawn.Add(time.Second), spawn.Add(time.Second)); err != nil {
+		t.Fatalf("chtimes events.jsonl dir: %v", err)
+	}
+
+	got, err := copilotAdapter{}.DiscoverFile(cwd, spawn.UnixNano(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("DiscoverFile = %q, want no candidate for directory transcript", got)
+	}
+}
