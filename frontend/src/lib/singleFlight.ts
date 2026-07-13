@@ -15,23 +15,24 @@ export function createSingleFlight<T>() {
       return existing;
     }
 
-    // Invoke task() synchronously via an async IIFE: a synchronous throw becomes a
-    // rejection (keeping a failed key retryable), and concurrent callers coalesce
-    // with the task already started (the "one invocation" contract). Store the raw
-    // promise, then RETURN a finally-chained promise so its rejection is handled by
-    // callers (a detached .finally would leave an unhandled rejection). The cleanup
-    // references the fully-initialized `promise`, not the returned expression, so
-    // there is no self-reference in an initializer.
-    const promise = (async () => task())();
-    inFlight.set(key, promise);
-
-    return promise.finally(() => {
+    // Invoke task() synchronously via an async IIFE so a synchronous throw becomes a
+    // rejection (a failed key stays retryable) and concurrent callers coalesce with
+    // the task already started (the "one invocation" contract). Store AND return the
+    // same finally-chained promise so every caller awaits one object — no raw-vs-
+    // chained microtask skew, and no unhandled rejection since the stored promise is
+    // the one callers handle. `let` lets the cleanup close over `promise`, which is
+    // always assigned before the async .finally callback can run.
+    let promise: Promise<T>;
+    promise = (async () => task())().finally(() => {
       // Guard against clobbering a newer entry if the key was reused after this
       // one settled (only delete the promise we actually stored).
       if (inFlight.get(key) === promise) {
         inFlight.delete(key);
       }
     });
+    inFlight.set(key, promise);
+
+    return promise;
   };
 
   return {
