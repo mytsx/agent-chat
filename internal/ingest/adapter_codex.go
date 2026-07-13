@@ -78,7 +78,7 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 				continue
 			}
 			info, ierr := e.Info()
-			if ierr != nil || info.ModTime().Before(cutoff) {
+			if ierr != nil || !info.Mode().IsRegular() || info.ModTime().Before(cutoff) {
 				continue
 			}
 			p := filepath.Join(dir, e.Name())

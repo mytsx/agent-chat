@@ -144,7 +144,29 @@ func TestGetCommandShellUsesResolvedFallback(t *testing.T) {
 	}
 }
 
+func TestGetCommandResolvesAvailableCLIToAbsolutePath(t *testing.T) {
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	cmd, args := GetCommand(CLICodex)
+	if cmd != fakeCodex {
+		t.Fatalf("GetCommand(CLICodex) cmd = %q, want resolved absolute path %q", cmd, fakeCodex)
+	}
+	if !filepath.IsAbs(cmd) {
+		t.Fatalf("GetCommand(CLICodex) cmd should be absolute, got %q", cmd)
+	}
+	if !reflect.DeepEqual(args, []string{"--dangerously-bypass-approvals-and-sandbox"}) {
+		t.Fatalf("args = %v", args)
+	}
+}
+
 func TestGetCommandResume(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
 	const id = "7f32dcf3-11c6-4ca1-9461-fe8590e164e0"
 	tests := []struct {
 		name     string
@@ -171,5 +193,22 @@ func TestGetCommandResume(t *testing.T) {
 				t.Errorf("args = %v, want %v", gotArgs, tt.wantArgs)
 			}
 		})
+	}
+}
+
+func TestGetCommandResumeResolvesAvailableCLIToAbsolutePath(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	cmd, args := GetCommandResume(CLIClaude, "session-123")
+	if cmd != fakeClaude {
+		t.Fatalf("GetCommandResume(CLIClaude) cmd = %q, want resolved absolute path %q", cmd, fakeClaude)
+	}
+	if !reflect.DeepEqual(args, []string{"--resume", "session-123", "--dangerously-skip-permissions"}) {
+		t.Fatalf("args = %v", args)
 	}
 }

@@ -103,7 +103,8 @@ func getConfigPath(cliType CLIType) (string, error) {
 // upsertCodexMCPConfig updates Codex MCP config using `codex mcp` subcommands.
 // Codex uses TOML config; we delegate write/merge behavior to Codex CLI itself.
 func upsertCodexMCPConfig(dataDir, roomName string) error {
-	if _, err := exec.LookPath("codex"); err != nil {
+	codexPath, err := exec.LookPath("codex")
+	if err != nil {
 		// Codex is not installed; nothing to configure.
 		return nil
 	}
@@ -114,7 +115,7 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 	}
 
 	// Best-effort cleanup of previous entry.
-	removeCmd := exec.Command("codex", "mcp", "remove", "agent-chat")
+	removeCmd := exec.Command(codexPath, "mcp", "remove", "agent-chat")
 	if out, err := removeCmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		msgLower := strings.ToLower(msg)
@@ -129,7 +130,7 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 	}
 	args = append(args, "--", GetMCPBinaryPath(dataDir))
 
-	addCmd := exec.Command("codex", args...)
+	addCmd := exec.Command(codexPath, args...)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {

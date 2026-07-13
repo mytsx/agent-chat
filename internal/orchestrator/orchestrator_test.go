@@ -333,6 +333,44 @@ func TestRegisterAgentReplacesCaseVariantRegistration(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentReplacesExactNameClearsStaleNotificationState(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-old")
+	key := "/rooms/t:agent-1"
+
+	o.mu.Lock()
+	o.lastNotified[key] = time.Now()
+	o.pendingMsgs[key] = []pendingNotification{{from: "agent-2"}}
+	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
+	o.deferStartedAt[key] = time.Now()
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-new")
+
+	o.mu.Lock()
+	_, hasLastNotified := o.lastNotified[key]
+	pendingCount := len(o.pendingMsgs[key])
+	pendingTimer, hasPendingTimer := o.pendingTimers[key]
+	_, hasDeferStarted := o.deferStartedAt[key]
+	o.mu.Unlock()
+	if pendingTimer != nil {
+		defer pendingTimer.Stop()
+	}
+	if hasLastNotified || pendingCount != 1 || !hasPendingTimer || hasDeferStarted {
+		t.Fatalf("stale notification state not refreshed for exact-name session replace: last=%v pending=%d timer=%v defer=%v",
+			hasLastNotified, pendingCount, hasPendingTimer, hasDeferStarted)
+	}
+
+	msg := types.Message{From: "agent-2", To: "agent-1", Content: "Can you inspect this?", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+	if len(*sent) != 1 {
+		t.Fatalf("expected first post-restart notification to inject immediately, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-new" {
+		t.Fatalf("expected new session to be notified, got %s", (*sent)[0].sessionID)
+	}
+}
+
 func TestUnregisterAgentSessionMatchesCaseVariantName(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.RegisterAgent("/rooms/team1", "Pilot", "sess-pilot")

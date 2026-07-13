@@ -261,6 +261,24 @@ func (o *Orchestrator) clearNotificationStateLocked(chatDir, agentName string) {
 	delete(o.deferStartedAt, key)
 }
 
+// refreshNotificationStateForSessionReplaceLocked drops stale cooldown/deferral
+// state when the same agent name is rebound to a new PTY session. Pending
+// notifications are preserved and re-armed against the new session so queued
+// messages do not rot behind a stopped timer for the old session.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) refreshNotificationStateForSessionReplaceLocked(chatDir, agentName, sessionID string) {
+	key := notificationKey(chatDir, agentName)
+	delete(o.lastNotified, key)
+	delete(o.deferStartedAt, key)
+	if timer, ok := o.pendingTimers[key]; ok {
+		timer.Stop()
+		delete(o.pendingTimers, key)
+	}
+	if len(o.pendingMsgs[key]) > 0 {
+		o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
+	}
+}
+
 func notificationKey(chatDir, agentName string) string {
 	return chatDir + ":" + agentName
 }
@@ -342,6 +360,9 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 			delete(o.agentSessions[chatDir], existingName)
 			o.clearNotificationStateLocked(chatDir, existingName)
 		}
+	}
+	if existingSession, ok := o.agentSessions[chatDir][agentName]; ok && existingSession != sessionID {
+		o.refreshNotificationStateForSessionReplaceLocked(chatDir, agentName, sessionID)
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
 	o.mu.Unlock()

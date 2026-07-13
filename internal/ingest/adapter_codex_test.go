@@ -67,3 +67,34 @@ func TestCodexParse_OldFormatMessageRoleUser(t *testing.T) {
 		t.Fatalf("got %+v, want the old-format user message", msgs)
 	}
 }
+
+func TestCodexDiscover_SkipsNonRegularRollout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	spawn := time.Now()
+	day := filepath.Join(home, ".codex", "sessions", spawn.Format("2006"), spawn.Format("01"), spawn.Format("02"))
+	if err := os.MkdirAll(day, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	target := writeFile(t, t.TempDir(), "target.jsonl", `{"timestamp":"t","type":"session_meta","payload":{"cwd":"/work/mine"}}`+"\n")
+	link := filepath.Join(day, "rollout-linked.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := os.Chtimes(link, spawn.Add(time.Second), spawn.Add(time.Second)); err != nil {
+		t.Fatalf("chtimes symlink rollout: %v", err)
+	}
+	regular := writeFile(t, day, "rollout-real.jsonl", `{"timestamp":"t","type":"session_meta","payload":{"cwd":"/work/mine"}}`+"\n")
+	if err := os.Chtimes(regular, spawn.Add(2*time.Second), spawn.Add(2*time.Second)); err != nil {
+		t.Fatalf("chtimes regular rollout: %v", err)
+	}
+
+	got, err := codexAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != regular {
+		t.Fatalf("DiscoverFile = %q, want regular rollout %q (skip non-regular match)", got, regular)
+	}
+}

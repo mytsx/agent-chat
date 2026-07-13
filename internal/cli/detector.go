@@ -214,16 +214,23 @@ func resolveUserShell() string {
 func GetCommand(cliType CLIType) (string, []string) {
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--dangerously-skip-permissions"}
 	case CLIGemini:
-		return "gemini", []string{"--approval-mode", "yolo"}
+		return resolveCLIBinary("gemini"), []string{"--approval-mode", "yolo"}
 	case CLICopilot:
-		return "copilot", []string{"--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--yolo"}
 	case CLICodex:
-		return "codex", []string{"--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"--dangerously-bypass-approvals-and-sandbox"}
 	default:
 		return resolveUserShell(), []string{"-l"}
 	}
+}
+
+func resolveCLIBinary(binary string) string {
+	if path, err := exec.LookPath(binary); err == nil && filepath.IsAbs(path) {
+		return path
+	}
+	return binary
 }
 
 // ResumeSupported reports whether GetCommandResume can build a native resume
@@ -249,11 +256,11 @@ func GetCommandResume(cliType CLIType, sessionID string) (string, []string) {
 	}
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--resume", sessionID, "--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--resume", sessionID, "--dangerously-skip-permissions"}
 	case CLICopilot:
-		return "copilot", []string{"--resume=" + sessionID, "--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--resume=" + sessionID, "--yolo"}
 	case CLICodex:
-		return "codex", []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
 	default:
 		return GetCommand(cliType)
 	}
