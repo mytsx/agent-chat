@@ -98,3 +98,22 @@ func TestCodexDiscover_SkipsNonRegularRollout(t *testing.T) {
 		t.Fatalf("DiscoverFile = %q, want regular rollout %q (skip non-regular match)", got, regular)
 	}
 }
+
+func TestCodexDiscover_ReturnsUnexpectedReadDirError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	spawn := time.Now()
+	month := filepath.Join(home, ".codex", "sessions", spawn.Format("2006"), spawn.Format("01"))
+	if err := os.MkdirAll(month, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dayPath := filepath.Join(month, spawn.Format("02"))
+	if err := os.WriteFile(dayPath, []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := codexAdapter{}.DiscoverFile("/work/mine", spawn.UnixNano(), nil)
+	if err == nil {
+		t.Fatalf("DiscoverFile = %q,nil; want unexpected ReadDir error", got)
+	}
+}

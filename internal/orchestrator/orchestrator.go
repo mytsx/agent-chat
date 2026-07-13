@@ -279,6 +279,36 @@ func (o *Orchestrator) refreshNotificationStateForSessionReplaceLocked(chatDir, 
 	}
 }
 
+// moveNotificationStateForSessionReplaceLocked moves queued notifications when
+// a case-variant spelling of the same agent replaces the old runtime key. This
+// mirrors the exact-name session replacement refresh while preserving queued
+// messages under the newly registered spelling, so pending notifications do not
+// disappear just because the agent rejoined as "pilot" instead of "Pilot".
+// Caller MUST hold o.mu.
+func (o *Orchestrator) moveNotificationStateForSessionReplaceLocked(chatDir, oldAgentName, newAgentName, sessionID string) {
+	oldKey := notificationKey(chatDir, oldAgentName)
+	newKey := notificationKey(chatDir, newAgentName)
+	pending := append([]pendingNotification(nil), o.pendingMsgs[oldKey]...)
+	if oldKey != newKey {
+		pending = append(pending, o.pendingMsgs[newKey]...)
+	}
+
+	for _, key := range []string{oldKey, newKey} {
+		delete(o.lastNotified, key)
+		delete(o.deferStartedAt, key)
+		delete(o.pendingMsgs, key)
+		if timer, ok := o.pendingTimers[key]; ok {
+			timer.Stop()
+			delete(o.pendingTimers, key)
+		}
+	}
+
+	if len(pending) > 0 {
+		o.pendingMsgs[newKey] = pending
+		o.armFlushTimerLocked(newKey, chatDir, newAgentName, sessionID, o.reArmInterval)
+	}
+}
+
 func notificationKey(chatDir, agentName string) string {
 	return chatDir + ":" + agentName
 }
@@ -358,7 +388,7 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 	for existingName := range o.agentSessions[chatDir] {
 		if existingName != agentName && sameAgentName(existingName, agentName) {
 			delete(o.agentSessions[chatDir], existingName)
-			o.clearNotificationStateLocked(chatDir, existingName)
+			o.moveNotificationStateForSessionReplaceLocked(chatDir, existingName, agentName, sessionID)
 		}
 	}
 	if existingSession, ok := o.agentSessions[chatDir][agentName]; ok && existingSession != sessionID {

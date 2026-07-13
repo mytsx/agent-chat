@@ -247,10 +247,11 @@ func ResumeSupported(cliType CLIType) bool {
 
 // GetCommandResume returns the command and args to resume cliType from sessionID.
 // Codex's `resume` is a SUBCOMMAND (positional, first); the others use a flag
-// (Copilot needs the `=` form). An unsupported cliType or empty sessionID falls
-// back to a fresh GetCommand so callers never accidentally launch a broken
-// resume (#40).
+// (Copilot needs the `=` form). An unsupported cliType or blank/whitespace-only
+// sessionID falls back to a fresh GetCommand so callers never accidentally launch
+// a broken resume (#40).
 func GetCommandResume(cliType CLIType, sessionID string) (string, []string) {
+	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || !ResumeSupported(cliType) {
 		return GetCommand(cliType)
 	}

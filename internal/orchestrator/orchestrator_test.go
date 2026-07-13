@@ -333,6 +333,61 @@ func TestRegisterAgentReplacesCaseVariantRegistration(t *testing.T) {
 	}
 }
 
+func TestRegisterAgentReplacesCaseVariantPreservesPendingNotifications(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.reArmInterval = time.Hour
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-old")
+	oldKey := "/rooms/t:Pilot"
+	newKey := "/rooms/t:pilot"
+
+	o.mu.Lock()
+	o.lastNotified[oldKey] = time.Now()
+	o.pendingMsgs[oldKey] = []pendingNotification{{from: "Navigator"}}
+	o.pendingTimers[oldKey] = time.AfterFunc(time.Hour, func() {})
+	o.deferStartedAt[oldKey] = time.Now()
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "pilot", "sess-new")
+
+	o.mu.Lock()
+	sessions := o.agentSessions["/rooms/t"]
+	_, oldRegistered := sessions["Pilot"]
+	newSession := sessions["pilot"]
+	_, oldPending := o.pendingMsgs[oldKey]
+	_, oldTimer := o.pendingTimers[oldKey]
+	_, oldLast := o.lastNotified[oldKey]
+	_, oldDefer := o.deferStartedAt[oldKey]
+	_, newLast := o.lastNotified[newKey]
+	_, newDefer := o.deferStartedAt[newKey]
+	pendingCount := len(o.pendingMsgs[newKey])
+	pendingTimer := o.pendingTimers[newKey]
+	o.mu.Unlock()
+	if pendingTimer != nil {
+		defer pendingTimer.Stop()
+	}
+
+	if oldRegistered || newSession != "sess-new" {
+		t.Fatalf("case-variant replace did not leave only the new session: sessions=%v", sessions)
+	}
+	if oldPending || oldTimer || oldLast || oldDefer {
+		t.Fatalf("old case-variant notification state leaked: pending=%v timer=%v last=%v defer=%v", oldPending, oldTimer, oldLast, oldDefer)
+	}
+	if newLast || newDefer || pendingCount != 1 || pendingTimer == nil {
+		t.Fatalf("pending notification state not moved to new case-variant key: last=%v defer=%v pending=%d timer=%v", newLast, newDefer, pendingCount, pendingTimer)
+	}
+
+	o.flushPending("/rooms/t", "pilot", "sess-new")
+	if len(*sent) != 1 {
+		t.Fatalf("expected moved pending notification to flush once, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-new" {
+		t.Fatalf("expected moved notification to target new session, got %s", (*sent)[0].sessionID)
+	}
+	if !strings.Contains((*sent)[0].text, "Navigator") || !strings.Contains((*sent)[0].text, `read_messages("pilot")`) {
+		t.Fatalf("moved notification should keep sender and new agent name, got %q", (*sent)[0].text)
+	}
+}
+
 func TestRegisterAgentReplacesExactNameClearsStaleNotificationState(t *testing.T) {
 	o, sent := newTestOrchestrator()
 	o.RegisterAgent("/rooms/t", "agent-1", "sess-old")

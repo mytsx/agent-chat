@@ -64,10 +64,14 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 	// nearest to (and preferably after) spawn — so sibling same-cwd terminals each
 	// lock onto their own rollout and a quick restart can't grab the old file (#65).
 	var cands []fileCandidate
+	var readErr error
 	for _, day := range []time.Time{spawn, spawn.Add(-24 * time.Hour), spawn.Add(24 * time.Hour)} {
 		dir := filepath.Join(base, day.Format("2006"), day.Format("01"), day.Format("02"))
 		entries, derr := os.ReadDir(dir)
 		if derr != nil {
+			if !os.IsNotExist(derr) && readErr == nil {
+				readErr = derr
+			}
 			continue
 		}
 		for _, e := range entries {
@@ -91,7 +95,10 @@ func (codexAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed fu
 			cands = append(cands, fileCandidate{path: p, mod: info.ModTime()})
 		}
 	}
-	return pickNearestPostSpawn(cands, spawn), nil
+	if p := pickNearestPostSpawn(cands, spawn); p != "" {
+		return p, nil
+	}
+	return "", readErr
 }
 
 // SessionID extracts Codex's session UUID from a rollout's session_meta first

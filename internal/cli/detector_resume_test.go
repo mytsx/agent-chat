@@ -180,8 +180,12 @@ func TestGetCommandResume(t *testing.T) {
 		{"codex subcommand-first", CLICodex, id, "codex", []string{"resume", id, "--dangerously-bypass-approvals-and-sandbox"}},
 		// Unsupported CLI → fresh GetCommand (Gemini stays a normal launch this round).
 		{"gemini falls back to fresh", CLIGemini, id, "gemini", []string{"--approval-mode", "yolo"}},
-		// Empty id → fresh GetCommand even for a supported CLI.
+		// Empty/blank id → fresh GetCommand even for a supported CLI.
 		{"claude empty id falls back", CLIClaude, "", "claude", []string{"--dangerously-skip-permissions"}},
+		{"claude whitespace id falls back", CLIClaude, " 	\n ", "claude", []string{"--dangerously-skip-permissions"}},
+		// UI/history IDs may be pasted or persisted with accidental outer whitespace;
+		// trim before handing the value to CLIs so resume lookup stays exact.
+		{"codex trims outer whitespace", CLICodex, " 	" + id + "\n", "codex", []string{"resume", id, "--dangerously-bypass-approvals-and-sandbox"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
