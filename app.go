@@ -74,6 +74,10 @@ type App struct {
 	teamStore     *team.Store
 	dataDir       string
 	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
+	// settingsMu serializes the read-modify-write of settings.json so a threshold
+	// onBlur (SetUsageThresholds) racing a deferral toggle (SetDeferralEnabled) can't
+	// silently revert the other's field (Codex P3). Held across load+mutate+save.
+	settingsMu sync.Mutex
 	// promptLogN counts in-flight fire-and-forget user_prompt logging goroutines so
 	// a transcript read can drain them first and not miss a just-delivered prompt
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
@@ -1353,6 +1357,14 @@ func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
 	}
 	if !validSwitchTarget(session.CLIType, targetCLI) {
 		return "", fmt.Errorf("geçersiz geçiş hedefi: %q → %q", session.CLIType, targetCLI)
+	}
+	// Preflight the target binary BEFORE closing the old PTY: the frontend filters to
+	// installed CLIs, but a CLI can vanish from PATH between detection and switch. Without
+	// this guard, closeTerminalInternal would kill the old terminal and createTerminal
+	// would then fail on the missing binary, leaving the user with no terminal (Codex P2).
+	cmdName, _ := cli.GetCommand(cli.CLIType(targetCLI))
+	if _, err := exec.LookPath(cmdName); err != nil {
+		return "", fmt.Errorf("hedef CLI '%s' kurulu değil (PATH'te bulunamadı)", targetCLI)
 	}
 	teamID := session.TeamID
 	agentName := session.AgentName
@@ -2898,6 +2910,8 @@ func (a *App) GetDeferralEnabled() bool {
 
 // SetDeferralEnabled persists and immediately applies the deferral toggle.
 func (a *App) SetDeferralEnabled(enabled bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
 	s := a.loadAppSettings()
 	s.DeferralEnabled = enabled
 	if err := a.saveAppSettings(s); err != nil {
@@ -2918,6 +2932,8 @@ func (a *App) GetUsageThresholds() usage.Thresholds {
 
 // SetUsageThresholds persists the warn/critical cutoffs (normalized).
 func (a *App) SetUsageThresholds(warn, crit float64) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
 	n := usage.Thresholds{WarnPercent: warn, CriticalPercent: crit}.Normalized()
 	s := a.loadAppSettings()
 	s.UsageWarnPercent, s.UsageCritPercent = n.WarnPercent, n.CriticalPercent
@@ -2930,6 +2946,16 @@ func (a *App) onUsage(snap *usage.Snapshot) {
 	if snap == nil || a.ctx == nil {
 		return
 	}
+	// The ingest watcher's final drain can call onUsage AFTER ptyManager.Close removed
+	// the session; a late parse landing after the frontend cleared the old session's
+	// usage would resurrect a dead row. If the session is gone, drop the snapshot (#10).
+	session := a.ptyManager.GetSession(snap.SessionID)
+	if session == nil {
+		return
+	}
+	// Stamp the agent name from the live session so the usage panel can tell two
+	// terminals on the same CLI apart (adapters can't know it — see B2/#10).
+	snap.AgentName = session.AgentName
 	snap.UpdatedAt = time.Now().Unix()
 	status := usage.Evaluate(*snap, a.GetUsageThresholds())
 	runtime.EventsEmit(a.ctx, "usage:updated", map[string]interface{}{

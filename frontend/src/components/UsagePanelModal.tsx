@@ -47,6 +47,7 @@ export default function UsagePanelModal({ onClose }: { onClose: () => void }) {
           <table className="usage-table">
             <thead>
               <tr>
+                <th>Agent</th>
                 <th>CLI</th>
                 <th>Durum / %</th>
                 <th>Reset</th>
@@ -58,6 +59,7 @@ export default function UsagePanelModal({ onClose }: { onClose: () => void }) {
                 const s = ev.snapshot;
                 return (
                   <tr key={s.sessionID}>
+                    <td>{s.agentName || "—"}</td>
                     <td>{s.cli}</td>
                     <td>
                       {s.kind === 1

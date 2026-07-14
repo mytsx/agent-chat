@@ -119,7 +119,8 @@ func (geminiAdapter) SessionID(path string) string {
 }
 
 // ParseUsage sums Gemini's per-message token/cache counters (no denominator) and
-// returns the last-seen model. (nil,nil) when the file is missing/unparsable or
+// returns the last-seen model. User-message tokens are counted as input, model-
+// message tokens as output (#10). (nil,nil) when the file is missing/unparsable or
 // carries no token counters.
 func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	data, err := os.ReadFile(path)
@@ -147,7 +148,13 @@ func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 			continue
 		}
 		found = true
-		snap.OutputTokens += m.Tokens
+		// A user message's tokens are the PROMPT (input); model messages are output.
+		// m.Type == "user" is the human turn, everything else is a model turn (#10).
+		if m.Type == "user" {
+			snap.InputTokens += m.Tokens
+		} else {
+			snap.OutputTokens += m.Tokens
+		}
 		snap.CacheTokens += m.Cached
 		if m.Model != "" {
 			snap.Model = m.Model

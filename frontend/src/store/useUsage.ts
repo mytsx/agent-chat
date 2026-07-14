@@ -9,6 +9,7 @@ interface UsageState {
   limitHits: Record<string, number>; // sessionID → epoch ms (reaktif PTY sinyali)
   applySnapshot: (ev: UsageUpdatedEvent) => void;
   markLimitHit: (sessionID: string) => void;
+  clearLimitHit: (sessionID: string) => void;
   clear: (sessionID: string) => void;
 }
 
@@ -19,6 +20,14 @@ export const useUsage = create<UsageState>((set) => ({
     set((s) => ({ entries: { ...s.entries, [ev.snapshot.sessionID]: ev } })),
   markLimitHit: (sessionID) =>
     set((s) => ({ limitHits: { ...s.limitHits, [sessionID]: Date.now() } })),
+  // clearLimitHit removes ONLY the limit-hit marker (keeping the valid snapshot),
+  // so dismissing the switch dialog stops the 🔄 pulse without dropping usage (#10).
+  clearLimitHit: (sessionID) =>
+    set((s) => {
+      const limitHits = { ...s.limitHits };
+      delete limitHits[sessionID];
+      return { limitHits };
+    }),
   clear: (sessionID) =>
     set((s) => {
       const entries = { ...s.entries };

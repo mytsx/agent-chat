@@ -59,7 +59,13 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   // surfaces "you probably want to switch now".
   const usageEv = useUsageFor(sessionID);
   const limitHit = useUsage((s) => s.limitHits[sessionID]);
-  const showSwitchSuggest = usageEv?.status === 3 || !!limitHit;
+  // A reactive PTY limit-hit expires after 5min so a transient match (or a dismissed
+  // dialog before the next render) doesn't pulse the 🔄 button forever (Codex P3 #6).
+  // Date.now() at render is fine — this is display logic, not a stored value. The
+  // authoritative Codex-critical signal (status === 3) is the other, non-expiring trigger.
+  const LIMIT_HIT_TTL = 5 * 60 * 1000;
+  const recentHit = !!limitHit && Date.now() - limitHit < LIMIT_HIT_TTL;
+  const showSwitchSuggest = usageEv?.status === 3 || recentHit;
   const [switching, setSwitching] = useState(false);
 
   useEffect(() => {
@@ -428,7 +434,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         <SwitchDialog
           currentCLI={cliType}
           onSwitch={onSwitch}
-          onClose={() => setSwitching(false)}
+          onClose={() => {
+            setSwitching(false);
+            // Clearing only the limit-hit marker (not the whole usage entry) stops the
+            // 🔄 pulse when the user dismisses the dialog without switching (Codex P3 #6).
+            useUsage.getState().clearLimitHit(sessionID);
+          }}
         />
       )}
     </div>

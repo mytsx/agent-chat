@@ -29,7 +29,11 @@ type Window struct {
 // Snapshot is one terminal's latest usage reading. Primary/Secondary are non-nil
 // only for KindPercentLimit (Codex); token fields carry consumption for every CLI.
 type Snapshot struct {
-	SessionID    string  `json:"sessionID"`
+	SessionID string `json:"sessionID"`
+	// AgentName identifies which terminal this reading belongs to (adapters don't
+	// set it — it's populated at the app level from the live PTY session, #10) so
+	// the usage panel can tell two terminals on the same CLI apart.
+	AgentName    string  `json:"agentName,omitempty"`
 	CLI          string  `json:"cli"`
 	Kind         Kind    `json:"kind"`
 	Primary      *Window `json:"primary,omitempty"`

@@ -56,7 +56,8 @@ func TestGeminiParseUsage(t *testing.T) {
 	if err != nil || snap == nil {
 		t.Fatalf("snap=%v err=%v", snap, err)
 	}
-	if snap.Kind != usage.KindTokenCount || snap.OutputTokens != 45 || snap.CacheTokens != 15 {
+	// user-message tokens → InputTokens (5); model-message tokens → OutputTokens (30+10=40).
+	if snap.Kind != usage.KindTokenCount || snap.InputTokens != 5 || snap.OutputTokens != 40 || snap.CacheTokens != 15 {
 		t.Fatalf("gemini token toplamı yanlış: %+v", snap)
 	}
 	if snap.Model != "gemini-2.5-pro" {

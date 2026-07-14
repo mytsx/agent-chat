@@ -164,6 +164,7 @@ export interface UsageWindow {
 
 export interface UsageSnapshot {
   sessionID: string;
+  agentName?: string;
   cli: CLIType;
   kind: number; // 0 none | 1 percentLimit | 2 tokenCount
   primary?: UsageWindow;
