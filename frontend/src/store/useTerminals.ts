@@ -1,6 +1,7 @@
 import { create, type StoreApi } from "zustand";
 import { CLIInfo, CLIType, TerminalSession, SessionInfo } from "../lib/types";
 import { focusAfterSessionRemove, focusAfterSessionReplace } from "../lib/terminalFocus";
+import { createSingleFlight } from "../lib/singleFlight";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
 import {
@@ -66,6 +67,15 @@ interface TerminalsState {
 type GetTerminalsState = StoreApi<TerminalsState>["getState"];
 type SetTerminalsState = StoreApi<TerminalsState>["setState"];
 type TerminalLifecycleAction = "restartTerminal" | "resumeTerminal";
+
+// restart/resume both replace the same old sessionID, and each backend call
+// spawns a fresh PTY. A rapid double-trigger (double-click, or restart then
+// resume) would start two PTYs while the store keeps only the first
+// replacement's new id, orphaning the second PTY. Keying the replace on the old
+// sessionID coalesces overlapping calls into a single backend replace; the
+// second caller awaits and returns the first call's new sessionID. Keyed by the
+// old sessionID (the value shared by racing callers).
+const replaceInFlight = createSingleFlight<string>();
 
 function drainPendingCLISessionID(
   pendingBySession: Record<string, string>,
@@ -173,6 +183,19 @@ async function replaceTerminalFromBackend(
 
   const newSessionID = await replaceBackendSession(sessionID);
   set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
+
+  // If the terminal was closed (removeTerminal) while the backend replace was in
+  // flight, the old sessionID is already gone from the store, so replaceSessionID's
+  // map() couldn't graft the new id in — the freshly-spawned backend PTY would leak.
+  // The user closed the terminal, so the new PTY should not survive: close it. Runs
+  // once per replace (single-flight coalesces callers), so no double-close (Gemini
+  // PR #77 high).
+  const tracked = (get().sessions[teamID] ?? []).some((t) => t.sessionID === newSessionID);
+  if (!tracked) {
+    CloseTerminal(newSessionID).catch((e) =>
+      console.error(`[${action}] orphaned PTY temizlenemedi (${newSessionID}):`, e)
+    );
+  }
 
   return newSessionID;
 }
@@ -370,7 +393,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // or ResumeTerminal would fall back to another fresh restart — #40 Codex P3).
     // Draining pendingCLISessionIDs here keeps all insertion paths consistent so the
     // captured id is never lost if its event raced this replacement (#40 Codex P2).
-    return replaceTerminalFromBackend(get, set, teamID, sessionID, "restartTerminal", RestartTerminal);
+    // Coalesce overlapping replaces on this sessionID so a double-trigger can't
+    // orphan a second backend PTY (Gemini PR #76).
+    return replaceInFlight.run(sessionID, () =>
+      replaceTerminalFromBackend(get, set, teamID, sessionID, "restartTerminal", RestartTerminal)
+    );
   },
 
   resumeTerminal: async (teamID, sessionID) => {
@@ -379,7 +406,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     // PTY captures its new id; the resumed CLI regenerates its session id). Draining
     // pendingCLISessionIDs keeps all insertion paths consistent so a captured id
     // isn't lost if its event raced this replacement (#40 Codex P2).
-    return replaceTerminalFromBackend(get, set, teamID, sessionID, "resumeTerminal", ResumeTerminal);
+    // Coalesce overlapping replaces on this sessionID so a double-trigger can't
+    // orphan a second backend PTY (Gemini PR #76).
+    return replaceInFlight.run(sessionID, () =>
+      replaceTerminalFromBackend(get, set, teamID, sessionID, "resumeTerminal", ResumeTerminal)
+    );
   },
 
   setCLISessionID: (sessionID, cliSessionID) => {

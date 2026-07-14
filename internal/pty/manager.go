@@ -346,7 +346,12 @@ const (
 	bracketPasteClose = "\x1b[201~"
 )
 
-func sanitizeCopilotInput(text string) string {
+// SanitizeCopilotInput flattens text to the single-line form Copilot's PTY
+// actually receives: \r\n collapses to one space, every remaining C0/C1 control
+// and DEL becomes a space (so newlines/tabs don't act as live keys), and invisible
+// bidi/format runes are dropped (Trojan-Source hygiene). Exported so the app layer
+// can record the same bytes in the room transcript that the agent saw (Codex PR #76 P3).
+func SanitizeCopilotInput(text string) string {
 	flat := strings.ReplaceAll(text, "\r\n", " ")
 	return strings.Map(func(r rune) rune {
 		if sanitize.IsInvisibleFormat(r) {
@@ -394,7 +399,7 @@ func (m *Manager) InjectText(sessionID, text string, submit bool) error {
 		// text literal (review: Codex P2 + completeness sweep). Invisible bidi/format
 		// controls are dropped outright (Trojan-Source hygiene). \r\n collapses to a
 		// single space first so a CRLF doesn't become two.
-		flat := sanitizeCopilotInput(text)
+		flat := SanitizeCopilotInput(text)
 		// Nothing left after sanitization (e.g. an all-invisible payload): no-op so
 		// we never write a focus-in or leave a sticky pending flag for content that
 		// was never visible.
