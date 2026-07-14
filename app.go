@@ -126,7 +126,7 @@ func (a *App) startup(ctx context.Context) {
 		// Reaktif limit-hit sinyali (#10): token-CLI'ları payda vermediği için PTY
 		// çıktısında "rate limit / 429 / usage limit reached" görülürse frontend'e
 		// bildir. Best-effort; Codex authoritative kaldıkça yalnız ek katman.
-		if usage.ScanRateLimitHit(string(data)) {
+		if usage.ScanRateLimitHit(data) {
 			// Gate the reactive limit-hit to real AI CLIs: a plain shell can echo
 			// "rate limit"/"429" as ordinary text and must not raise the switch
 			// suggestion. The GetSession lookup only runs after a (rare) scan match,
@@ -1373,6 +1373,10 @@ func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
 	slotIndex := session.SlotIndex
 	wtDir := session.WorktreeDir
 	wtRepo := session.WorktreeRepo
+	// Capture the OLD CLI type BEFORE closeTerminalInternal frees the session — the
+	// handoff primer names the CLI that hit its limit, not agentName (which the new
+	// terminal keeps, so passing agentName would make the note self-referential).
+	oldCLI := session.CLIType
 
 	// A manager/observer stays in the main repo; a worker keeps its worktree.
 	mainRepoRole := false
@@ -1392,8 +1396,9 @@ func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
 
 	log.Printf("[SWITCH] agent=%s %s→%s team=%s slot=%d", agentName, session.CLIType, targetCLI, teamID, slotIndex)
 
-	// resumeID="" (cross-CLI resume impossible); handoffFrom=agentName injects the primer.
-	newID, err := a.createTerminal(teamID, agentName, workDir, targetCLI, promptID, false, slotIndex, "", agentName)
+	// resumeID="" (cross-CLI resume impossible); handoffFrom=oldCLI injects the primer,
+	// naming the OLD CLI whose limit was hit (agentName is unchanged across the switch).
+	newID, err := a.createTerminal(teamID, agentName, workDir, targetCLI, promptID, false, slotIndex, "", oldCLI)
 	if err != nil {
 		return "", err
 	}
@@ -1415,6 +1420,9 @@ func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
 				if !strings.EqualFold(strings.TrimSpace(cfg.Name), strings.TrimSpace(agentName)) {
 					continue
 				}
+				// cfg is a copy, but we pass the MODIFIED copy to UpsertAgent — t itself
+				// is never persisted, so mutating a copy (not t.Agents[i]) is intentional
+				// and correct.
 				cfg.CLIType = targetCLI
 				if _, uerr := a.teamStore.UpsertAgent(teamID, cfg); uerr != nil {
 					log.Printf("[SWITCH] CLIType kalıcı hale getirilemedi (agent=%s team=%s): %v", agentName, teamID, uerr)

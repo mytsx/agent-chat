@@ -1,9 +1,6 @@
 package usage
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
 // ansiSeq matches CSI/OSC escape sequences so a rate-limit phrase split by TUI
 // color codes still matches after stripping.
@@ -18,21 +15,48 @@ var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 // expose a denominator.
 var rateLimitPhrases = regexp.MustCompile(`(?i)(rate limited|rate limits? (exceeded|reached|hit)|hit (your )?rate limit|reached your [a-z ]*limit|usage limit reached|429 too many|too many requests|quota (exceeded|exhausted))`)
 
+// containsFoldASCII reports whether b contains substr using ASCII case-insensitive
+// matching, with no allocation (unlike strings.ToLower + Contains). substr must be
+// lowercase ASCII. O(len(b)*len(substr)) but substr is a short keyword.
+func containsFoldASCII(b []byte, substr string) bool {
+	n := len(substr)
+	if n == 0 {
+		return true
+	}
+	for i := 0; i+n <= len(b); i++ {
+		ok := true
+		for j := 0; j < n; j++ {
+			c := b[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != substr[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ScanRateLimitHit reports whether a PTY output chunk signals a hit rate/usage
-// limit. PTY output is a hot path, so a cheap lowercase substring gate runs
+// limit. PTY output is a hot path, so a cheap allocation-free keyword check runs
 // BEFORE the ANSI-strip + regex — every regex alternative contains one of
-// "limit"/"429"/"request"/"quota". (A rare "limit" split mid-word by an ANSI
-// code would be missed by the gate — acceptable, this signal is best-effort
-// with Codex authoritative.)
-func ScanRateLimitHit(chunk string) bool {
-	if chunk == "" {
+// "limit"/"429"/"request"/"quota". Taking []byte and folding case in place avoids
+// the string(data) + strings.ToLower allocations on the ~99.9% of chunks with no
+// trigger word. (A rare "limit" split mid-word by an ANSI code would be missed by
+// the gate — acceptable, this signal is best-effort with Codex authoritative.)
+func ScanRateLimitHit(chunk []byte) bool {
+	if len(chunk) == 0 {
 		return false
 	}
-	lower := strings.ToLower(chunk)
-	if !strings.Contains(lower, "limit") && !strings.Contains(lower, "429") &&
-		!strings.Contains(lower, "request") && !strings.Contains(lower, "quota") {
+	if !containsFoldASCII(chunk, "limit") && !containsFoldASCII(chunk, "429") &&
+		!containsFoldASCII(chunk, "request") && !containsFoldASCII(chunk, "quota") {
 		return false
 	}
-	clean := ansiSeq.ReplaceAllString(chunk, "")
-	return rateLimitPhrases.MatchString(clean)
+	clean := ansiSeq.ReplaceAll(chunk, nil)
+	return rateLimitPhrases.Match(clean)
 }

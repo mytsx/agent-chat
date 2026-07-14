@@ -28,10 +28,11 @@ const handoffHeader = "## Devralma Notu (bağlam)"
 // mode string is used rather than parallel bools so the manager/observer states
 // can never both be set.
 //
-// handoffFrom (#10) is optional: when non-empty, it names the agent whose CLI hit
-// its usage limit and is being replaced. A "Devralma Notu" segment is injected
-// after the room summary and before the selected prompt, telling the new agent
-// it is taking over and to read room history.
+// handoffFrom (#10) is optional: when non-empty, it names the OLD CLI (e.g. "codex")
+// whose session hit its usage limit and is being replaced. A "Devralma Notu" segment
+// is injected after the room summary and before the selected prompt, telling the new
+// agent it is taking over and to read room history. (The agent name is unchanged
+// across a switch, so naming the CLI — not the agent — keeps the note non-self-referential.)
 func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode, handoffFrom string) string {
 	var parts []string
 
@@ -63,7 +64,7 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, sel
 	// an instruction that overrides the charter.
 	if handoffFrom = strings.TrimSpace(handoffFrom); handoffFrom != "" {
 		parts = append(parts, fmt.Sprintf(
-			"%s\n⚠️ '%s' agent'ının CLI limiti doldu; görevi sen devralıyorsun. "+
+			"%s\n⚠️ Önceki '%s' CLI oturumunun limiti doldu; görevi sen devralıyorsun. "+
 				"Oda geçmişini read_all_messages(since_id=0, limit=1000) ile oku ve kaldığı yerden devam et.",
 			handoffHeader, handoffFrom))
 	}
