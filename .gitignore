@@ -49,3 +49,10 @@ dist/
 
 # Superpowers brainstorm + SDD scratch
 .superpowers/
+
+# Local, untracked issue-prompt scratch (added manually from a template, not committed).
+# The folder is kept via .gitkeep; every file inside stays local.
+# NOTE: distinct from the tracked prompts/ dir, which is embedded into the binary
+# (//go:embed prompts/*.md) — do NOT put local prompts there.
+/.prompts/*
+!/.prompts/.gitkeep
