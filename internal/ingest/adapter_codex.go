@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -189,8 +190,13 @@ func (codexAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // long JSON lines
 	for sc.Scan() {
+		// Fast-path: only event_msg lines carry usage; skip unmarshaling the rest.
+		line := sc.Bytes()
+		if !bytes.Contains(line, []byte(`"event_msg"`)) {
+			continue
+		}
 		var cl codexUsageLine
-		if json.Unmarshal(sc.Bytes(), &cl) != nil || cl.Type != "event_msg" {
+		if json.Unmarshal(line, &cl) != nil || cl.Type != "event_msg" {
 			continue
 		}
 		switch cl.Payload.Type {

@@ -1389,6 +1389,28 @@ func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
 		s.WorktreeDir = wtDir
 		s.WorktreeRepo = wtRepo
 	}
+
+	// Persist the CLI change to the team config. createTerminal's own UpsertAgent
+	// updates the config on the non-worktree path, but its worktree-path guard skips
+	// the write for a worktree-backed agent (workDir points into the worktrees dir,
+	// origWorkDir is empty) — so without this the stored CLIType would stay the OLD
+	// one and reopening would lose the switch. Read the current config, flip only
+	// CLIType to targetCLI (preserving Role/WorkDir/SlotIndex/UseWorktree/PromptID),
+	// and re-upsert. Idempotent with createTerminal's own UpsertAgent (Codex P2 #3).
+	if teamID != "" {
+		if t, gerr := a.teamStore.Get(teamID); gerr == nil {
+			for _, cfg := range t.Agents {
+				if !strings.EqualFold(strings.TrimSpace(cfg.Name), strings.TrimSpace(agentName)) {
+					continue
+				}
+				cfg.CLIType = targetCLI
+				if _, uerr := a.teamStore.UpsertAgent(teamID, cfg); uerr != nil {
+					log.Printf("[SWITCH] CLIType kalıcı hale getirilemedi (agent=%s team=%s): %v", agentName, teamID, uerr)
+				}
+				break
+			}
+		}
+	}
 	return newID, nil
 }
 

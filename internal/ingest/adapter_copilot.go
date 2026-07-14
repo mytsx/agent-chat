@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -136,8 +137,13 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
+		// Fast-path: only lines carrying a usage block matter; skip unmarshaling the rest.
+		line := sc.Bytes()
+		if !bytes.Contains(line, []byte(`"usage"`)) {
+			continue
+		}
 		var cl copilotUsageLine
-		if json.Unmarshal(sc.Bytes(), &cl) != nil {
+		if json.Unmarshal(line, &cl) != nil {
 			continue
 		}
 		u := cl.Data.Usage

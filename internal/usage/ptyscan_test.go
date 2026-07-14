@@ -20,6 +20,7 @@ func TestScanRateLimitHit(t *testing.T) {
 		"The limit parameter defaults to 15",
 		"rate of change is 429 units/sec in this benchmark",
 		"go test ./... limit reached? no, just checking",
+		"the rate limit parameter defaults to 100",
 	}
 	for _, s := range misses {
 		if ScanRateLimitHit(s) {
