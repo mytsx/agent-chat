@@ -31,6 +31,7 @@ import (
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
+	"desktop/internal/usage"
 	"desktop/internal/validation"
 	"desktop/internal/voice"
 
@@ -1179,7 +1180,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				"sessionID":    sessionID,
 				"cliSessionID": id,
 			})
-		}, nil, // onUsage — Task 7 replaces this with a.onUsage(sessionID)
+		}, func(s *usage.Snapshot) { a.onUsage(s) }, // onUsage: stamp+evaluate+emit "usage:updated" (#10)
 			resumeSeed)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
@@ -2755,6 +2756,10 @@ type appSettings struct {
 	// when true, notifications are held back while the user is typing in a
 	// terminal. Default false (inject immediately, never interrupt).
 	DeferralEnabled bool `json:"deferral_enabled"`
+	// Usage/limit uyarı eşikleri (#10). 0/aralık-dışı → usage.DefaultThresholds
+	// (85/95). SettingsModal'dan konfigüre edilir.
+	UsageWarnPercent float64 `json:"usage_warn_percent"`
+	UsageCritPercent float64 `json:"usage_crit_percent"`
 }
 
 func (a *App) loadAppSettings() appSettings {
@@ -2808,6 +2813,35 @@ func (a *App) SetDeferralEnabled(enabled bool) error {
 		o.SetDeferralEnabled(enabled)
 	}
 	return nil
+}
+
+// GetUsageThresholds returns the persisted warn/critical cutoffs, normalized to
+// defaults when unset or out of range.
+func (a *App) GetUsageThresholds() usage.Thresholds {
+	s := a.loadAppSettings()
+	return usage.Thresholds{WarnPercent: s.UsageWarnPercent, CriticalPercent: s.UsageCritPercent}.Normalized()
+}
+
+// SetUsageThresholds persists the warn/critical cutoffs (normalized).
+func (a *App) SetUsageThresholds(warn, crit float64) error {
+	n := usage.Thresholds{WarnPercent: warn, CriticalPercent: crit}.Normalized()
+	s := a.loadAppSettings()
+	s.UsageWarnPercent, s.UsageCritPercent = n.WarnPercent, n.CriticalPercent
+	return a.saveAppSettings(s)
+}
+
+// onUsage stamps a fresh snapshot, evaluates it against the current thresholds,
+// and pushes it to the frontend. Wired as the ingest watcher's onUsage callback.
+func (a *App) onUsage(snap *usage.Snapshot) {
+	if snap == nil || a.ctx == nil {
+		return
+	}
+	snap.UpdatedAt = time.Now().Unix()
+	status := usage.Evaluate(*snap, a.GetUsageThresholds())
+	runtime.EventsEmit(a.ctx, "usage:updated", map[string]interface{}{
+		"snapshot": snap,
+		"status":   int(status),
+	})
 }
 
 // GetVoiceStatus reports voice config state for the Settings panel (no raw key).

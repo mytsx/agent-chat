@@ -213,9 +213,12 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		// Usage piggyback: after the message poll, if this adapter can extract usage,
 		// re-read the file at most every usageParseInterval and hand a fresh snapshot to
 		// onUsage. Throttled so an active session (file changes every tick) doesn't
-		// re-scan a multi-MB rollout on every 700ms poll (spec §4).
+		// re-scan a multi-MB rollout on every 700ms poll (spec §4). Skipped entirely
+		// while muted (observer): an observer terminal is the user's private space
+		// (#17), so its usage must not be parsed or emitted either, same as its
+		// messages.
 		up, canUsage := ad.(UsageParser)
-		if canUsage && onUsage != nil && path != "" {
+		if canUsage && onUsage != nil && path != "" && !s.muted.Load() {
 			if lastUsageParse.IsZero() || time.Since(lastUsageParse) >= usageParseInterval {
 				lastUsageParse = time.Now()
 				if snap, uerr := up.ParseUsage(path); uerr != nil {

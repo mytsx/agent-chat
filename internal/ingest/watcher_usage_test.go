@@ -43,6 +43,45 @@ func TestWatcherEmitsUsage(t *testing.T) {
 	t.Fatal("onUsage 4s içinde çağrılmadı")
 }
 
+// TestWatcherSkipsUsageWhenMuted verifies a muted (observer) watcher never
+// parses/emits usage, even though it still claims its file. Mute is applied
+// synchronously right after StartSession — Mute only sets an atomic bool, so
+// it lands well before the first poll tick (pollInterval=700ms), making the
+// muted state observed on that very first tick deterministically (#10/#17).
+func TestWatcherSkipsUsageWhenMuted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-x.jsonl")
+	os.WriteFile(path, []byte(`{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":50,"window_minutes":10080,"resets_at":1},"plan_type":"pro"}}}`+"\n"), 0600)
+
+	ad := &fakeUsageAdapter{path: path}
+	m := New()
+	var mu sync.Mutex
+	var got *usage.Snapshot
+	m.StartSession("s1", ad, dir, time.Now().UnixNano(), nil, nil,
+		func(content, ts string) bool { return true },
+		nil,
+		func(snap *usage.Snapshot) { mu.Lock(); got = snap; mu.Unlock() },
+		nil)
+	m.Mute("s1")
+	defer m.StopSession("s1")
+
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		g := got
+		mu.Unlock()
+		if g != nil {
+			t.Fatalf("muted watcher onUsage çağırmamalı, ama çağrıldı: %+v", g)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got != nil {
+		t.Fatalf("muted watcher onUsage çağırmamalı, ama çağrıldı: %+v", got)
+	}
+}
+
 // fakeUsageAdapter implements SessionAdapter + UsageParser.
 type fakeUsageAdapter struct{ path string }
 
