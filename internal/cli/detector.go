@@ -58,8 +58,14 @@ func ensureFullPATH() {
 	}
 
 	if len(toAdd) > 0 || pathChanged {
-		newPATH := strings.Join(append(pathEntries, toAdd...), pathSeparator)
-		os.Setenv("PATH", newPATH)
+		entries := append(pathEntries, toAdd...)
+		// Never blank PATH: if every original entry was unsafe (all empty/relative)
+		// AND no extra dir was found to add, leave PATH untouched rather than wiping
+		// command resolution for this process and its PTY children. The old gate only
+		// rewrote when adding dirs, so it could never zero out PATH.
+		if len(entries) > 0 {
+			os.Setenv("PATH", strings.Join(entries, pathSeparator))
+		}
 	}
 }
 

@@ -918,6 +918,56 @@ func TestRegisterAgent_SameNameNewSessionDropsStaleCooldown(t *testing.T) {
 	}
 }
 
+// TestRegisterAgent_SameNameNewSessionPreservesPending: restarting a session
+// under the SAME spelling must drop stale cooldown but PRESERVE queued
+// notifications and re-arm the flush timer against the new session, so a message
+// batched just before the restart is not silently lost (distinct from the
+// cooldown-drop guarantee, which the sibling test covers).
+func TestRegisterAgent_SameNameNewSessionPreservesPending(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-old")
+
+	key := "/rooms/t:agent-1"
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "backend"}}
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-new")
+
+	o.mu.Lock()
+	pending := len(o.pendingMsgs[key])
+	_, hasTimer := o.pendingTimers[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if pending != 1 {
+		t.Errorf("pending notification must survive a same-name new-session refresh, got %d", pending)
+	}
+	if !hasTimer {
+		t.Error("refresh must re-arm the flush timer against the new session while pending remains")
+	}
+}
+
+// TestResolveAgentSession_CaseFoldTieBreakDeterministic: when no exact key
+// matches, resolution must pick a case-folded match deterministically (sorted),
+// not by nondeterministic map-iteration order, so routing is stable even if
+// stale duplicate runtime entries somehow coexist.
+func TestResolveAgentSession_CaseFoldTieBreakDeterministic(t *testing.T) {
+	sessions := map[string]string{"Pilot": "sess-P", "pilot": "sess-p"}
+	// "PILOT" has no exact key → falls to the case-folded matches ["Pilot","pilot"].
+	for i := 0; i < 20; i++ {
+		name, sess, ok := resolveAgentSession(sessions, "PILOT")
+		if !ok {
+			t.Fatal("resolveAgentSession should match case-insensitively")
+		}
+		if name != "Pilot" || sess != "sess-P" {
+			t.Fatalf("tie-break must be deterministic (sorted first): got name=%q sess=%q, want Pilot/sess-P", name, sess)
+		}
+	}
+}
+
 // TestUnregisterAgent_CaseInsensitive: unregister must resolve the agent by the
 // same case-insensitive identity used for routing.
 func TestUnregisterAgent_CaseInsensitive(t *testing.T) {

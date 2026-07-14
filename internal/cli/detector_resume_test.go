@@ -114,6 +114,39 @@ func TestEnsureFullPATHRemovesUnsafeAndDuplicateEntriesFromExistingPATH(t *testi
 	}
 }
 
+// TestCleanPATHEntries exercises the sanitizer directly (deterministic, no
+// filesystem): empty/relative/duplicate entries are dropped, first-occurrence
+// order is preserved, and `changed` reports removals — including the degenerate
+// all-unsafe case that returns an empty slice (which the ensureFullPATH guard
+// must never turn into a blanked PATH).
+func TestCleanPATHEntries(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	tests := []struct {
+		name    string
+		in      string
+		want    []string
+		changed bool
+	}{
+		{"already clean, unchanged", "/usr/bin" + sep + "/bin", []string{"/usr/bin", "/bin"}, false},
+		{"empty entry dropped", sep + "/usr/bin" + sep, []string{"/usr/bin"}, true},
+		{"relative entries dropped", "/usr/bin" + sep + "." + sep + "relative/bin", []string{"/usr/bin"}, true},
+		{"duplicate dropped, order kept", "/a" + sep + "/b" + sep + "/a", []string{"/a", "/b"}, true},
+		{"all unsafe -> empty", "." + sep + "relative" + sep, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := cleanPATHEntries(tt.in)
+			if changed != tt.changed {
+				t.Errorf("changed = %v, want %v", changed, tt.changed)
+			}
+			// Join sidesteps the nil-vs-empty-slice distinction; order matters.
+			if strings.Join(got, sep) != strings.Join(tt.want, sep) {
+				t.Errorf("entries = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveUserShellFallsBackWhenSHELLIsInvalid(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 
