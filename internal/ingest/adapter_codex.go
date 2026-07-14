@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"desktop/internal/usage"
 )
 
 // codexAdapter ingests OpenAI Codex CLI's "rollout" JSONL:
@@ -134,4 +136,93 @@ func readCodexFileMeta(path string) codexFileMeta {
 	}
 	_ = json.Unmarshal(line, &meta)
 	return codexFileMeta{id: meta.Payload.ID, cwd: meta.Payload.Cwd}
+}
+
+// codexRateLimits mirrors the rate_limits block inside a token_count event_msg.
+type codexRateLimits struct {
+	Primary   *codexWindow `json:"primary"`
+	Secondary *codexWindow `json:"secondary"`
+	PlanType  string       `json:"plan_type"`
+}
+type codexWindow struct {
+	UsedPercent   float64 `json:"used_percent"`
+	WindowMinutes int     `json:"window_minutes"`
+	ResetsAt      int64   `json:"resets_at"`
+}
+
+// codexUsageLine decodes the payloads ParseUsage cares about: token_count (which
+// carries rate_limits + total token usage) and thread_settings_applied (model).
+type codexUsageLine struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Type string `json:"type"`
+		Info struct {
+			TotalTokenUsage struct {
+				InputTokens       int64 `json:"input_tokens"`
+				CachedInputTokens int64 `json:"cached_input_tokens"`
+				OutputTokens      int64 `json:"output_tokens"`
+			} `json:"total_token_usage"`
+		} `json:"info"`
+		RateLimits     *codexRateLimits `json:"rate_limits"`
+		ThreadSettings struct {
+			Model string `json:"model"`
+		} `json:"thread_settings"`
+	} `json:"payload"`
+}
+
+// ParseUsage reads the whole rollout and returns the LAST rate_limits reading
+// (authoritative used-percent per window), the last-seen model, and the last
+// token totals. Returns (nil, nil) when no rate_limits line exists yet (a fresh
+// session before the first API response). A missing file is (nil, nil) too.
+func (codexAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	snap := usage.Snapshot{CLI: "codex", Kind: usage.KindPercentLimit}
+	found := false
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // long JSON lines
+	for sc.Scan() {
+		var cl codexUsageLine
+		if json.Unmarshal(sc.Bytes(), &cl) != nil || cl.Type != "event_msg" {
+			continue
+		}
+		switch cl.Payload.Type {
+		case "thread_settings_applied":
+			if cl.Payload.ThreadSettings.Model != "" {
+				snap.Model = cl.Payload.ThreadSettings.Model
+			}
+		case "token_count":
+			tu := cl.Payload.Info.TotalTokenUsage
+			if tu.InputTokens != 0 || tu.OutputTokens != 0 {
+				snap.InputTokens, snap.OutputTokens, snap.CacheTokens = tu.InputTokens, tu.OutputTokens, tu.CachedInputTokens
+			}
+			if rl := cl.Payload.RateLimits; rl != nil {
+				found = true
+				snap.Primary = toUsageWindow(rl.Primary)
+				snap.Secondary = toUsageWindow(rl.Secondary)
+				snap.PlanType = rl.PlanType
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return &snap, nil
+}
+
+func toUsageWindow(w *codexWindow) *usage.Window {
+	if w == nil {
+		return nil
+	}
+	return &usage.Window{UsedPercent: w.UsedPercent, WindowMinutes: w.WindowMinutes, ResetsAt: w.ResetsAt}
 }
