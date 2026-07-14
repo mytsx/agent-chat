@@ -39,8 +39,9 @@ func ensureFullPATH() {
 
 	currentPATH := os.Getenv("PATH")
 	pathSeparator := string(os.PathListSeparator)
-	pathSet := make(map[string]bool)
-	for _, p := range filepath.SplitList(currentPATH) {
+	pathEntries, pathChanged := cleanPATHEntries(currentPATH)
+	pathSet := make(map[string]bool, len(pathEntries))
+	for _, p := range pathEntries {
 		pathSet[p] = true
 	}
 
@@ -56,13 +57,32 @@ func ensureFullPATH() {
 		}
 	}
 
-	if len(toAdd) > 0 {
-		newPATH := strings.Join(toAdd, pathSeparator)
-		if currentPATH != "" {
-			newPATH = currentPATH + pathSeparator + newPATH
-		}
+	if len(toAdd) > 0 || pathChanged {
+		newPATH := strings.Join(append(pathEntries, toAdd...), pathSeparator)
 		os.Setenv("PATH", newPATH)
 	}
+}
+
+// cleanPATHEntries strips empty, relative, and duplicate entries from a PATH
+// value. Empty and relative entries can resolve through the current working
+// directory, so a malicious binary planted in a project dir could shadow a real
+// tool at exec time; dropping them (and dedup'ing) hardens CLI/shell launches.
+// The bool reports whether any entry was removed so the caller knows to rewrite
+// PATH even when it adds no new directories.
+func cleanPATHEntries(pathValue string) ([]string, bool) {
+	entries := filepath.SplitList(pathValue)
+	cleaned := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	changed := false
+	for _, entry := range entries {
+		if entry == "" || !filepath.IsAbs(entry) || seen[entry] {
+			changed = true
+			continue
+		}
+		seen[entry] = true
+		cleaned = append(cleaned, entry)
+	}
+	return cleaned, changed
 }
 
 func nvmNodeVersionDirs(home string) []string {
@@ -171,10 +191,7 @@ func DetectAll() []CLIInfo {
 		result = append(result, info)
 	}
 	// Always add shell
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
-	}
+	shell := resolveUserShell()
 	result = append(result, CLIInfo{
 		Type:       CLIShell,
 		Name:       "Shell",
@@ -185,24 +202,50 @@ func DetectAll() []CLIInfo {
 	return result
 }
 
+// resolveUserShell returns an absolute, existing shell path. It prefers $SHELL
+// but only after confirming it resolves via exec.LookPath, so a stale or
+// tampered SHELL value can't hand PTY launches a bogus/relative command; it then
+// falls back to /bin/zsh, /bin/sh, and finally a literal /bin/sh.
+func resolveUserShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		if path, err := exec.LookPath(shell); err == nil {
+			return path
+		}
+	}
+	for _, fallback := range []string{"/bin/zsh", "/bin/sh"} {
+		if path, err := exec.LookPath(fallback); err == nil {
+			return path
+		}
+	}
+	return "/bin/sh"
+}
+
 // GetCommand returns the command and args to start a CLI
 func GetCommand(cliType CLIType) (string, []string) {
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--dangerously-skip-permissions"}
 	case CLIGemini:
-		return "gemini", []string{"--approval-mode", "yolo"}
+		return resolveCLIBinary("gemini"), []string{"--approval-mode", "yolo"}
 	case CLICopilot:
-		return "copilot", []string{"--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--yolo"}
 	case CLICodex:
-		return "codex", []string{"--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"--dangerously-bypass-approvals-and-sandbox"}
 	default:
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/zsh"
-		}
-		return shell, []string{"-l"}
+		return resolveUserShell(), []string{"-l"}
 	}
+}
+
+// resolveCLIBinary resolves a CLI name to its absolute path via exec.LookPath so
+// the spawned process is pinned at launch time rather than re-resolved through
+// PATH by the child shell (which a planted relative binary could hijack). Only an
+// absolute hit is trusted; anything else falls back to the bare name so a
+// LookPath miss or a relative match still lets the launcher resolve it normally.
+func resolveCLIBinary(binary string) string {
+	if path, err := exec.LookPath(binary); err == nil && filepath.IsAbs(path) {
+		return path
+	}
+	return binary
 }
 
 // ResumeSupported reports whether GetCommandResume can build a native resume
@@ -228,11 +271,11 @@ func GetCommandResume(cliType CLIType, sessionID string) (string, []string) {
 	}
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--resume", sessionID, "--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--resume", sessionID, "--dangerously-skip-permissions"}
 	case CLICopilot:
-		return "copilot", []string{"--resume=" + sessionID, "--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--resume=" + sessionID, "--yolo"}
 	case CLICodex:
-		return "codex", []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
 	default:
 		return GetCommand(cliType)
 	}
