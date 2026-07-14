@@ -42,11 +42,11 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       .catch(() => {});
   }, []);
 
-  // Persist thresholds on each edit; the backend normalizes (0/out-of-range → 85/95,
-  // crit ≥ warn), so a transient invalid value is coerced rather than rejected.
+  // Persist thresholds on blur, not on every keystroke — saving each edit causes
+  // excessive disk I/O + IPC. Persisting only the settled value on blur also avoids
+  // the transient empty-input divergence (Number("")===0). The backend normalizes
+  // (0/out-of-range → 85/95, crit ≥ warn), so a settled invalid value is coerced.
   const saveThresholds = async (w: number, c: number) => {
-    setWarnPct(w);
-    setCritPct(c);
     try {
       await SetUsageThresholds(w, c);
     } catch (e) {
@@ -137,7 +137,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                 min={1}
                 max={100}
                 value={warnPct}
-                onChange={(e) => saveThresholds(Number(e.target.value), critPct)}
+                onChange={(e) => setWarnPct(Number(e.target.value))}
+                onBlur={() => saveThresholds(warnPct, critPct)}
                 style={{ width: 64 }}
               />
             </label>
@@ -148,7 +149,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                 min={1}
                 max={100}
                 value={critPct}
-                onChange={(e) => saveThresholds(warnPct, Number(e.target.value))}
+                onChange={(e) => setCritPct(Number(e.target.value))}
+                onBlur={() => saveThresholds(warnPct, critPct)}
                 style={{ width: 64 }}
               />
             </label>

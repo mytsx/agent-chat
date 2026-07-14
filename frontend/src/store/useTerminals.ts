@@ -187,6 +187,11 @@ async function replaceTerminalFromBackend(
   const newSessionID = await replaceBackendSession(sessionID);
   set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
 
+  // The OLD sessionID's PTY is gone (restart/resume/switch all replace it), so drop
+  // its cached usage snapshot/limit-hit — otherwise the usage panel keeps a dead row
+  // and entries/limitHits grow unbounded. Covers all replace paths in one place (FIX 2).
+  useUsage.getState().clear(sessionID);
+
   // If the terminal was closed (removeTerminal) while the backend replace was in
   // flight, the old sessionID is already gone from the store, so replaceSessionID's
   // map() couldn't graft the new id in — the freshly-spawned backend PTY would leak.
@@ -451,9 +456,11 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
           )
         ),
       }));
-      // The old sessionID's PTY is gone; drop its cached usage snapshot/limit-hit so
-      // the usage panel doesn't keep a stale row for a dead session (FIX 2).
-      useUsage.getState().clear(sessionID);
+      // The backend re-persisted this agent's CLIType (SwitchTerminal → UpsertAgent),
+      // so re-pull the team; otherwise a later grid-layout change would echo a stale
+      // team.agents to UpdateTeam and revert the switch. PTY is running, so a refresh
+      // failure must not fail the switch (Codex P2 #2).
+      await refreshTeamAfterTerminalChange(teamID, "[switch] refreshTeam failed:");
       return newSessionID;
     });
   },

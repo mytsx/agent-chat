@@ -4,7 +4,14 @@ import { UsageSnapshot, UsageWindow } from "../lib/types";
 const STATUS_LABEL = ["—", "🟢 OK", "🟡 Uyarı", "🔴 Kritik"];
 
 function resetCell(s: UsageSnapshot): string {
-  const w = s.primary ?? s.secondary;
+  // Show the reset of the window driving the row's status/percent — the MAX-used
+  // window (pctLabel/status use max(primary, secondary)), not primary-first, so a
+  // higher-used secondary window shows its own reset time (Codex P3 #5).
+  const wins = [s.primary, s.secondary].filter(Boolean) as UsageWindow[];
+  const w = wins.reduce<UsageWindow | undefined>(
+    (best, cur) => (best && best.usedPercent >= cur.usedPercent ? best : cur),
+    undefined
+  );
   if (!w || !w.resetsAt) return "—";
   return new Date(w.resetsAt * 1000).toLocaleString();
 }
