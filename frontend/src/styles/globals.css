@@ -2016,3 +2016,29 @@ html, body, #root {
   border-color: #3fb950;
   color: #3fb950;
 }
+
+/* Usage rozeti — TerminalPane başlığı (#10) */
+.usage-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.usage-badge-ok {
+  background: #1f6f3f;
+  color: #d7ffe6;
+}
+.usage-badge-warn {
+  background: #8a6d1a;
+  color: #fff3cf;
+}
+.usage-badge-critical {
+  background: #8a1f1f;
+  color: #ffd7d7;
+}
+.usage-badge-token {
+  background: #333;
+  color: #bbb;
+}

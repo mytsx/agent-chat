@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } from "../../wailsjs/go/main/App";
 import { CLIType, VoiceState } from "../lib/types";
 import { errorToString } from "../lib/errorText";
+import UsageBadge from "./UsageBadge";
 
 // fmtRecTime formats elapsed recording seconds as m:ss for the live timer pill.
 function fmtRecTime(s: number): string {
@@ -288,6 +289,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         {cliType && cliType !== "shell" && (
           <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
         )}
+        <UsageBadge sessionID={sessionID} />
         <div
           className="terminal-header-actions"
           onMouseDown={(e) => e.stopPropagation()}
