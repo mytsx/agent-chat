@@ -46,11 +46,15 @@ export default function SwitchDialog({
   // user could confirm a switch to a CLI that isn't in the (now narrowed) list
   // (Gemini review). Guarded on length so the no-alternatives case (targets=[]) is
   // left untouched (confirm is disabled there anyway).
+  // targets is a fresh array each render; key the effect on its content so it only
+  // re-runs when the installed set actually changes, not on every render (Gemini review).
+  const targetsKey = targets.join(",");
   useEffect(() => {
     if (targets.length > 0 && !targets.includes(target)) {
       setTarget(targets[0]);
     }
-  }, [targets, target]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetsKey, target]);
   const doSwitch = async () => {
     setBusy(true);
     setErr("");

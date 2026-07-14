@@ -9,7 +9,7 @@ function resetCell(s: UsageSnapshot): string {
   // higher-used secondary window shows its own reset time (Codex P3 #5).
   const wins = [s.primary, s.secondary].filter(Boolean) as UsageWindow[];
   const w = wins.reduce<UsageWindow | undefined>(
-    (best, cur) => (best && best.usedPercent >= cur.usedPercent ? best : cur),
+    (best, cur) => (!best || cur.usedPercent > best.usedPercent ? cur : best),
     undefined
   );
   if (!w || !w.resetsAt) return "—";
