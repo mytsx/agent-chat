@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { CLIType } from "../lib/types";
 import { errorToString } from "../lib/errorText";
 import { useTerminals } from "../store/useTerminals";
@@ -40,6 +40,17 @@ export default function SwitchDialog({
   const [target, setTarget] = useState<CLIType>(targets[0]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // availableCLIs loads asynchronously, so `targets` can change after the initial
+  // render (e.g. from the ALL_TARGETS fallback to the installed set). If the current
+  // selection is no longer a valid target, snap it to the first one — otherwise the
+  // user could confirm a switch to a CLI that isn't in the (now narrowed) list
+  // (Gemini review). Guarded on length so the no-alternatives case (targets=[]) is
+  // left untouched (confirm is disabled there anyway).
+  useEffect(() => {
+    if (targets.length > 0 && !targets.includes(target)) {
+      setTarget(targets[0]);
+    }
+  }, [targets, target]);
   const doSwitch = async () => {
     setBusy(true);
     setErr("");
