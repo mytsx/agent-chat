@@ -1178,7 +1178,8 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				"sessionID":    sessionID,
 				"cliSessionID": id,
 			})
-		}, resumeSeed)
+		}, nil, // onUsage — Task 7 replaces this with a.onUsage(sessionID)
+			resumeSeed)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
 			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
