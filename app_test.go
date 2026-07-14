@@ -591,7 +591,7 @@ func TestComposeAgentPrompt_ObserverInjectsObserverPrompt(t *testing.T) {
 	})
 	a := &App{teamStore: store, dataDir: t.TempDir()}
 
-	got := a.composeAgentPrompt(tm.ID, "watcher", "", "observer")
+	got := a.composeAgentPrompt(tm.ID, "watcher", "", "observer", "")
 	if !strings.Contains(got, `join_room("watcher", "observer")`) {
 		t.Fatalf("expected observer join instruction, got:\n%s", got)
 	}

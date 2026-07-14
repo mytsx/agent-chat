@@ -830,14 +830,15 @@ func (a *App) agentConfigured(teamID, agentName string) bool {
 // signature is unchanged (Wails binding stable); it delegates to createTerminal
 // with no resume ID (fresh launch).
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int) (string, error) {
-	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "")
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "", "")
 }
 
 // createTerminal is the implementation. A non-empty resumeID with a resume-capable
 // CLI launches via cli.GetCommandResume (--resume <id>); otherwise a fresh
 // cli.GetCommand. Everything else (worktree, MCP config, ingest, startup prompt)
-// is identical to a fresh create (#40).
-func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
+// is identical to a fresh create (#40). handoffFrom (#10) is forwarded to the
+// startup prompt composition — see composeAgentPrompt's doc comment.
+func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID, handoffFrom string) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -1015,7 +1016,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// (#65) — Copilot records the -i prompt as the first user message.
 	var copilotComposed string
 	if ct == cli.CLICopilot && agentName != "" {
-		copilotComposed = a.composeAgentPrompt(teamID, agentName, promptID, mode)
+		copilotComposed = a.composeAgentPrompt(teamID, agentName, promptID, mode, handoffFrom)
 		if copilotComposed != "" {
 			cmdArgs = append(cmdArgs, "-i", copilotComposed)
 			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(copilotComposed))
@@ -1220,7 +1221,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	// Send startup prompt in background
-	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, mode)
+	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, mode, handoffFrom)
 
 	return sessionID, nil
 }
@@ -1304,7 +1305,7 @@ func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID)
+	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID, "")
 	if err != nil {
 		return "", err
 	}
@@ -1402,7 +1403,7 @@ func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]
 		}
 		// resumeIDs[cfg.Name] is "" for a nil/absent entry (fresh). The picker filters
 		// sessions to the agent's configured CLI, so the id always matches cfg.CLIType.
-		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name])
+		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name], "")
 		if err != nil {
 			res.Error = err.Error()
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
@@ -1416,8 +1417,10 @@ func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it.
 // agentMode (#17) is "manager", "observer", or "" and selects which role prompt
-// (if any) is appended and how the join instruction is framed.
-func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode string) string {
+// (if any) is appended and how the join instruction is framed. handoffFrom (#10)
+// is the name of a prior agent being replaced due to a CLI usage limit, or "" for
+// a normal (non-handoff) startup.
+func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode, handoffFrom string) string {
 	if agentName == "" {
 		return ""
 	}
@@ -1486,11 +1489,12 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode string) 
 		roomSummary = doc.Text
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode)
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode, handoffFrom)
 }
 
-// sendStartupPrompt sends the initial prompt to a CLI agent
-func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, agentMode string) {
+// sendStartupPrompt sends the initial prompt to a CLI agent. handoffFrom (#10) is
+// forwarded to composeAgentPrompt — see its doc comment.
+func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, agentMode, handoffFrom string) {
 	if cliType == "" || cliType == "shell" || cliType == "copilot" || agentName == "" {
 		return
 	}
@@ -1505,7 +1509,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID,
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
-	composed := a.composeAgentPrompt(teamID, agentName, promptID, agentMode)
+	composed := a.composeAgentPrompt(teamID, agentName, promptID, agentMode, handoffFrom)
 	if composed == "" {
 		return
 	}
@@ -2905,5 +2909,5 @@ func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
 // (resumeID), or fresh when resumeID is empty. Thin exported wrapper over the
 // Faz-1 internal createTerminal (#40 Faz-2). The resume picker calls this per agent.
 func (a *App) CreateTerminalResume(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
-	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID)
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID, "")
 }
