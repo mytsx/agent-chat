@@ -1322,6 +1322,34 @@ html, body, #root {
   cursor: not-allowed;
 }
 
+/* ============ CLI Switch Button (#10) ============ */
+.terminal-btn-switch {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.terminal-btn-switch:hover {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
+}
+@keyframes usage-switch-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.terminal-btn-switch.attention {
+  color: var(--danger);
+  animation: usage-switch-pulse 1.2s ease-in-out infinite;
+}
+
 /* ============ Terminal Close Button ============ */
 .terminal-btn-remove {
   background: none;
@@ -2041,4 +2069,17 @@ html, body, #root {
 .usage-badge-token {
   background: #333;
   color: #bbb;
+}
+
+/* Usage paneli tablosu (#10) */
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.usage-table th,
+.usage-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #333;
 }
