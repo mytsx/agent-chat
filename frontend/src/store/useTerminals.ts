@@ -4,6 +4,7 @@ import { focusAfterSessionRemove, focusAfterSessionReplace } from "../lib/termin
 import { createSingleFlight } from "../lib/singleFlight";
 import { main } from "../../wailsjs/go/models";
 import { useTeams } from "./useTeams";
+import { useUsage } from "./useUsage";
 import {
   CreateTerminal,
   CreateTerminalResume,
@@ -12,6 +13,7 @@ import {
   CloseTerminal,
   RestartTerminal,
   ResumeTerminal,
+  SwitchTerminal,
   ResizeTerminal,
   WriteToTerminal,
   BroadcastToTeam,
@@ -57,6 +59,7 @@ interface TerminalsState {
   ) => Promise<void>;
   restartTerminal: (teamID: string, sessionID: string) => Promise<string>;
   resumeTerminal: (teamID: string, sessionID: string) => Promise<string>;
+  switchTerminal: (teamID: string, sessionID: string, targetCLI: CLIType) => Promise<string>;
   setCLISessionID: (sessionID: string, cliSessionID: string) => void;
   getTeamSessions: (teamID: string) => TerminalSession[];
   createTerminalResume: (teamID: string, agentName: string, workDir: string, cliType: CLIType, promptId: string, slotIndex: number, useWorktree: boolean, resumeID: string) => Promise<string>;
@@ -66,7 +69,7 @@ interface TerminalsState {
 
 type GetTerminalsState = StoreApi<TerminalsState>["getState"];
 type SetTerminalsState = StoreApi<TerminalsState>["setState"];
-type TerminalLifecycleAction = "restartTerminal" | "resumeTerminal";
+type TerminalLifecycleAction = "restartTerminal" | "resumeTerminal" | "switch";
 
 // restart/resume both replace the same old sessionID, and each backend call
 // spawns a fresh PTY. A rapid double-trigger (double-click, or restart then
@@ -183,6 +186,11 @@ async function replaceTerminalFromBackend(
 
   const newSessionID = await replaceBackendSession(sessionID);
   set((s) => replaceRestartedSessionState(s, teamID, sessionID, newSessionID));
+
+  // The OLD sessionID's PTY is gone (restart/resume/switch all replace it), so drop
+  // its cached usage snapshot/limit-hit — otherwise the usage panel keeps a dead row
+  // and entries/limitHits grow unbounded. Covers all replace paths in one place (FIX 2).
+  useUsage.getState().clear(sessionID);
 
   // If the terminal was closed (removeTerminal) while the backend replace was in
   // flight, the old sessionID is already gone from the store, so replaceSessionID's
@@ -348,6 +356,9 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       ),
       focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, [sessionID]),
     }));
+    // Drop the closed session's cached usage so entries/limitHits don't grow
+    // unbounded and the usage panel doesn't show a stale row (FIX 2).
+    useUsage.getState().clear(sessionID);
   },
 
   removeAllForTeam: async (teamID) => {
@@ -368,6 +379,10 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
         focusedSessionID: focusAfterSessionRemove(s.focusedSessionID, removedSessionIDs),
       };
     });
+    // Clear cached usage for every removed session (FIX 2).
+    for (const s of teamSessions) {
+      useUsage.getState().clear(s.sessionID);
+    }
   },
 
   writeToTerminal: async (sessionID, data) => {
@@ -411,6 +426,43 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
     return replaceInFlight.run(sessionID, () =>
       replaceTerminalFromBackend(get, set, teamID, sessionID, "resumeTerminal", ResumeTerminal)
     );
+  },
+
+  switchTerminal: async (teamID, sessionID, targetCLI) => {
+    // SwitchTerminal CLOSES the old PTY and spawns a fresh one under a new UUID
+    // with a DIFFERENT cliType, so it's a replace like restart/resume — graft the
+    // new sessionID into the slot (and close it if the slot was removed mid-flight).
+    // Coalesce overlapping switches on this sessionID so a double-trigger can't
+    // orphan a second backend PTY (matching restart/resume, Gemini PR #76).
+    return replaceInFlight.run(sessionID, async () => {
+      const newSessionID = await replaceTerminalFromBackend(
+        get,
+        set,
+        teamID,
+        sessionID,
+        "switch",
+        (sid) => SwitchTerminal(sid, targetCLI)
+      );
+      // KEY DIFFERENCE from restart/resume: replaceSessionID preserves the OLD
+      // cliType, but a switch changes it. Overwrite the grafted row's cliType to
+      // the target CLI so the badge and switch dialog reflect the new agent. A
+      // no-op if the slot was closed mid-flight (newSessionID isn't tracked).
+      set((s) => ({
+        sessions: setTeamSessions(
+          s.sessions,
+          teamID,
+          (s.sessions[teamID] ?? []).map((t) =>
+            t.sessionID === newSessionID ? { ...t, cliType: targetCLI } : t
+          )
+        ),
+      }));
+      // The backend re-persisted this agent's CLIType (SwitchTerminal → UpsertAgent),
+      // so re-pull the team; otherwise a later grid-layout change would echo a stale
+      // team.agents to UpdateTeam and revert the switch. PTY is running, so a refresh
+      // failure must not fail the switch (Codex P2 #2).
+      await refreshTeamAfterTerminalChange(teamID, "[switch] refreshTeam failed:");
+      return newSessionID;
+    });
   },
 
   setCLISessionID: (sessionID, cliSessionID) => {

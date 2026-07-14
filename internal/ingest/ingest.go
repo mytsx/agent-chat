@@ -4,6 +4,8 @@
 // package only observes the CLI's session files.
 package ingest
 
+import "desktop/internal/usage"
+
 // Cursor records how far a session file has been ingested. JSONL adapters use
 // Offset (byte offset of the next unread line). The monolithic-JSON Gemini
 // adapter uses Count (number of messages already emitted) plus ModTime (the file
@@ -50,3 +52,11 @@ type SessionAdapter interface {
 // whether it was delivered. A false return (e.g. the hub is unavailable) makes
 // the watcher keep the cursor before this message so it is retried (#65).
 type EmitFunc func(content, timestamp string) bool
+
+// UsageParser is the optional per-CLI usage extractor. Adapters implement it to
+// surface a usage.Snapshot from the SAME session file they already parse for
+// messages, so the watcher can piggyback usage on the message poll tick without
+// a second watcher. Returning (nil, nil) means "no usage signal yet".
+type UsageParser interface {
+	ParseUsage(path string) (*usage.Snapshot, error)
+}

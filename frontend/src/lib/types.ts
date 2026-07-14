@@ -152,3 +152,33 @@ export interface VoiceStateEvent {
 // voice:transcript:<sessionID> event payload — the transcribed text (UI feedback
 // only; the text is already injected into the PTY by the backend).
 export type VoiceTranscriptEvent = string;
+
+// Usage / limits (#10, mirrors internal/usage.Status, .Window, .Snapshot)
+export type UsageStatus = 0 | 1 | 2 | 3; // Unknown | OK | Warn | Critical
+
+export interface UsageWindow {
+  usedPercent: number;
+  windowMinutes: number;
+  resetsAt: number; // epoch sec; 0 = unknown
+}
+
+export interface UsageSnapshot {
+  sessionID: string;
+  agentName?: string;
+  cli: CLIType;
+  kind: number; // 0 none | 1 percentLimit | 2 tokenCount
+  primary?: UsageWindow;
+  secondary?: UsageWindow;
+  planType?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheTokens?: number;
+  model?: string;
+  updatedAt: number;
+}
+
+// usage:updated event payload (mirrors app.go onUsage).
+export interface UsageUpdatedEvent {
+  snapshot: UsageSnapshot;
+  status: UsageStatus;
+}

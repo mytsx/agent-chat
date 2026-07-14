@@ -31,6 +31,7 @@ import (
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
+	"desktop/internal/usage"
 	"desktop/internal/validation"
 	"desktop/internal/voice"
 
@@ -73,6 +74,10 @@ type App struct {
 	teamStore     *team.Store
 	dataDir       string
 	worktreeLocks sync.Map // path → *sync.Mutex — per-path worktree lock
+	// settingsMu serializes the read-modify-write of settings.json so a threshold
+	// onBlur (SetUsageThresholds) racing a deferral toggle (SetDeferralEnabled) can't
+	// silently revert the other's field (Codex P3). Held across load+mutate+save.
+	settingsMu sync.Mutex
 	// promptLogN counts in-flight fire-and-forget user_prompt logging goroutines so
 	// a transcript read can drain them first and not miss a just-delivered prompt
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
@@ -118,6 +123,18 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize PTY manager
 	a.ptyManager = ptymgr.NewManager(func(sessionID string, data []byte) {
 		runtime.EventsEmit(a.ctx, "pty:output:"+sessionID, string(data))
+		// Reaktif limit-hit sinyali (#10): token-CLI'ları payda vermediği için PTY
+		// çıktısında "rate limit / 429 / usage limit reached" görülürse frontend'e
+		// bildir. Best-effort; Codex authoritative kaldıkça yalnız ek katman.
+		if usage.ScanRateLimitHit(data) {
+			// Gate the reactive limit-hit to real AI CLIs: a plain shell can echo
+			// "rate limit"/"429" as ordinary text and must not raise the switch
+			// suggestion. The GetSession lookup only runs after a (rare) scan match,
+			// so it adds no common-path cost.
+			if s := a.ptyManager.GetSession(sessionID); s != nil && isAICLIType(s.CLIType) {
+				runtime.EventsEmit(a.ctx, "usage:limit-hit", map[string]string{"sessionID": sessionID})
+			}
+		}
 	})
 
 	// Initialize orchestrator
@@ -830,14 +847,15 @@ func (a *App) agentConfigured(teamID, agentName string) bool {
 // signature is unchanged (Wails binding stable); it delegates to createTerminal
 // with no resume ID (fresh launch).
 func (a *App) CreateTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int) (string, error) {
-	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "")
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, "", "")
 }
 
 // createTerminal is the implementation. A non-empty resumeID with a resume-capable
 // CLI launches via cli.GetCommandResume (--resume <id>); otherwise a fresh
 // cli.GetCommand. Everything else (worktree, MCP config, ingest, startup prompt)
-// is identical to a fresh create (#40).
-func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
+// is identical to a fresh create (#40). handoffFrom (#10) is forwarded to the
+// startup prompt composition — see composeAgentPrompt's doc comment.
+func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID, handoffFrom string) (string, error) {
 	if err := validation.ValidateName(agentName); err != nil {
 		return "", fmt.Errorf("invalid agent name: %w", err)
 	}
@@ -1015,7 +1033,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	// (#65) — Copilot records the -i prompt as the first user message.
 	var copilotComposed string
 	if ct == cli.CLICopilot && agentName != "" {
-		copilotComposed = a.composeAgentPrompt(teamID, agentName, promptID, mode)
+		copilotComposed = a.composeAgentPrompt(teamID, agentName, promptID, mode, handoffFrom)
 		if copilotComposed != "" {
 			cmdArgs = append(cmdArgs, "-i", copilotComposed)
 			log.Printf("[STARTUP] Copilot: using -i flag, promptLen=%d", len(copilotComposed))
@@ -1178,7 +1196,8 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 				"sessionID":    sessionID,
 				"cliSessionID": id,
 			})
-		}, resumeSeed)
+		}, func(s *usage.Snapshot) { a.onUsage(s) }, // onUsage: stamp+evaluate+emit "usage:updated" (#10)
+			resumeSeed)
 		if isObserver {
 			// Claim-only: the watcher holds the observer's file claim (sibling
 			// same-cwd watchers skip it) but discards every message (#17/#65 P1).
@@ -1219,7 +1238,7 @@ func (a *App) createTerminal(teamID, agentName, workDir, cliType, promptID strin
 	}
 
 	// Send startup prompt in background
-	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, mode)
+	go a.sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, mode, handoffFrom)
 
 	return sessionID, nil
 }
@@ -1303,7 +1322,7 @@ func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 
 	log.Printf("[RESTART] Restarting terminal: agent=%s cli=%s team=%s", agentName, cliType, teamID)
 
-	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID)
+	newSessionID, err := a.createTerminal(teamID, agentName, workDir, cliType, promptID, false, slotIndex, resumeID, "")
 	if err != nil {
 		return "", err
 	}
@@ -1315,6 +1334,104 @@ func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 	}
 
 	return newSessionID, nil
+}
+
+// validSwitchTarget reports whether target is a sensible CLI to switch to from
+// current: a known AI CLI (join_room-capable) that differs from the current one.
+func validSwitchTarget(current, target string) bool {
+	if target == "" || target == current || !isAICLIType(target) {
+		return false
+	}
+	return true
+}
+
+// SwitchTerminal replaces a terminal that is hitting its usage limit with a fresh
+// one running targetCLI in the SAME slot and room (in-slot replace). Cross-CLI
+// resume is impossible, so the new session starts fresh; a handoff primer tells
+// it to take over and read room history. The old terminal is closed. Returns the
+// new session ID.
+func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
+	session := a.ptyManager.GetSession(sessionID)
+	if session == nil {
+		return "", fmt.Errorf("session bulunamadı: %s", sessionID)
+	}
+	if !validSwitchTarget(session.CLIType, targetCLI) {
+		return "", fmt.Errorf("geçersiz geçiş hedefi: %q → %q", session.CLIType, targetCLI)
+	}
+	// Preflight the target binary BEFORE closing the old PTY: the frontend filters to
+	// installed CLIs, but a CLI can vanish from PATH between detection and switch. Without
+	// this guard, closeTerminalInternal would kill the old terminal and createTerminal
+	// would then fail on the missing binary, leaving the user with no terminal (Codex P2).
+	cmdName, _ := cli.GetCommand(cli.CLIType(targetCLI))
+	if _, err := exec.LookPath(cmdName); err != nil {
+		return "", fmt.Errorf("hedef CLI '%s' kurulu değil (PATH'te bulunamadı)", targetCLI)
+	}
+	teamID := session.TeamID
+	agentName := session.AgentName
+	workDir := session.WorkDir
+	promptID := session.PromptID
+	slotIndex := session.SlotIndex
+	wtDir := session.WorktreeDir
+	wtRepo := session.WorktreeRepo
+	// Capture the OLD CLI type BEFORE closeTerminalInternal frees the session — the
+	// handoff primer names the CLI that hit its limit, not agentName (which the new
+	// terminal keeps, so passing agentName would make the note self-referential).
+	oldCLI := session.CLIType
+
+	// A manager/observer stays in the main repo; a worker keeps its worktree.
+	mainRepoRole := false
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			mainRepoRole = t.IsManagerAgent(agentName)
+		}
+		mainRepoRole = mainRepoRole || a.isObserverAgent(teamID, agentName)
+	}
+	workDir = restartWorkDir(mainRepoRole, workDir, wtDir, wtRepo)
+
+	// Close the old terminal (in-slot replace) but keep the worktree — the new CLI
+	// runs in the same dir.
+	if err := a.closeTerminalInternal(sessionID, false); err != nil {
+		return "", fmt.Errorf("eski terminal kapatılamadı: %w", err)
+	}
+
+	log.Printf("[SWITCH] agent=%s %s→%s team=%s slot=%d", agentName, session.CLIType, targetCLI, teamID, slotIndex)
+
+	// resumeID="" (cross-CLI resume impossible); handoffFrom=oldCLI injects the primer,
+	// naming the OLD CLI whose limit was hit (agentName is unchanged across the switch).
+	newID, err := a.createTerminal(teamID, agentName, workDir, targetCLI, promptID, false, slotIndex, "", oldCLI)
+	if err != nil {
+		return "", err
+	}
+	if s := a.ptyManager.GetSession(newID); s != nil && wtDir != "" {
+		s.WorktreeDir = wtDir
+		s.WorktreeRepo = wtRepo
+	}
+
+	// Persist the CLI change to the team config. createTerminal's own UpsertAgent
+	// updates the config on the non-worktree path, but its worktree-path guard skips
+	// the write for a worktree-backed agent (workDir points into the worktrees dir,
+	// origWorkDir is empty) — so without this the stored CLIType would stay the OLD
+	// one and reopening would lose the switch. Read the current config, flip only
+	// CLIType to targetCLI (preserving Role/WorkDir/SlotIndex/UseWorktree/PromptID),
+	// and re-upsert. Idempotent with createTerminal's own UpsertAgent (Codex P2 #3).
+	if teamID != "" {
+		if t, gerr := a.teamStore.Get(teamID); gerr == nil {
+			for _, cfg := range t.Agents {
+				if !strings.EqualFold(strings.TrimSpace(cfg.Name), strings.TrimSpace(agentName)) {
+					continue
+				}
+				// cfg is a copy, but we pass the MODIFIED copy to UpsertAgent — t itself
+				// is never persisted, so mutating a copy (not t.Agents[i]) is intentional
+				// and correct.
+				cfg.CLIType = targetCLI
+				if _, uerr := a.teamStore.UpsertAgent(teamID, cfg); uerr != nil {
+					log.Printf("[SWITCH] CLIType kalıcı hale getirilemedi (agent=%s team=%s): %v", agentName, teamID, uerr)
+				}
+				break
+			}
+		}
+	}
+	return newID, nil
 }
 
 // OpenTeamResult is one row returned by OpenTeamFromConfig: the agent it tried to
@@ -1401,7 +1518,7 @@ func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]
 		}
 		// resumeIDs[cfg.Name] is "" for a nil/absent entry (fresh). The picker filters
 		// sessions to the agent's configured CLI, so the id always matches cfg.CLIType.
-		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name])
+		sessionID, err := a.createTerminal(teamID, cfg.Name, cfg.WorkDir, cfg.CLIType, cfg.PromptID, cfg.UseWorktree, cfg.SlotIndex, resumeIDs[cfg.Name], "")
 		if err != nil {
 			res.Error = err.Error()
 			log.Printf("[TEAM] OpenTeamFromConfig: agent=%s team=%s failed: %v", cfg.Name, teamID, err)
@@ -1415,8 +1532,10 @@ func (a *App) openTeamFromConfig(teamID string, resumeIDs map[string]string) ([]
 
 // composeAgentPrompt builds the startup prompt for an agent without sending it.
 // agentMode (#17) is "manager", "observer", or "" and selects which role prompt
-// (if any) is appended and how the join instruction is framed.
-func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode string) string {
+// (if any) is appended and how the join instruction is framed. handoffFrom (#10)
+// is the name of a prior agent being replaced due to a CLI usage limit, or "" for
+// a normal (non-handoff) startup.
+func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode, handoffFrom string) string {
 	if agentName == "" {
 		return ""
 	}
@@ -1485,11 +1604,12 @@ func (a *App) composeAgentPrompt(teamID, agentName, promptID, agentMode string) 
 		roomSummary = doc.Text
 	}
 
-	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode)
+	return cli.ComposeStartupPrompt(string(basePrompt), string(globalPrompt), teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode, handoffFrom)
 }
 
-// sendStartupPrompt sends the initial prompt to a CLI agent
-func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, agentMode string) {
+// sendStartupPrompt sends the initial prompt to a CLI agent. handoffFrom (#10) is
+// forwarded to composeAgentPrompt — see its doc comment.
+func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID, agentMode, handoffFrom string) {
 	if cliType == "" || cliType == "shell" || cliType == "copilot" || agentName == "" {
 		return
 	}
@@ -1504,7 +1624,7 @@ func (a *App) sendStartupPrompt(sessionID, teamID, agentName, cliType, promptID,
 	idle := a.ptyManager.WaitForIdle(sessionID, 2*time.Second, 25*time.Second)
 	log.Printf("[STARTUP] WaitForIdle: cli=%s agent=%s idle=%v", cliType, agentName, idle)
 
-	composed := a.composeAgentPrompt(teamID, agentName, promptID, agentMode)
+	composed := a.composeAgentPrompt(teamID, agentName, promptID, agentMode, handoffFrom)
 	if composed == "" {
 		return
 	}
@@ -2750,6 +2870,10 @@ type appSettings struct {
 	// when true, notifications are held back while the user is typing in a
 	// terminal. Default false (inject immediately, never interrupt).
 	DeferralEnabled bool `json:"deferral_enabled"`
+	// Usage/limit uyarı eşikleri (#10). 0/aralık-dışı → usage.DefaultThresholds
+	// (85/95). SettingsModal'dan konfigüre edilir.
+	UsageWarnPercent float64 `json:"usage_warn_percent"`
+	UsageCritPercent float64 `json:"usage_crit_percent"`
 }
 
 func (a *App) loadAppSettings() appSettings {
@@ -2794,6 +2918,8 @@ func (a *App) GetDeferralEnabled() bool {
 
 // SetDeferralEnabled persists and immediately applies the deferral toggle.
 func (a *App) SetDeferralEnabled(enabled bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
 	s := a.loadAppSettings()
 	s.DeferralEnabled = enabled
 	if err := a.saveAppSettings(s); err != nil {
@@ -2803,6 +2929,47 @@ func (a *App) SetDeferralEnabled(enabled bool) error {
 		o.SetDeferralEnabled(enabled)
 	}
 	return nil
+}
+
+// GetUsageThresholds returns the persisted warn/critical cutoffs, normalized to
+// defaults when unset or out of range.
+func (a *App) GetUsageThresholds() usage.Thresholds {
+	s := a.loadAppSettings()
+	return usage.Thresholds{WarnPercent: s.UsageWarnPercent, CriticalPercent: s.UsageCritPercent}.Normalized()
+}
+
+// SetUsageThresholds persists the warn/critical cutoffs (normalized).
+func (a *App) SetUsageThresholds(warn, crit float64) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	n := usage.Thresholds{WarnPercent: warn, CriticalPercent: crit}.Normalized()
+	s := a.loadAppSettings()
+	s.UsageWarnPercent, s.UsageCritPercent = n.WarnPercent, n.CriticalPercent
+	return a.saveAppSettings(s)
+}
+
+// onUsage stamps a fresh snapshot, evaluates it against the current thresholds,
+// and pushes it to the frontend. Wired as the ingest watcher's onUsage callback.
+func (a *App) onUsage(snap *usage.Snapshot) {
+	if snap == nil || a.ctx == nil {
+		return
+	}
+	// The ingest watcher's final drain can call onUsage AFTER ptyManager.Close removed
+	// the session; a late parse landing after the frontend cleared the old session's
+	// usage would resurrect a dead row. If the session is gone, drop the snapshot (#10).
+	session := a.ptyManager.GetSession(snap.SessionID)
+	if session == nil {
+		return
+	}
+	// Stamp the agent name from the live session so the usage panel can tell two
+	// terminals on the same CLI apart (adapters can't know it — see B2/#10).
+	snap.AgentName = session.AgentName
+	snap.UpdatedAt = time.Now().Unix()
+	status := usage.Evaluate(*snap, a.GetUsageThresholds())
+	runtime.EventsEmit(a.ctx, "usage:updated", map[string]interface{}{
+		"snapshot": snap,
+		"status":   int(status),
+	})
 }
 
 // GetVoiceStatus reports voice config state for the Settings panel (no raw key).
@@ -2904,5 +3071,5 @@ func (a *App) ListAgentSessions(teamID, agentName string) []SessionInfo {
 // (resumeID), or fresh when resumeID is empty. Thin exported wrapper over the
 // Faz-1 internal createTerminal (#40 Faz-2). The resume picker calls this per agent.
 func (a *App) CreateTerminalResume(teamID, agentName, workDir, cliType, promptID string, useWorktree bool, slotIndex int, resumeID string) (string, error) {
-	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID)
+	return a.createTerminal(teamID, agentName, workDir, cliType, promptID, useWorktree, slotIndex, resumeID, "")
 }

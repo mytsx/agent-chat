@@ -9,6 +9,10 @@ import (
 // as background context, not as an instruction directed at them.
 const roomSummaryHeader = "## Önceki Session Özeti (bağlam)"
 
+// handoffHeader labels the handoff primer segment (#10) so agents read it as
+// background context, not as an instruction directed at them.
+const handoffHeader = "## Devralma Notu (bağlam)"
+
 // ComposeStartupPrompt builds the full startup prompt from multiple parts.
 //
 // Segment order: base → global → team charter → room summary (#29) → selected
@@ -23,7 +27,13 @@ const roomSummaryHeader = "## Önceki Session Özeti (bağlam)"
 // read_all_messages but is told not to send), or "" (a normal agent). A single
 // mode string is used rather than parallel bools so the manager/observer states
 // can never both be set.
-func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode string) string {
+//
+// handoffFrom (#10) is optional: when non-empty, it names the OLD CLI (e.g. "codex")
+// whose session hit its usage limit and is being replaced. A "Devralma Notu" segment
+// is injected after the room summary and before the selected prompt, telling the new
+// agent it is taking over and to read room history. (The agent name is unchanged
+// across a switch, so naming the CLI — not the agent — keeps the note non-self-referential.)
+func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, selectedPrompt, agentName, agentRole, teamName, agentMode, handoffFrom string) string {
 	var parts []string
 
 	// 1. Base prompt (always included)
@@ -46,6 +56,17 @@ func ComposeStartupPrompt(basePrompt, globalPrompt, teamPrompt, roomSummary, sel
 	hasSummary := strings.TrimSpace(roomSummary) != ""
 	if hasSummary {
 		parts = append(parts, roomSummaryHeader+"\n"+strings.TrimSpace(roomSummary))
+	}
+
+	// Handoff primer (#10): when this terminal replaces a CLI that hit its usage
+	// limit, tell the new agent it is taking over and to read room history. Its own
+	// labeled segment (like the summary) so it reads as background context, never as
+	// an instruction that overrides the charter.
+	if handoffFrom = strings.TrimSpace(handoffFrom); handoffFrom != "" {
+		parts = append(parts, fmt.Sprintf(
+			"%s\n⚠️ Önceki '%s' CLI oturumunun limiti doldu; görevi sen devralıyorsun. "+
+				"Oda geçmişini read_all_messages(since_id=0, limit=1000) ile oku ve kaldığı yerden devam et.",
+			handoffHeader, handoffFrom))
 	}
 
 	// 5. Selected prompt from library (optional)

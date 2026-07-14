@@ -5,6 +5,7 @@ import {team} from '../models';
 import {cli} from '../models';
 import {types} from '../models';
 import {main} from '../models';
+import {usage} from '../models';
 
 export function BroadcastToTeam(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
@@ -43,6 +44,8 @@ export function GetRoomTranscript(arg1:string):Promise<string>;
 export function GetTeam(arg1:string):Promise<team.Team>;
 
 export function GetTerminalSessions(arg1:string):Promise<Array<Record<string, string>>>;
+
+export function GetUsageThresholds():Promise<usage.Thresholds>;
 
 export function GetVoiceStatus():Promise<main.VoiceStatus>;
 
@@ -88,6 +91,8 @@ export function SetTeamManager(arg1:string,arg2:string):Promise<team.Team>;
 
 export function SetTeamObserver(arg1:string,arg2:string):Promise<team.Team>;
 
+export function SetUsageThresholds(arg1:number,arg2:number):Promise<void>;
+
 export function SetVoiceConfig(arg1:string):Promise<void>;
 
 export function StartBroadcastVoiceCapture():Promise<void>;
@@ -97,6 +102,8 @@ export function StartVoiceCapture(arg1:string):Promise<void>;
 export function StopBroadcastVoiceCapture():Promise<string>;
 
 export function StopVoiceCapture(arg1:string):Promise<void>;
+
+export function SwitchTerminal(arg1:string,arg2:string):Promise<string>;
 
 export function UpdatePrompt(arg1:string,arg2:string,arg3:string,arg4:string,arg5:Array<string>):Promise<prompt.Prompt>;
 

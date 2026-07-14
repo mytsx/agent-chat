@@ -1,10 +1,15 @@
 package ingest
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"desktop/internal/usage"
 )
 
 // claudeAdapter ingests Claude Code's JSONL session file:
@@ -73,4 +78,71 @@ func (claudeAdapter) SessionID(path string) string {
 		return ""
 	}
 	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
+type claudeUsageLine struct {
+	Type    string `json:"type"`
+	Message struct {
+		Model string `json:"model"`
+		Usage struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+// ParseUsage sums per-message token usage across the transcript (no denominator
+// exists — Claude's rateLimits field is null in practice) and returns the last
+// model. (nil,nil) when no usage line is present.
+func (claudeAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	snap := usage.Snapshot{CLI: "claude", Kind: usage.KindTokenCount}
+	found := false
+	// Reader-based scan (no line-size cap): a bufio.Scanner aborts with ErrTooLong
+	// on a record larger than its 8 MiB buffer (a big assistant/tool-result line),
+	// which would drop every later usage line and freeze the token total (#10).
+	r := bufio.NewReader(f)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		// Process each complete line, plus the final partial chunk at EOF. ReadBytes
+		// keeps the '\n'; json.Unmarshal ignores trailing whitespace.
+		// Fast-path: only lines carrying a usage block matter; skip the rest.
+		if len(line) > 0 && bytes.Contains(line, []byte(`"usage"`)) {
+			var cl claudeUsageLine
+			if json.Unmarshal(line, &cl) == nil {
+				u := cl.Message.Usage
+				if u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadInputTokens != 0 || u.CacheCreationInputTokens != 0 {
+					found = true
+					snap.InputTokens += u.InputTokens
+					snap.OutputTokens += u.OutputTokens
+					snap.CacheTokens += u.CacheReadInputTokens + u.CacheCreationInputTokens
+					if cl.Message.Model != "" {
+						snap.Model = cl.Message.Model
+					}
+				}
+			}
+		}
+		if rerr != nil {
+			// io.EOF: final chunk processed above. A genuine mid-stream read error
+			// shouldn't wipe a good earlier snapshot — surface it only if nothing
+			// was found.
+			if rerr != io.EOF && !found {
+				return nil, rerr
+			}
+			break
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	return &snap, nil
 }

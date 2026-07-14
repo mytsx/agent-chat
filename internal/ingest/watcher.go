@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"desktop/internal/usage"
 )
 
 // isCLIExitCommand reports whether content is exactly one of the graceful-exit
@@ -39,6 +41,12 @@ const pollInterval = 700 * time.Millisecond
 // stopDrainBudget bounds how long StopAll waits for watchers' final drains to
 // deliver before the caller (shutdown) proceeds to snapshot the rooms (#65).
 const stopDrainBudget = 2 * time.Second
+
+// usageParseInterval throttles the usage-piggyback re-read (see run's
+// discoverAndPoll): an active session's file changes on nearly every poll
+// tick, so without a floor a multi-MB rollout would be re-scanned every
+// pollInterval (700ms) just to extract usage (#10).
+const usageParseInterval = 2 * time.Second
 
 // pollOnce performs one ingest tick: parse new user messages from path starting
 // at startCur, suppress any that match a recorded self-injection, emit the rest,
@@ -113,6 +121,10 @@ func New() *Manager {
 // exited is a channel that closes when the terminal's PTY process dies (e.g. the
 // user typed /exit inside the CLI) so the watcher stops even without an explicit
 // StopSession; nil means "no PTY-death signal" (#65).
+// onUsage, when non-nil and ad implements UsageParser, receives a fresh
+// usage.Snapshot (SessionID pre-filled) piggybacked on the message-poll tick, at
+// most once per usageParseInterval. A nil onUsage (or an adapter that doesn't
+// implement UsageParser) skips usage parsing entirely (#10).
 // resume, when non-nil, makes the watcher SKIP content already present in the
 // CLI's existing transcript on RESUME (#40): a CLI that appends to its prior
 // ID-keyed file (Copilot) would otherwise be read from offset 0 and re-log every
@@ -121,7 +133,7 @@ func New() *Manager {
 // Codex) is unaffected and starts fresh. resume.Cur is snapshotted at spawn —
 // before the resumed CLI writes — so a prompt typed right after resume (which
 // lands past the snapshot) is still ingested, not skipped (Codex P2-round2).
-func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), resume *ResumeSeed) {
+func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), onUsage func(*usage.Snapshot), resume *ResumeSeed) {
 	if m == nil || ad == nil || sessionID == "" || emit == nil {
 		return
 	}
@@ -134,16 +146,17 @@ func (m *Manager) StartSession(sessionID string, ad SessionAdapter, cwd string, 
 	m.sessions[sessionID] = s
 	m.mu.Unlock()
 
-	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit, onSessionID, resume)
+	go m.run(s, ad, cwd, spawnedAtUnixNano, ready, exited, emit, onSessionID, onUsage, resume)
 }
 
-func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), resume *ResumeSeed) {
+func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNano int64, ready func() bool, exited <-chan struct{}, emit EmitFunc, onSessionID func(id string), onUsage func(*usage.Snapshot), resume *ResumeSeed) {
 	defer close(s.done)  // registered first → runs LAST (after finish), so a StopAll
 	defer m.finish(s.id) //   waiter sees a fully cleaned-up session.
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	var path string
 	var cur Cursor
+	var lastUsageParse time.Time
 	// em discards every message when the session is muted (observer claim-only),
 	// otherwise delegates to the real emit (#17/#65).
 	em := func(content, ts string) bool {
@@ -196,6 +209,26 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 			return
 		}
 		cur = pollOnce(ad, path, cur, s.fp, em)
+
+		// Usage piggyback: after the message poll, if this adapter can extract usage,
+		// re-read the file at most every usageParseInterval and hand a fresh snapshot to
+		// onUsage. Throttled so an active session (file changes every tick) doesn't
+		// re-scan a multi-MB rollout on every 700ms poll (spec §4). Skipped entirely
+		// while muted (observer): an observer terminal is the user's private space
+		// (#17), so its usage must not be parsed or emitted either, same as its
+		// messages.
+		up, canUsage := ad.(UsageParser)
+		if canUsage && onUsage != nil && path != "" && !s.muted.Load() {
+			if lastUsageParse.IsZero() || time.Since(lastUsageParse) >= usageParseInterval {
+				lastUsageParse = time.Now()
+				if snap, uerr := up.ParseUsage(path); uerr != nil {
+					log.Printf("[USAGE] parse error (%s): %v", path, uerr)
+				} else if snap != nil {
+					snap.SessionID = s.id
+					onUsage(snap)
+				}
+			}
+		}
 	}
 	for {
 		select {

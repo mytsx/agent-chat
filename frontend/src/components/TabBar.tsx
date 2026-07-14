@@ -4,6 +4,7 @@ import { useTerminals } from "../store/useTerminals";
 import { Team } from "../lib/types";
 import RoomCharterModal from "./RoomCharterModal";
 import RoomSummaryModal from "./RoomSummaryModal";
+import UsagePanelModal from "./UsagePanelModal";
 
 export default function TabBar() {
   const {
@@ -20,6 +21,7 @@ export default function TabBar() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
   const [summaryRoom, setSummaryRoom] = useState<string | null>(null);
+  const [showUsage, setShowUsage] = useState(false);
   const [savingTeamID, setSavingTeamID] = useState<string | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   // Track the toast auto-dismiss timer so a rapid second save cancels the first
@@ -154,7 +156,18 @@ export default function TabBar() {
         +
       </button>
 
+      <button
+        className="tab-add"
+        title="Kullanım paneli (tüm agent'ların usage'ı)"
+        aria-label="Kullanım paneli"
+        onClick={() => setShowUsage(true)}
+      >
+        📊
+      </button>
+
       {saveMsg && <span className="tab-save-msg">{saveMsg}</span>}
+
+      {showUsage && <UsagePanelModal onClose={() => setShowUsage(false)} />}
 
       {showCreate && (
         <RoomCharterModal

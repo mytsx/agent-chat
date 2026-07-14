@@ -78,6 +78,10 @@ export function GetTerminalSessions(arg1) {
   return window['go']['main']['App']['GetTerminalSessions'](arg1);
 }
 
+export function GetUsageThresholds() {
+  return window['go']['main']['App']['GetUsageThresholds']();
+}
+
 export function GetVoiceStatus() {
   return window['go']['main']['App']['GetVoiceStatus']();
 }
@@ -166,6 +170,10 @@ export function SetTeamObserver(arg1, arg2) {
   return window['go']['main']['App']['SetTeamObserver'](arg1, arg2);
 }
 
+export function SetUsageThresholds(arg1, arg2) {
+  return window['go']['main']['App']['SetUsageThresholds'](arg1, arg2);
+}
+
 export function SetVoiceConfig(arg1) {
   return window['go']['main']['App']['SetVoiceConfig'](arg1);
 }
@@ -184,6 +192,10 @@ export function StopBroadcastVoiceCapture() {
 
 export function StopVoiceCapture(arg1) {
   return window['go']['main']['App']['StopVoiceCapture'](arg1);
+}
+
+export function SwitchTerminal(arg1, arg2) {
+  return window['go']['main']['App']['SwitchTerminal'](arg1, arg2);
 }
 
 export function UpdatePrompt(arg1, arg2, arg3, arg4, arg5) {

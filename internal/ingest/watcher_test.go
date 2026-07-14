@@ -165,7 +165,7 @@ func TestStartSession_FiresOnSessionID(t *testing.T) {
 			case got <- id:
 			default:
 			}
-		}, nil)
+		}, nil, nil)
 	defer m.StopSession("s1")
 
 	select {
@@ -230,7 +230,7 @@ func TestStartSession_ResumeSeed_SkipsExistingOnSameFile(t *testing.T) {
 	var mu sync.Mutex
 	var got []string
 	// Seed past offset 2 (old-1, old-2) on the SAME discovered path.
-	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil, nil,
 		&ResumeSeed{Path: "events.jsonl", Cur: Cursor{Offset: 2}})
 	defer m.StopSession("s1")
 
@@ -253,7 +253,7 @@ func TestStartSession_ResumeSeed_IgnoredOnDifferentFile(t *testing.T) {
 	var mu sync.Mutex
 	var got []string
 	// Seed references the OLD file; discovery returns a different (new) file.
-	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil,
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, truthyEmit(&got, &mu), nil, nil,
 		&ResumeSeed{Path: "old-file.jsonl", Cur: Cursor{Offset: 2}})
 	defer m.StopSession("s1")
 
@@ -271,7 +271,7 @@ func TestStartSession_ResumeSeed_IgnoredOnDifferentFile(t *testing.T) {
 func TestStopAndWait_StopsAndReleasesClaim(t *testing.T) {
 	m := New()
 	ad := &fakeAdapter{}
-	m.StartSession("s1", ad, "cwd", 0, nil, nil, func(string, string) bool { return true }, nil, nil)
+	m.StartSession("s1", ad, "cwd", 0, nil, nil, func(string, string) bool { return true }, nil, nil, nil)
 
 	// Wait for the watcher to discover + claim "fake".
 	deadline := time.Now().Add(2 * time.Second)
