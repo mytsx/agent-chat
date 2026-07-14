@@ -119,6 +119,12 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize PTY manager
 	a.ptyManager = ptymgr.NewManager(func(sessionID string, data []byte) {
 		runtime.EventsEmit(a.ctx, "pty:output:"+sessionID, string(data))
+		// Reaktif limit-hit sinyali (#10): token-CLI'ları payda vermediği için PTY
+		// çıktısında "rate limit / 429 / usage limit reached" görülürse frontend'e
+		// bildir. Best-effort; Codex authoritative kaldıkça yalnız ek katman.
+		if usage.ScanRateLimitHit(string(data)) {
+			runtime.EventsEmit(a.ctx, "usage:limit-hit", map[string]string{"sessionID": sessionID})
+		}
 	})
 
 	// Initialize orchestrator
@@ -1318,6 +1324,66 @@ func (a *App) restartInternal(sessionID, resumeID string) (string, error) {
 	}
 
 	return newSessionID, nil
+}
+
+// validSwitchTarget reports whether target is a sensible CLI to switch to from
+// current: a known AI CLI (join_room-capable) that differs from the current one.
+func validSwitchTarget(current, target string) bool {
+	if target == "" || target == current || !isAICLIType(target) {
+		return false
+	}
+	return true
+}
+
+// SwitchTerminal replaces a terminal that is hitting its usage limit with a fresh
+// one running targetCLI in the SAME slot and room (in-slot replace). Cross-CLI
+// resume is impossible, so the new session starts fresh; a handoff primer tells
+// it to take over and read room history. The old terminal is closed. Returns the
+// new session ID.
+func (a *App) SwitchTerminal(sessionID, targetCLI string) (string, error) {
+	session := a.ptyManager.GetSession(sessionID)
+	if session == nil {
+		return "", fmt.Errorf("session bulunamadı: %s", sessionID)
+	}
+	if !validSwitchTarget(session.CLIType, targetCLI) {
+		return "", fmt.Errorf("geçersiz geçiş hedefi: %q → %q", session.CLIType, targetCLI)
+	}
+	teamID := session.TeamID
+	agentName := session.AgentName
+	workDir := session.WorkDir
+	promptID := session.PromptID
+	slotIndex := session.SlotIndex
+	wtDir := session.WorktreeDir
+	wtRepo := session.WorktreeRepo
+
+	// A manager/observer stays in the main repo; a worker keeps its worktree.
+	mainRepoRole := false
+	if teamID != "" {
+		if t, err := a.teamStore.Get(teamID); err == nil {
+			mainRepoRole = t.IsManagerAgent(agentName)
+		}
+		mainRepoRole = mainRepoRole || a.isObserverAgent(teamID, agentName)
+	}
+	workDir = restartWorkDir(mainRepoRole, workDir, wtDir, wtRepo)
+
+	// Close the old terminal (in-slot replace) but keep the worktree — the new CLI
+	// runs in the same dir.
+	if err := a.closeTerminalInternal(sessionID, false); err != nil {
+		return "", fmt.Errorf("eski terminal kapatılamadı: %w", err)
+	}
+
+	log.Printf("[SWITCH] agent=%s %s→%s team=%s slot=%d", agentName, session.CLIType, targetCLI, teamID, slotIndex)
+
+	// resumeID="" (cross-CLI resume impossible); handoffFrom=agentName injects the primer.
+	newID, err := a.createTerminal(teamID, agentName, workDir, targetCLI, promptID, false, slotIndex, "", agentName)
+	if err != nil {
+		return "", err
+	}
+	if s := a.ptyManager.GetSession(newID); s != nil && wtDir != "" {
+		s.WorktreeDir = wtDir
+		s.WorktreeRepo = wtRepo
+	}
+	return newID, nil
 }
 
 // OpenTeamResult is one row returned by OpenTeamFromConfig: the agent it tried to
