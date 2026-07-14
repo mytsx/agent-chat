@@ -16,3 +16,11 @@ func AdapterFor(cliType string) SessionAdapter {
 		return nil
 	}
 }
+
+// Compile-time checks: every AI-CLI adapter implements UsageParser (#10).
+var (
+	_ UsageParser = codexAdapter{}
+	_ UsageParser = claudeAdapter{}
+	_ UsageParser = copilotAdapter{}
+	_ UsageParser = geminiAdapter{}
+)
