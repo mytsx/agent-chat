@@ -1,16 +1,16 @@
 import { useState } from "react";
-import { SwitchTerminal } from "../../wailsjs/go/main/App";
 import { CLIType } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 const ALL_TARGETS: CLIType[] = ["codex", "claude", "copilot", "gemini"];
 
 export default function SwitchDialog({
-  sessionID,
   currentCLI,
+  onSwitch,
   onClose,
 }: {
-  sessionID: string;
   currentCLI: CLIType;
+  onSwitch: (targetCLI: CLIType) => Promise<string>;
   onClose: () => void;
 }) {
   const targets = ALL_TARGETS.filter((c) => c !== currentCLI);
@@ -21,10 +21,10 @@ export default function SwitchDialog({
     setBusy(true);
     setErr("");
     try {
-      await SwitchTerminal(sessionID, target);
+      await onSwitch(target);
       onClose();
     } catch (e) {
-      setErr(String(e));
+      setErr(errorToString(e));
       setBusy(false);
     }
   };

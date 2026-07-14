@@ -24,10 +24,11 @@ interface Props {
   onRemove?: () => void;
   onRestart?: () => void;
   onResume?: () => void;
+  onSwitch?: (targetCLI: CLIType) => Promise<string>;
   canResume?: boolean;
 }
 
-export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus, onRemove, onRestart, onResume, canResume }: Props) {
+export default function TerminalPane({ sessionID, agentName, cliType, isFocused, onToggleFocus, onRemove, onRestart, onResume, onSwitch, canResume }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -423,10 +424,10 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         role="region"
         aria-label={`${terminalLabel} terminal session`}
       />
-      {switching && cliType && cliType !== "shell" && (
+      {switching && cliType && cliType !== "shell" && onSwitch && (
         <SwitchDialog
-          sessionID={sessionID}
           currentCLI={cliType}
+          onSwitch={onSwitch}
           onClose={() => setSwitching(false)}
         />
       )}

@@ -123,7 +123,13 @@ func (a *App) startup(ctx context.Context) {
 		// çıktısında "rate limit / 429 / usage limit reached" görülürse frontend'e
 		// bildir. Best-effort; Codex authoritative kaldıkça yalnız ek katman.
 		if usage.ScanRateLimitHit(string(data)) {
-			runtime.EventsEmit(a.ctx, "usage:limit-hit", map[string]string{"sessionID": sessionID})
+			// Gate the reactive limit-hit to real AI CLIs: a plain shell can echo
+			// "rate limit"/"429" as ordinary text and must not raise the switch
+			// suggestion. The GetSession lookup only runs after a (rare) scan match,
+			// so it adds no common-path cost.
+			if s := a.ptyManager.GetSession(sessionID); s != nil && isAICLIType(s.CLIType) {
+				runtime.EventsEmit(a.ctx, "usage:limit-hit", map[string]string{"sessionID": sessionID})
+			}
 		}
 	})
 

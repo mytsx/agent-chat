@@ -163,7 +163,7 @@ function readSavedCustomLayouts(): Record<string, LayoutItem[]> {
 
 export default function TerminalGrid() {
   const { teams, activeTeamID, updateTeam } = useTeams();
-  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal } = useTerminals();
+  const { sessions, focusedSessionID, toggleFocusSession, setFocusedSession, loadCLIs, removeTerminal, restartTerminal, resumeTerminal, switchTerminal } = useTerminals();
   const [showCustomSetup, setShowCustomSetup] = useState(false);
   const [openModal, setOpenModal] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -279,6 +279,9 @@ export default function TerminalGrid() {
           resumeTerminal(actionTeamID, session.sessionID).catch((err) =>
             reportTerminalActionFailure("resume", err)
           )
+        }
+        onSwitch={(targetCLI) =>
+          switchTerminal(actionTeamID, session.sessionID, targetCLI)
         }
         canResume={!!session.cliSessionID}
       />

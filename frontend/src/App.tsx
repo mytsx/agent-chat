@@ -138,6 +138,7 @@ function AppContent() {
         useTerminals.getState().setCLISessionID(data.sessionID, data.cliSessionID);
       });
       EventsOn("usage:updated", (data: UsageUpdatedEvent) => {
+        if (!data?.snapshot) return;
         useUsage.getState().applySnapshot(data);
       });
       EventsOn("usage:limit-hit", (data: { sessionID: string }) => {
