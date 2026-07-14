@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -38,7 +39,7 @@ func resolveFFmpeg() string {
 		return p
 	}
 	for _, p := range commonFFmpegPaths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode().Perm()&0111 != 0 {
 			return p
 		}
 	}
@@ -67,11 +68,13 @@ func ffmpegArgs(deviceSpec, outPath string) []string {
 }
 
 type ffmpegRecorder struct {
+	mu         sync.Mutex
 	bin        string
 	deviceSpec string
 	outPath    string
 	cmd        *exec.Cmd
 	stderr     bytes.Buffer
+	stopped    bool
 }
 
 // NewFFmpegRecorder returns a Recorder writing to a unique temp WAV under dataDir.
@@ -101,20 +104,31 @@ func (r *ffmpegRecorder) Start(ctx context.Context) error {
 // hung process. Start does not bind ctx so a cancel can't truncate the file
 // mid-finalize; Stop is the deliberate end.
 func (r *ffmpegRecorder) Stop() ([]byte, error) {
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("kayıt zaten durduruldu")
+	}
 	if r.cmd == nil || r.cmd.Process == nil {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("kayıt başlatılmadı")
 	}
-	_ = r.cmd.Process.Signal(os.Interrupt)
+	r.stopped = true
+	cmd := r.cmd
+	outPath := r.outPath
+	r.mu.Unlock()
+
+	_ = cmd.Process.Signal(os.Interrupt)
 	done := make(chan struct{})
-	go func() { _ = r.cmd.Wait(); close(done) }()
+	go func() { _ = cmd.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		_ = r.cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		<-done
 	}
-	defer os.Remove(r.outPath)
-	wav, err := os.ReadFile(r.outPath)
+	defer os.Remove(outPath)
+	wav, err := os.ReadFile(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("WAV okunamadı (%v) — ffmpeg: %s", err, tail(r.stderr.String(), 400))
 	}
