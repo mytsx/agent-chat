@@ -103,7 +103,8 @@ func getConfigPath(cliType CLIType) (string, error) {
 // upsertCodexMCPConfig updates Codex MCP config using `codex mcp` subcommands.
 // Codex uses TOML config; we delegate write/merge behavior to Codex CLI itself.
 func upsertCodexMCPConfig(dataDir, roomName string) error {
-	if _, err := exec.LookPath("codex"); err != nil {
+	codexPath, err := exec.LookPath("codex")
+	if err != nil {
 		// Codex is not installed; nothing to configure.
 		return nil
 	}
@@ -114,7 +115,7 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 	}
 
 	// Best-effort cleanup of previous entry.
-	removeCmd := exec.Command("codex", "mcp", "remove", "agent-chat")
+	removeCmd := exec.Command(codexPath, "mcp", "remove", "agent-chat")
 	if out, err := removeCmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		msgLower := strings.ToLower(msg)
@@ -129,7 +130,7 @@ func upsertCodexMCPConfig(dataDir, roomName string) error {
 	}
 	args = append(args, "--", GetMCPBinaryPath(dataDir))
 
-	addCmd := exec.Command("codex", args...)
+	addCmd := exec.Command(codexPath, args...)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
@@ -153,8 +154,11 @@ func upsertMCPConfig(configPath string, entry mcpServerEntry, forceUpdate bool) 
 			backupPath := configPath + ".bak"
 			// Preserve the original file's permissions on the backup: CLI config files
 			// (e.g. ~/.claude.json) can hold API keys/tokens at 0600, so a hardcoded
-			// 0644 backup would widen access and leak secrets.
-			os.WriteFile(backupPath, data, writeMode)
+			// 0644 backup would widen access and leak secrets. Fail loudly if the backup
+			// can't be written rather than silently overwriting a malformed config.
+			if err := os.WriteFile(backupPath, data, writeMode); err != nil {
+				return fmt.Errorf("backup malformed config %s: %w", backupPath, err)
+			}
 			config = make(map[string]any)
 		}
 	} else if !os.IsNotExist(err) {
