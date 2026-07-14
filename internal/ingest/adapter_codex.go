@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -187,38 +188,48 @@ func (codexAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 
 	snap := usage.Snapshot{CLI: "codex", Kind: usage.KindPercentLimit}
 	found := false
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // long JSON lines
-	for sc.Scan() {
+	// Reader-based scan (no line-size cap) mirrors readCompleteJSONLines: a
+	// bufio.Scanner would abort with ErrTooLong on a record larger than its 8 MiB
+	// buffer and lose every later (small) rate_limits line, silently freezing usage
+	// tracking for the rest of the session (#10). ReadBytes has no such cap.
+	r := bufio.NewReader(f)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		// Process each complete line, plus the final partial chunk at EOF (a valid
+		// last record with no trailing newline). ReadBytes keeps the '\n';
+		// json.Unmarshal ignores trailing whitespace, so no trimming is needed.
 		// Fast-path: only event_msg lines carry usage; skip unmarshaling the rest.
-		line := sc.Bytes()
-		if !bytes.Contains(line, []byte(`"event_msg"`)) {
-			continue
-		}
-		var cl codexUsageLine
-		if json.Unmarshal(line, &cl) != nil || cl.Type != "event_msg" {
-			continue
-		}
-		switch cl.Payload.Type {
-		case "thread_settings_applied":
-			if cl.Payload.ThreadSettings.Model != "" {
-				snap.Model = cl.Payload.ThreadSettings.Model
-			}
-		case "token_count":
-			tu := cl.Payload.Info.TotalTokenUsage
-			if tu.InputTokens != 0 || tu.OutputTokens != 0 {
-				snap.InputTokens, snap.OutputTokens, snap.CacheTokens = tu.InputTokens, tu.OutputTokens, tu.CachedInputTokens
-			}
-			if rl := cl.Payload.RateLimits; rl != nil {
-				found = true
-				snap.Primary = toUsageWindow(rl.Primary)
-				snap.Secondary = toUsageWindow(rl.Secondary)
-				snap.PlanType = rl.PlanType
+		if len(line) > 0 && bytes.Contains(line, []byte(`"event_msg"`)) {
+			var cl codexUsageLine
+			if json.Unmarshal(line, &cl) == nil && cl.Type == "event_msg" {
+				switch cl.Payload.Type {
+				case "thread_settings_applied":
+					if cl.Payload.ThreadSettings.Model != "" {
+						snap.Model = cl.Payload.ThreadSettings.Model
+					}
+				case "token_count":
+					tu := cl.Payload.Info.TotalTokenUsage
+					if tu.InputTokens != 0 || tu.OutputTokens != 0 {
+						snap.InputTokens, snap.OutputTokens, snap.CacheTokens = tu.InputTokens, tu.OutputTokens, tu.CachedInputTokens
+					}
+					if rl := cl.Payload.RateLimits; rl != nil {
+						found = true
+						snap.Primary = toUsageWindow(rl.Primary)
+						snap.Secondary = toUsageWindow(rl.Secondary)
+						snap.PlanType = rl.PlanType
+					}
+				}
 			}
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
+		if rerr != nil {
+			// io.EOF: the final chunk (if any) was processed above. A genuine mid-
+			// stream read error shouldn't wipe a good earlier snapshot — return what
+			// we found; only surface the error when nothing was found.
+			if rerr != io.EOF && !found {
+				return nil, rerr
+			}
+			break
+		}
 	}
 	if !found {
 		return nil, nil

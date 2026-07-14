@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,30 +135,37 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	defer f.Close()
 	snap := usage.Snapshot{CLI: "copilot", Kind: usage.KindTokenCount}
 	found := false
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		// Fast-path: only lines carrying a usage block matter; skip unmarshaling the rest.
-		line := sc.Bytes()
-		if !bytes.Contains(line, []byte(`"usage"`)) {
-			continue
+	// Reader-based scan (no line-size cap): a bufio.Scanner aborts with ErrTooLong
+	// on a record larger than its 8 MiB buffer, which would drop the later
+	// session.shutdown usage line and lose the token total for the session (#10).
+	r := bufio.NewReader(f)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		// Process each complete line, plus the final partial chunk at EOF. ReadBytes
+		// keeps the '\n'; json.Unmarshal ignores trailing whitespace.
+		// Fast-path: only lines carrying a usage block matter; skip the rest.
+		if len(line) > 0 && bytes.Contains(line, []byte(`"usage"`)) {
+			var cl copilotUsageLine
+			if json.Unmarshal(line, &cl) == nil {
+				u := cl.Data.Usage
+				if u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 {
+					found = true
+					snap.InputTokens, snap.OutputTokens, snap.CacheTokens = u.InputTokens, u.OutputTokens, u.CacheReadTokens
+					if cl.Data.CurrentModel != "" {
+						snap.Model = cl.Data.CurrentModel
+					}
+				}
+			}
 		}
-		var cl copilotUsageLine
-		if json.Unmarshal(line, &cl) != nil {
-			continue
+		if rerr != nil {
+			// io.EOF: final chunk processed above. A genuine mid-stream read error
+			// shouldn't wipe a good earlier snapshot — surface it only if nothing
+			// was found.
+			if rerr != io.EOF && !found {
+				return nil, rerr
+			}
+			break
 		}
-		u := cl.Data.Usage
-		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 {
-			continue
-		}
-		found = true
-		snap.InputTokens, snap.OutputTokens, snap.CacheTokens = u.InputTokens, u.OutputTokens, u.CacheReadTokens
-		if cl.Data.CurrentModel != "" {
-			snap.Model = cl.Data.CurrentModel
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
 	}
 	if !found {
 		return nil, nil

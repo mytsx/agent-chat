@@ -49,7 +49,14 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const saveThresholds = async (w: number, c: number) => {
     try {
       await SetUsageThresholds(w, c);
+      // Re-fetch the normalized values (backend coerces 0/out-of-range → 85/95 and
+      // enforces crit ≥ warn) so the inputs reflect what was actually stored instead
+      // of the raw invalid entry lingering until the modal reopens (Gemini).
+      const t = await GetUsageThresholds();
+      setWarnPct(t?.warnPercent ?? 85);
+      setCritPct(t?.criticalPercent ?? 95);
     } catch (e) {
+      console.error("Eşik kaydedilemedi", e);
       setError(errorToString(e));
     }
   };

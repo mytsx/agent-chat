@@ -53,19 +53,21 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const [recSecs, setRecSecs] = useState(0);
   const terminalLabel = agentName || "Terminal";
 
-  // Usage-driven CLI switch (#10): the 🔄 button gets an attention style when this
-  // agent's usage is Critical (Codex used_percent ≥ eşik) or a reactive PTY
-  // limit-hit fired. The dialog is always openable manually; the style just
-  // surfaces "you probably want to switch now".
+  // Usage-driven CLI switch (#10): the 🔄 button gets an attention style once this
+  // agent's usage reaches Warn (yellow) or Critical (red), or a reactive PTY
+  // limit-hit fired. The spec's handoff trigger is Evaluate >= Warn, so a Warn
+  // status must surface the affordance too — not Critical only (Codex P2). The
+  // dialog is always openable manually; the style just surfaces "switch now".
   const usageEv = useUsageFor(sessionID);
   const limitHit = useUsage((s) => s.limitHits[sessionID]);
   // A reactive PTY limit-hit expires after 5min so a transient match (or a dismissed
   // dialog before the next render) doesn't pulse the 🔄 button forever (Codex P3 #6).
-  // Date.now() at render is fine — this is display logic, not a stored value. The
-  // authoritative Codex-critical signal (status === 3) is the other, non-expiring trigger.
+  // Date.now() at render is fine — this is display logic, not a stored value. A
+  // scheduled effect (below) re-renders/clears at the TTL boundary since xterm output
+  // writes don't re-render this component. UsageStatus: 0 Unknown,1 OK,2 Warn,3 Critical.
   const LIMIT_HIT_TTL = 5 * 60 * 1000;
   const recentHit = !!limitHit && Date.now() - limitHit < LIMIT_HIT_TTL;
-  const showSwitchSuggest = usageEv?.status === 3 || recentHit;
+  const showSwitchSuggest = (usageEv?.status ?? 0) >= 2 || recentHit;
   const [switching, setSwitching] = useState(false);
 
   useEffect(() => {
@@ -218,6 +220,22 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     const id = setInterval(() => setRecSecs((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, [voiceState]);
+
+  // Expire a reactive limit-hit at its TTL boundary (Codex P3). Date.now() in
+  // showSwitchSuggest is only re-read on render, and xterm output writes don't
+  // re-render this component — so without a scheduled clear the 🔄 attention pulse
+  // could persist past LIMIT_HIT_TTL. This effect both re-renders and drops the
+  // marker exactly when it expires.
+  useEffect(() => {
+    if (!limitHit) return;
+    const remaining = limitHit + LIMIT_HIT_TTL - Date.now();
+    if (remaining <= 0) {
+      useUsage.getState().clearLimitHit(sessionID);
+      return;
+    }
+    const id = setTimeout(() => useUsage.getState().clearLimitHit(sessionID), remaining);
+    return () => clearTimeout(id);
+  }, [limitHit, sessionID]);
 
   // Push-to-talk: hold to record, release to transcribe. onMouseLeave also stops
   // so a drag-off doesn't leave the mic recording. Backend enforces the single
