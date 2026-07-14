@@ -1,0 +1,71 @@
+import { useState } from "react";
+import { SwitchTerminal } from "../../wailsjs/go/main/App";
+import { CLIType } from "../lib/types";
+
+const ALL_TARGETS: CLIType[] = ["codex", "claude", "copilot", "gemini"];
+
+export default function SwitchDialog({
+  sessionID,
+  currentCLI,
+  onClose,
+}: {
+  sessionID: string;
+  currentCLI: CLIType;
+  onClose: () => void;
+}) {
+  const targets = ALL_TARGETS.filter((c) => c !== currentCLI);
+  const [target, setTarget] = useState<CLIType>(targets[0]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const doSwitch = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await SwitchTerminal(sessionID, target);
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3>⚠️ CLI Geçişi</h3>
+        <p className="form-hint">
+          '{currentCLI}' limitine yaklaşıyor. Aynı slotta yeni CLI ile devam et —
+          oda geçmişi ve devralma notu yeni agent'a aktarılır (cross-CLI resume
+          mümkün değil, yeni oturum başlar).
+        </p>
+        <div className="form-group">
+          <label htmlFor="switch-target">Hedef CLI</label>
+          <select
+            id="switch-target"
+            value={target}
+            onChange={(e) => setTarget(e.target.value as CLIType)}
+          >
+            {targets.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        {err && <p className="form-error">{err}</p>}
+        <div className="modal-actions">
+          <button className="btn" onClick={doSwitch} disabled={busy}>
+            {busy ? "Geçiliyor…" : "Geçişi onayla"}
+          </button>
+          <button className="btn btn-secondary" onClick={onClose} disabled={busy}>
+            Yoksay
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

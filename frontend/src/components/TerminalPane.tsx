@@ -7,6 +7,8 @@ import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } 
 import { CLIType, VoiceState } from "../lib/types";
 import { errorToString } from "../lib/errorText";
 import UsageBadge from "./UsageBadge";
+import SwitchDialog from "./SwitchDialog";
+import { useUsage, useUsageFor } from "../store/useUsage";
 
 // fmtRecTime formats elapsed recording seconds as m:ss for the live timer pill.
 function fmtRecTime(s: number): string {
@@ -49,6 +51,15 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const releasePendingRef = useRef(false);
   const [recSecs, setRecSecs] = useState(0);
   const terminalLabel = agentName || "Terminal";
+
+  // Usage-driven CLI switch (#10): the 🔄 button gets an attention style when this
+  // agent's usage is Critical (Codex used_percent ≥ eşik) or a reactive PTY
+  // limit-hit fired. The dialog is always openable manually; the style just
+  // surfaces "you probably want to switch now".
+  const usageEv = useUsageFor(sessionID);
+  const limitHit = useUsage((s) => s.limitHits[sessionID]);
+  const showSwitchSuggest = usageEv?.status === 3 || !!limitHit;
+  const [switching, setSwitching] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -371,6 +382,17 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               {"\u21BB"}
             </button>
           )}
+          {cliType && cliType !== "shell" && (
+            <button
+              type="button"
+              className={`terminal-btn-switch${showSwitchSuggest ? " attention" : ""}`}
+              onClick={() => setSwitching(true)}
+              aria-label={`${terminalLabel} i\u00E7in CLI ge\u00E7i\u015Fi`}
+              title="CLI ge\u00E7i\u015Fi (limit doldu\u011Funda ba\u015Fka CLI'a devret)"
+            >
+              {"\u{1F504}"}
+            </button>
+          )}
           {onToggleFocus && (
             <button
               type="button"
@@ -401,6 +423,13 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         role="region"
         aria-label={`${terminalLabel} terminal session`}
       />
+      {switching && cliType && cliType !== "shell" && (
+        <SwitchDialog
+          sessionID={sessionID}
+          currentCLI={cliType}
+          onClose={() => setSwitching(false)}
+        />
+      )}
     </div>
   );
 }

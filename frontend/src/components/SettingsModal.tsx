@@ -4,6 +4,8 @@ import {
   SetVoiceConfig,
   GetDeferralEnabled,
   SetDeferralEnabled,
+  GetUsageThresholds,
+  SetUsageThresholds,
 } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
 import { errorToString } from "../lib/errorText";
@@ -22,6 +24,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [deferralEnabled, setDeferralEnabled] = useState(false);
+  const [warnPct, setWarnPct] = useState(85);
+  const [critPct, setCritPct] = useState(95);
 
   useEffect(() => {
     GetVoiceStatus()
@@ -30,7 +34,25 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     GetDeferralEnabled()
       .then(setDeferralEnabled)
       .catch(() => {});
+    GetUsageThresholds()
+      .then((t) => {
+        setWarnPct(t.warnPercent ?? 85);
+        setCritPct(t.criticalPercent ?? 95);
+      })
+      .catch(() => {});
   }, []);
+
+  // Persist thresholds on each edit; the backend normalizes (0/out-of-range → 85/95,
+  // crit ≥ warn), so a transient invalid value is coerced rather than rejected.
+  const saveThresholds = async (w: number, c: number) => {
+    setWarnPct(w);
+    setCritPct(c);
+    try {
+      await SetUsageThresholds(w, c);
+    } catch (e) {
+      setError(errorToString(e));
+    }
+  };
 
   const handleDeferralToggle = async (checked: boolean) => {
     setDeferralEnabled(checked);
@@ -95,6 +117,46 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
             {deferralEnabled
               ? "✅ Aktif — terminalde yazı yazarken gelen bildirimler 12 saniyeye kadar beklenir; süre dolarsa ekranda gösterilir."
               : "ℹ️ Pasif (varsayılan) — bildirimler hemen terminale iletilir."}
+          </span>
+        </div>
+
+        <div
+          className="form-group"
+          style={{
+            borderTop: "1px solid var(--border)",
+            paddingTop: 12,
+            marginTop: 4,
+          }}
+        >
+          <label>Usage uyarı eşikleri (Codex %)</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <label>
+              Uyarı{" "}
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={warnPct}
+                onChange={(e) => saveThresholds(Number(e.target.value), critPct)}
+                style={{ width: 64 }}
+              />
+            </label>
+            <label>
+              Kritik{" "}
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={critPct}
+                onChange={(e) => saveThresholds(warnPct, Number(e.target.value))}
+                style={{ width: 64 }}
+              />
+            </label>
+          </div>
+          <span className="form-hint">
+            Codex limitin bu yüzdesine ulaşınca rozet sararır/kızarır ve geçiş
+            önerilir. Token-tabanlı CLI'lar (Claude/Copilot/Gemini) yalnız gösterim
+            amaçlıdır.
           </span>
         </div>
 
