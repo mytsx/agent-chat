@@ -1,6 +1,8 @@
 package sessionlog
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -201,5 +203,91 @@ func TestPersistAndReload(t *testing.T) {
 	}
 	if len(s2.ListSessions("r", "a")) != 1 {
 		t.Fatal("reload must restore persisted record")
+	}
+}
+
+func TestNewNormalizesLoadedSessionIDs(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{
+  "sid-from-key": {"session_id":"","room":"r","agent_name":"a","cli_type":"claude","cwd":"/c","first_seen":1,"last_seen":2},
+  "sid-authoritative": {"session_id":"stale-embedded","room":"r","agent_name":"a","cli_type":"codex","cwd":"/c","first_seen":3,"last_seen":4},
+  "": {"session_id":"empty-key","room":"r","agent_name":"a","cli_type":"claude","cwd":"/c","first_seen":5,"last_seen":6}
+}`)
+	if err := os.WriteFile(filepath.Join(dir, "session-history.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListSessions("r", "a")
+	if len(got) != 2 {
+		t.Fatalf("ListSessions len = %d, want 2", len(got))
+	}
+	ids := map[string]bool{}
+	for _, r := range got {
+		ids[r.SessionID] = true
+		if r.SessionID == "" || r.SessionID == "stale-embedded" || r.SessionID == "empty-key" {
+			t.Fatalf("loaded malformed session id in record: %+v", r)
+		}
+	}
+	if !ids["sid-from-key"] || !ids["sid-authoritative"] {
+		t.Fatalf("loaded ids = %v, want map-key ids", ids)
+	}
+}
+
+func TestRecordRollsBackWhenSaveFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("existing", "r", "a", "claude", "/old")
+
+	s.filePath = filepath.Join(dir, "missing", "session-history.json")
+	clock = 200
+	s.Record("new", "r", "a", "codex", "/new")
+	if got := s.ListSessions("r", "a"); len(got) != 1 || got[0].SessionID != "existing" {
+		t.Fatalf("failed new record was kept: %+v", got)
+	}
+
+	s.Record("existing", "r", "a", "copilot", "/changed")
+	got := s.ListSessions("r", "a")
+	if len(got) != 1 || got[0].CLIType != "claude" || got[0].Cwd != "/old" || got[0].LastSeen != 100 {
+		t.Fatalf("failed existing record update was not rolled back: %+v", got)
+	}
+}
+
+func TestTouchAndRenameRollBackWhenSaveFails(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := 100.0
+	s.now = func() float64 { return clock }
+	s.Record("sid", "old-room", "alice", "claude", "/c")
+
+	s.filePath = filepath.Join(dir, "missing", "session-history.json")
+	clock = 300
+	s.Touch("sid")
+	if got := s.ListSessions("old-room", "alice")[0]; got.LastSeen != 100 {
+		t.Fatalf("failed Touch was not rolled back: %+v", got)
+	}
+
+	s.TouchAt("sid", 400)
+	if got := s.ListSessions("old-room", "alice")[0]; got.LastSeen != 100 {
+		t.Fatalf("failed TouchAt was not rolled back: %+v", got)
+	}
+
+	s.RenameRoom("old-room", "new-room")
+	if got := s.ListSessions("old-room", "alice"); len(got) != 1 {
+		t.Fatalf("failed RenameRoom did not restore old room: %+v", got)
+	}
+	if got := s.ListSessions("new-room", "alice"); len(got) != 0 {
+		t.Fatalf("failed RenameRoom kept new room records: %+v", got)
 	}
 }

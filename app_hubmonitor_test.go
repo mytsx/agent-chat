@@ -3,6 +3,11 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -48,5 +53,46 @@ func TestHubShouldRestart(t *testing.T) {
 				t.Errorf("hubShouldRestart(%v, state) = %v, want %v", tt.shuttingDown, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStartHubTimeoutCleansUpProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell and signal-0 process probe")
+	}
+
+	dataDir := t.TempDir()
+	binPath := filepath.Join(dataDir, "mcp-server-bin")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho $$ > \"$AGENT_CHAT_DATA_DIR/fake-hub.pid\"\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatalf("fake hub binary yazılamadı: %v", err)
+	}
+
+	a := &App{dataDir: dataDir}
+	err := a.startHub()
+	if err == nil {
+		t.Fatal("startHub succeeded unexpectedly without hub.port")
+	}
+	if !strings.Contains(err.Error(), "hub.port") {
+		t.Fatalf("startHub error = %v, want hub.port timeout", err)
+	}
+
+	pidBytes, readErr := os.ReadFile(filepath.Join(dataDir, "fake-hub.pid"))
+	if readErr != nil {
+		t.Fatalf("fake hub pid okunamadı: %v", readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if parseErr != nil {
+		t.Fatalf("fake hub pid parse edilemedi: %v", parseErr)
+	}
+	proc, findErr := os.FindProcess(pid)
+	if findErr != nil {
+		t.Fatalf("fake hub process bulunamadı: %v", findErr)
+	}
+	t.Cleanup(func() {
+		_ = proc.Kill()
+		_, _ = proc.Wait()
+	})
+	if err := proc.Signal(syscall.Signal(0)); err == nil {
+		t.Fatalf("hub process pid=%d still alive after startHub timeout", pid)
 	}
 }

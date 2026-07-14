@@ -53,6 +53,26 @@ func TestWhisperTranscribeSendsMultipartAndParses(t *testing.T) {
 	}
 }
 
+func TestWhisperTranscribeTrimsAPIKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"text":"merhaba"}`)
+	}))
+	defer srv.Close()
+	old := whisperEndpoint
+	whisperEndpoint = srv.URL
+	defer func() { whisperEndpoint = old }()
+
+	if _, err := NewWhisperClient("  sk-xyz\n").Transcribe(context.Background(), []byte("RIFFfake")); err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if gotAuth != "Bearer sk-xyz" {
+		t.Errorf("auth = %q, want Bearer sk-xyz", gotAuth)
+	}
+}
+
 func TestWhisperTranscribeErrorStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -65,5 +85,12 @@ func TestWhisperTranscribeErrorStatus(t *testing.T) {
 
 	if _, err := NewWhisperClient("bad").Transcribe(context.Background(), []byte("x")); err == nil {
 		t.Fatal("expected error on 401")
+	}
+}
+
+func TestNewWhisperClientHasBoundedTimeout(t *testing.T) {
+	c := NewWhisperClient("key")
+	if c.http.Timeout <= 0 {
+		t.Fatal("WhisperClient HTTP client must carry a bounded timeout so a hung OpenAI response can't block forever")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,9 @@ func New(hubAddr string, logger *log.Logger) *HubClient {
 func DiscoverHubAddr(dataDir string) (string, error) {
 	// Check env var override first
 	if port := os.Getenv("AGENT_CHAT_HUB_PORT"); port != "" {
+		if err := validateHubPort("AGENT_CHAT_HUB_PORT", port); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("ws://localhost:%s/ws", port), nil
 	}
 
@@ -61,7 +65,24 @@ func DiscoverHubAddr(dataDir string) (string, error) {
 	}
 
 	port := strings.TrimSpace(string(data))
+	if err := validateHubPort(portPath, port); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("ws://localhost:%s/ws", port), nil
+}
+
+func validateHubPort(source, port string) error {
+	// Trim here (not just at the file-read site) so the AGENT_CHAT_HUB_PORT env var —
+	// which reaches this function untrimmed — tolerates stray surrounding whitespace.
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return fmt.Errorf("%s is empty", source)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid hub port from %s: %q (must be 1-65535)", source, port)
+	}
+	return nil
 }
 
 // Connect establishes the WebSocket connection to the hub.
@@ -115,6 +136,44 @@ func (c *HubClient) SetEventHandler(fn func(types.Event)) {
 	c.onEvent = fn
 }
 
+func (c *HubClient) forgetPending(id string) {
+	c.mu.Lock()
+	delete(c.pending, id)
+	c.mu.Unlock()
+}
+
+func ensureSuccess(operation string, resp *types.Response) error {
+	// Send returns (non-nil resp, nil err) on success and (nil, err) on failure, so a
+	// nil resp here should be unreachable — guard anyway so a future transport change
+	// surfaces a clear error instead of a nil-pointer panic.
+	if resp == nil {
+		return fmt.Errorf("%s failed: hub'dan boş yanıt", operation)
+	}
+	if resp.Success {
+		return nil
+	}
+	return fmt.Errorf("%s failed: %s", operation, resp.Error)
+}
+
+func decodeSuccessData[T any](operation string, resp *types.Response) (T, error) {
+	var data T
+	if err := ensureSuccess(operation, resp); err != nil {
+		return data, err
+	}
+	if err := json.Unmarshal(resp.Data, &data); err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+func (c *HubClient) sendExpectSuccess(operation string, req types.Request) error {
+	resp, err := c.Send(req)
+	if err != nil {
+		return err
+	}
+	return ensureSuccess(operation, resp)
+}
+
 // Send sends a request and waits for a response (synchronous RPC).
 func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	if req.ID == "" {
@@ -133,17 +192,13 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	c.mu.Unlock()
 
 	if conn == nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("not connected to hub")
 	}
 
 	data, err := json.Marshal(req)
 	if err != nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, err
 	}
 
@@ -156,9 +211,7 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	err = conn.WriteMessage(websocket.TextMessage, data)
 	c.mu.Unlock()
 	if err != nil {
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub write: %w", err)
 	}
 
@@ -169,11 +222,10 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 		}
 		return resp, nil
 	case <-time.After(defaultTimeout):
-		c.mu.Lock()
-		delete(c.pending, req.ID)
-		c.mu.Unlock()
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub request timeout (id=%s type=%s)", req.ID, req.Type)
 	case <-c.done:
+		c.forgetPending(req.ID)
 		return nil, fmt.Errorf("hub client closed")
 	}
 }
@@ -244,14 +296,7 @@ func (c *HubClient) Identify(clientType, agentName, room, authToken string) erro
 		"room":        room,
 		"auth_token":  authToken,
 	})
-	resp, err := c.Send(types.Request{Type: "identify", Data: data})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("identify failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("identify", types.Request{Type: "identify", Data: data})
 }
 
 // Subscribe subscribes to room events.
@@ -264,40 +309,19 @@ func (c *HubClient) Subscribe(rooms []string) error {
 // SetManager configures the allowed manager agent for a room.
 func (c *HubClient) SetManager(room, managerAgent string) error {
 	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
-	resp, err := c.Send(types.Request{Type: "set_manager", Room: room, Data: data})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("set_manager failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("set_manager", types.Request{Type: "set_manager", Room: room, Data: data})
 }
 
 // SetObservers configures the desktop-authorized observer set for a room (#17).
 // The hub rejects join_room with role "observer" for any agent not in this set.
 func (c *HubClient) SetObservers(room string, observers []string) error {
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
-	resp, err := c.Send(types.Request{Type: "set_observers", Room: room, Data: data})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("set_observers failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("set_observers", types.Request{Type: "set_observers", Room: room, Data: data})
 }
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
 func (c *HubClient) DeleteRoom(room string) error {
-	resp, err := c.Send(types.Request{Type: "delete_room", Room: room})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("delete_room failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("delete_room", types.Request{Type: "delete_room", Room: room})
 }
 
 // JoinRoom joins a room.
@@ -359,14 +383,7 @@ func logMessageData(to, content, timestamp string) json.RawMessage {
 // supplies the recipient ("all" or an agent name), the prompt content, and the
 // delivery-moment timestamp (#58 — pass "" to let the hub stamp it).
 func (c *HubClient) LogMessage(room, to, content, timestamp string) error {
-	resp, err := c.Send(types.Request{Type: "log_message", Room: room, Data: logMessageData(to, content, timestamp)})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("log_message failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("log_message", types.Request{Type: "log_message", Room: room, Data: logMessageData(to, content, timestamp)})
 }
 
 // ListAgents lists agents in a room.
@@ -390,14 +407,7 @@ func (c *HubClient) ClearRoom(room string) (*types.Response, error) {
 // synchronously on the hub. Returns once the hub has written them (buffered to
 // the OS, consistent with the hub's other persistence — not fsync'd) or on error.
 func (c *HubClient) ArchiveRoom(room string) error {
-	resp, err := c.Send(types.Request{Type: "archive_room", Room: room})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("archive_room failed: %s", resp.Error)
-	}
-	return nil
+	return c.sendExpectSuccess("archive_room", types.Request{Type: "archive_room", Room: room})
 }
 
 // SaveSession writes an immutable per-session snapshot of a room's full state
@@ -411,8 +421,8 @@ func (c *HubClient) SaveSession(room string) (count int, saved bool, err error) 
 	if err != nil {
 		return 0, false, err
 	}
-	if !resp.Success {
-		return 0, false, fmt.Errorf("save_session failed: %s", resp.Error)
+	if err := ensureSuccess("save_session", resp); err != nil {
+		return 0, false, err
 	}
 	var body struct {
 		Saved bool `json:"saved"`
@@ -445,13 +455,10 @@ func (c *HubClient) ListRoomsDetailed() ([]types.RoomSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("list_rooms_detailed failed: %s", resp.Error)
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Rooms []types.RoomSummary `json:"rooms"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("list_rooms_detailed", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Rooms, nil
@@ -463,13 +470,10 @@ func (c *HubClient) GetAgentsRaw(room string) (map[string]types.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("get_agents failed: %s", resp.Error)
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Agents map[string]types.Agent `json:"agents"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("get_agents", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Agents, nil
@@ -481,13 +485,10 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("get_messages_raw failed: %s", resp.Error)
-	}
-	var data struct {
+	data, err := decodeSuccessData[struct {
 		Messages []types.Message `json:"messages"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
+	}]("get_messages_raw", resp)
+	if err != nil {
 		return nil, err
 	}
 	return data.Messages, nil
@@ -496,11 +497,13 @@ func (c *HubClient) GetMessagesRaw(room string) ([]types.Message, error) {
 // ConnectWithRetry tries to connect with exponential backoff.
 func (c *HubClient) ConnectWithRetry(maxAttempts int) error {
 	backoff := 500 * time.Millisecond
+	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
 		err := c.Connect()
 		if err == nil {
 			return nil
 		}
+		lastErr = err
 		c.logger.Printf("Hub connect attempt %d/%d failed: %v (retrying in %v)", i+1, maxAttempts, err, backoff)
 
 		select {
@@ -513,6 +516,9 @@ func (c *HubClient) ConnectWithRetry(maxAttempts int) error {
 		if backoff > maxReconnect {
 			backoff = maxReconnect
 		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to connect to hub after %d attempts; last error: %w", maxAttempts, lastErr)
 	}
 	return fmt.Errorf("failed to connect to hub after %d attempts", maxAttempts)
 }

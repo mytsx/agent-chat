@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +28,178 @@ func TestResumeSupported(t *testing.T) {
 	}
 }
 
+func TestNVMNodeVersionDirsPreferSemanticNewest(t *testing.T) {
+	home := t.TempDir()
+	base := filepath.Join(home, ".nvm", "versions", "node")
+	for _, version := range []string{"v9.11.2", "v20.1.0", "v18.19.1"} {
+		if err := os.MkdirAll(filepath.Join(base, version, "bin"), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", version, err)
+		}
+	}
+
+	got := nvmNodeVersionDirs(home)
+	want := []string{
+		filepath.Join(base, "v20.1.0", "bin"),
+		filepath.Join(base, "v18.19.1", "bin"),
+		filepath.Join(base, "v9.11.2", "bin"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nvm dirs = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureFullPATHWithEmptyPATHDoesNotAddCurrentDirectory(t *testing.T) {
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	ensureFullPATH()
+
+	got := os.Getenv("PATH")
+	if got == "" {
+		t.Fatal("expected PATH to include discovered user bin directory")
+	}
+	pathSeparator := string(os.PathListSeparator)
+	if strings.HasPrefix(got, pathSeparator) || strings.HasSuffix(got, pathSeparator) {
+		t.Fatalf("PATH must not contain leading/trailing empty entries that resolve to the current directory: %q", got)
+	}
+	for _, entry := range filepath.SplitList(got) {
+		if entry == "" {
+			t.Fatalf("PATH must not contain empty entries that resolve to the current directory: %q", got)
+		}
+	}
+	if !strings.Contains(got, localBin) {
+		t.Fatalf("PATH = %q, want it to include %q", got, localBin)
+	}
+}
+
+func TestEnsureFullPATHRemovesUnsafeAndDuplicateEntriesFromExistingPATH(t *testing.T) {
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	first := filepath.Join(home, "first-bin")
+	second := filepath.Join(home, "second-bin")
+	pathSeparator := string(os.PathListSeparator)
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", strings.Join([]string{first, "", ".", "relative/bin", second, first, ""}, pathSeparator))
+
+	ensureFullPATH()
+
+	got := filepath.SplitList(os.Getenv("PATH"))
+	wantPrefix := []string{first, second}
+	if len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("PATH entries = %v, want prefix %v", got, wantPrefix)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, entry := range got {
+		if entry == "" {
+			t.Fatalf("PATH must not contain empty entries that resolve to the current directory: %q", os.Getenv("PATH"))
+		}
+		if !filepath.IsAbs(entry) {
+			t.Fatalf("PATH must not contain relative entries that can resolve through the current directory: %q", os.Getenv("PATH"))
+		}
+		if seen[entry] {
+			t.Fatalf("PATH must not contain duplicate entry %q: %q", entry, os.Getenv("PATH"))
+		}
+		seen[entry] = true
+	}
+	if !seen[localBin] {
+		t.Fatalf("PATH entries = %v, want discovered user bin %q", got, localBin)
+	}
+}
+
+// TestCleanPATHEntries exercises the sanitizer directly (deterministic, no
+// filesystem): empty/relative/duplicate entries are dropped, first-occurrence
+// order is preserved, and `changed` reports removals — including the degenerate
+// all-unsafe case that returns an empty slice (which the ensureFullPATH guard
+// must never turn into a blanked PATH).
+func TestCleanPATHEntries(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	tests := []struct {
+		name    string
+		in      string
+		want    []string
+		changed bool
+	}{
+		{"already clean, unchanged", "/usr/bin" + sep + "/bin", []string{"/usr/bin", "/bin"}, false},
+		{"empty entry dropped", sep + "/usr/bin" + sep, []string{"/usr/bin"}, true},
+		{"relative entries dropped", "/usr/bin" + sep + "." + sep + "relative/bin", []string{"/usr/bin"}, true},
+		{"duplicate dropped, order kept", "/a" + sep + "/b" + sep + "/a", []string{"/a", "/b"}, true},
+		{"all unsafe -> empty", "." + sep + "relative" + sep, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := cleanPATHEntries(tt.in)
+			if changed != tt.changed {
+				t.Errorf("changed = %v, want %v", changed, tt.changed)
+			}
+			// Join sidesteps the nil-vs-empty-slice distinction; order matters.
+			if strings.Join(got, sep) != strings.Join(tt.want, sep) {
+				t.Errorf("entries = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveUserShellFallsBackWhenSHELLIsInvalid(t *testing.T) {
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+
+	got := resolveUserShell()
+	if got == "" {
+		t.Fatal("resolveUserShell returned empty shell")
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("resolveUserShell returned non-existent shell %q: %v", got, err)
+	}
+	if got == os.Getenv("SHELL") {
+		t.Fatalf("resolveUserShell returned invalid SHELL %q", got)
+	}
+}
+
+func TestGetCommandShellUsesResolvedFallback(t *testing.T) {
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+
+	cmd, args := GetCommand(CLIShell)
+	if cmd == os.Getenv("SHELL") {
+		t.Fatalf("GetCommand(CLIShell) returned invalid SHELL %q", cmd)
+	}
+	if _, err := os.Stat(cmd); err != nil {
+		t.Fatalf("GetCommand(CLIShell) returned non-existent shell %q: %v", cmd, err)
+	}
+	if !reflect.DeepEqual(args, []string{"-l"}) {
+		t.Fatalf("args = %v, want [-l]", args)
+	}
+}
+
+func TestGetCommandResolvesAvailableCLIToAbsolutePath(t *testing.T) {
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	cmd, args := GetCommand(CLICodex)
+	if cmd != fakeCodex {
+		t.Fatalf("GetCommand(CLICodex) cmd = %q, want resolved absolute path %q", cmd, fakeCodex)
+	}
+	if !filepath.IsAbs(cmd) {
+		t.Fatalf("GetCommand(CLICodex) cmd should be absolute, got %q", cmd)
+	}
+	if !reflect.DeepEqual(args, []string{"--dangerously-bypass-approvals-and-sandbox"}) {
+		t.Fatalf("args = %v", args)
+	}
+}
+
 func TestGetCommandResume(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
 	const id = "7f32dcf3-11c6-4ca1-9461-fe8590e164e0"
 	tests := []struct {
 		name     string
@@ -52,5 +226,22 @@ func TestGetCommandResume(t *testing.T) {
 				t.Errorf("args = %v, want %v", gotArgs, tt.wantArgs)
 			}
 		})
+	}
+}
+
+func TestGetCommandResumeResolvesAvailableCLIToAbsolutePath(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	cmd, args := GetCommandResume(CLIClaude, "session-123")
+	if cmd != fakeClaude {
+		t.Fatalf("GetCommandResume(CLIClaude) cmd = %q, want resolved absolute path %q", cmd, fakeClaude)
+	}
+	if !reflect.DeepEqual(args, []string{"--resume", "session-123", "--dangerously-skip-permissions"}) {
+		t.Fatalf("args = %v", args)
 	}
 }

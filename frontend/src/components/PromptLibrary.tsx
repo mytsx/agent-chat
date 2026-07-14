@@ -3,10 +3,11 @@ import { usePrompts } from "../store/usePrompts";
 import { useTerminals } from "../store/useTerminals";
 import { useTeams } from "../store/useTeams";
 import { TerminalSession } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 import PromptEditor from "./PromptEditor";
 
 interface Props {
-  onSendPrompt?: (sessionID: string, content: string) => void;
+  onSendPrompt?: (sessionID: string, content: string) => Promise<void>;
 }
 
 export default function PromptLibrary({ onSendPrompt }: Props) {
@@ -15,6 +16,11 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
   const activeTeamID = useTeams((s) => s.activeTeamID);
   const sessions = useTerminals((s) => s.sessions);
   const [sendingPromptId, setSendingPromptId] = useState<string | null>(null);
+  const [sendingTargetID, setSendingTargetID] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [confirmDeletePromptId, setConfirmDeletePromptId] = useState<string | null>(null);
+  const [deletingPromptId, setDeletingPromptId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const teamSessions: TerminalSession[] =
     activeTeamID ? (sessions[activeTeamID] ?? []) : [];
@@ -23,16 +29,39 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
     loadPrompts();
   }, []);
 
-  const handleSend = (promptContent: string, session: TerminalSession) => {
-    onSendPrompt?.(session.sessionID, promptContent);
-    setSendingPromptId(null);
+  const handleSend = async (promptContent: string, session: TerminalSession) => {
+    if (!onSendPrompt || sendingTargetID) return;
+    setSendingTargetID(session.sessionID);
+    setSendError(null);
+    try {
+      await onSendPrompt(session.sessionID, promptContent);
+      setSendingPromptId(null);
+    } catch (e) {
+      setSendError(errorToString(e));
+    } finally {
+      setSendingTargetID(null);
+    }
+  };
+
+  const handleDelete = async (promptId: string) => {
+    if (deletingPromptId) return;
+    setDeletingPromptId(promptId);
+    setDeleteError(null);
+    try {
+      await deletePrompt(promptId);
+      setConfirmDeletePromptId(null);
+    } catch (e) {
+      setDeleteError(errorToString(e));
+    } finally {
+      setDeletingPromptId(null);
+    }
   };
 
   return (
     <div className="prompt-library">
       <div className="sidebar-section-header">
         <h3 className="sidebar-section-title">Prompts</h3>
-        <button className="btn-sm" onClick={() => openEditor()}>
+        <button className="btn-sm" type="button" onClick={() => openEditor()}>
           + New
         </button>
       </div>
@@ -68,22 +97,36 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                 {sendingPromptId === p.id ? (
                   <div className="prompt-target-picker">
                     <span className="picker-label">Send to:</span>
+                    {sendError && (
+                      <span className="prompt-send-error" role="alert" title={sendError}>
+                        Gönderilemedi: {sendError}
+                      </span>
+                    )}
                     {teamSessions.length === 0 ? (
                       <span className="picker-empty">No terminals</span>
                     ) : (
                       teamSessions.map((s) => (
                         <button
                           key={s.sessionID}
+                          type="button"
                           className="btn-sm btn-target"
-                          onClick={() => handleSend(p.content, s)}
+                          onClick={() => void handleSend(p.content, s)}
+                          disabled={!!sendingTargetID}
                         >
-                          {s.agentName || `Terminal ${s.index + 1}`}
+                          {sendingTargetID === s.sessionID
+                            ? "Sending…"
+                            : s.agentName || `Terminal ${s.index + 1}`}
                         </button>
                       ))
                     )}
                     <button
+                      type="button"
                       className="btn-sm"
-                      onClick={() => setSendingPromptId(null)}
+                      onClick={() => {
+                        setSendingPromptId(null);
+                        setSendError(null);
+                      }}
+                      disabled={!!sendingTargetID}
                     >
                       Cancel
                     </button>
@@ -91,23 +134,71 @@ export default function PromptLibrary({ onSendPrompt }: Props) {
                 ) : (
                   <>
                     <button
+                      type="button"
                       className="btn-sm"
-                      onClick={() => setSendingPromptId(p.id)}
+                      onClick={() => {
+                        setSendError(null);
+                        setConfirmDeletePromptId(null);
+                        setDeleteError(null);
+                        setSendingPromptId(p.id);
+                      }}
                     >
                       Send
                     </button>
-                    <button className="btn-sm" onClick={() => openEditor(p)}>
+                    <button className="btn-sm" type="button" onClick={() => openEditor(p)}>
                       Edit
                     </button>
-                    <button
-                      className="btn-sm btn-danger"
-                      onClick={() => deletePrompt(p.id)}
-                    >
-                      Delete
-                    </button>
+                    {confirmDeletePromptId === p.id ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn-sm btn-danger"
+                          onClick={() => void handleDelete(p.id)}
+                          disabled={!!deletingPromptId}
+                          aria-label={`Confirm deleting ${p.name} prompt`}
+                        >
+                          {deletingPromptId === p.id ? "Deleting…" : "Confirm delete"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-sm"
+                          onClick={() => {
+                            setConfirmDeletePromptId(null);
+                            setDeleteError(null);
+                          }}
+                          disabled={!!deletingPromptId}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-sm btn-danger"
+                        onClick={() => {
+                          setSendingPromptId(null);
+                          setSendError(null);
+                          setDeleteError(null);
+                          setConfirmDeletePromptId(p.id);
+                        }}
+                        aria-label={`Delete ${p.name} prompt`}
+                      >
+                        Delete
+                      </button>
+                    )}
                   </>
                 )}
               </div>
+              {confirmDeletePromptId === p.id && !deletingPromptId && (
+                <p className="prompt-delete-hint" role="status">
+                  This deletes “{p.name}”. Confirm to continue.
+                </p>
+              )}
+              {confirmDeletePromptId === p.id && deleteError && (
+                <p className="prompt-send-error" role="alert">
+                  Delete failed: {deleteError}
+                </p>
+              )}
             </div>
           ))}
         </div>

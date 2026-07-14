@@ -96,7 +96,7 @@ func TestFlushPending_WriteFailureRoutesToUINotLoop(t *testing.T) {
 	o.pendingTimers[key] = time.AfterFunc(time.Hour, func() {})
 	o.mu.Unlock()
 
-	o.flushPending("/rooms/t", "agent-1", id)
+	o.flushPending("/rooms/t", "agent-1", id, nil)
 
 	o.mu.Lock()
 	_, hasTimer := o.pendingTimers[key]

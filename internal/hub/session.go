@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,9 +111,9 @@ func (h *Hub) seedSessionTracking() {
 	}
 }
 
-// latestSnapshot reads and parses a room's most recent session snapshot. Epoch
-// filenames are fixed-width, so the lexicographically greatest name is the
-// newest. Returns ok=false if the room has no readable, non-empty snapshot.
+// latestSnapshot reads and parses a room's most recent readable session snapshot.
+// Corrupt/foreign newest files are skipped so one damaged write cannot disable
+// restart seeding and cause duplicate idle snapshots.
 func (h *Hub) latestSnapshot(room string) (PersistedRoom, bool) {
 	dir, err := h.sessionsDir(room)
 	if err != nil {
@@ -122,30 +123,41 @@ func (h *Hub) latestSnapshot(room string) (PersistedRoom, bool) {
 	if err != nil {
 		return PersistedRoom{}, false
 	}
-	var latest string
+	type candidate struct {
+		name  string
+		epoch int64
+	}
+	candidates := make([]candidate, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		if e.Name() > latest {
-			latest = e.Name()
+		stem := strings.TrimSuffix(e.Name(), ".json")
+		epoch, perr := strconv.ParseInt(stem, 10, 64)
+		if perr != nil {
+			continue
 		}
+		candidates = append(candidates, candidate{name: e.Name(), epoch: epoch})
 	}
-	if latest == "" {
+	if len(candidates) == 0 {
 		return PersistedRoom{}, false
 	}
-	data, err := os.ReadFile(filepath.Join(dir, latest))
-	if err != nil {
-		return PersistedRoom{}, false
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].epoch > candidates[j].epoch })
+	for _, c := range candidates {
+		data, err := os.ReadFile(filepath.Join(dir, c.name))
+		if err != nil {
+			continue
+		}
+		var pr PersistedRoom
+		if err := json.Unmarshal(data, &pr); err != nil {
+			continue
+		}
+		if len(pr.Messages) == 0 {
+			continue
+		}
+		return pr, true
 	}
-	var pr PersistedRoom
-	if err := json.Unmarshal(data, &pr); err != nil {
-		return PersistedRoom{}, false
-	}
-	if len(pr.Messages) == 0 {
-		return PersistedRoom{}, false
-	}
-	return pr, true
+	return PersistedRoom{}, false
 }
 
 // saveSession writes an immutable snapshot of the room's full current state

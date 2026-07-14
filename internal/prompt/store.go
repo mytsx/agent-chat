@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,7 +34,9 @@ type Store struct {
 
 // NewStore creates a new prompt store
 func NewStore(dataDir string) (*Store, error) {
-	os.MkdirAll(dataDir, 0700)
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("create prompt data dir: %w", err)
+	}
 	fp := filepath.Join(dataDir, "prompts.json")
 
 	s := &Store{
@@ -41,8 +44,16 @@ func NewStore(dataDir string) (*Store, error) {
 	}
 
 	if err := s.load(); err != nil {
-		// File doesn't exist yet, start with empty
-		s.prompts = []Prompt{}
+		if errors.Is(err, os.ErrNotExist) {
+			s.prompts = []Prompt{}
+		} else {
+			// Corrupt/unreadable prompts.json: start empty so callers (including
+			// startup, which discards this error) always get a usable, non-nil store
+			// instead of a nil deref. The error is still returned; the bad file stays
+			// on disk untouched until the next successful save overwrites it.
+			s.prompts = []Prompt{}
+			return s, fmt.Errorf("load prompts: %w", err)
+		}
 	}
 
 	return s, nil
@@ -61,11 +72,24 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.filePath, data, 0644)
+
+	tmpPath := s.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, s.filePath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // List returns all prompts
 func (s *Store) List() []Prompt {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Prompt, len(s.prompts))
@@ -75,6 +99,9 @@ func (s *Store) List() []Prompt {
 
 // Get returns a prompt by ID
 func (s *Store) Get(id string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -88,6 +115,9 @@ func (s *Store) Get(id string) (Prompt, error) {
 
 // Create creates a new prompt
 func (s *Store) Create(name, content, category string, tags []string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -105,6 +135,7 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 
 	s.prompts = append(s.prompts, p)
 	if err := s.save(); err != nil {
+		s.prompts = s.prompts[:len(s.prompts)-1]
 		return Prompt{}, err
 	}
 	return p, nil
@@ -112,11 +143,15 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 
 // Update updates an existing prompt
 func (s *Store) Update(id, name, content, category string, tags []string) (Prompt, error) {
+	if s == nil {
+		return Prompt{}, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for i, p := range s.prompts {
 		if p.ID == id {
+			prev := s.prompts[i]
 			s.prompts[i].Name = name
 			s.prompts[i].Content = content
 			s.prompts[i].Category = category
@@ -125,6 +160,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 			s.prompts[i].UpdatedAt = time.Now().Format(time.RFC3339)
 
 			if err := s.save(); err != nil {
+				s.prompts[i] = prev
 				return Prompt{}, err
 			}
 			return s.prompts[i], nil
@@ -135,13 +171,21 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 
 // Delete deletes a prompt
 func (s *Store) Delete(id string) error {
+	if s == nil {
+		return fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for i, p := range s.prompts {
 		if p.ID == id {
+			prev := append([]Prompt(nil), s.prompts...)
 			s.prompts = append(s.prompts[:i], s.prompts[i+1:]...)
-			return s.save()
+			if err := s.save(); err != nil {
+				s.prompts = prev
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("prompt not found: %s", id)
@@ -158,12 +202,16 @@ func RenderPrompt(content string, vars map[string]string) string {
 
 // Seed adds default prompts if none exist
 func (s *Store) Seed(basePrompt, managerPrompt string) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if len(s.prompts) > 0 {
 		return
 	}
+	prev := s.prompts
 
 	now := time.Now().Format(time.RFC3339)
 
@@ -190,7 +238,9 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 		},
 	}
 
-	s.save()
+	if err := s.save(); err != nil {
+		s.prompts = prev // roll back so memory matches disk on startup seed failure
+	}
 }
 
 // SeedIfMissingByName creates a prompt with the given name only if no prompt with
@@ -200,6 +250,9 @@ func (s *Store) Seed(basePrompt, managerPrompt string) {
 // an existing prompt, so user edits to the seeded prompt are preserved. created
 // reports whether a new prompt was added.
 func (s *Store) SeedIfMissingByName(name, content, category string, tags []string) (Prompt, bool, error) {
+	if s == nil {
+		return Prompt{}, false, fmt.Errorf("prompt store unavailable")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

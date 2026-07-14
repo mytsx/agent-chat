@@ -26,7 +26,7 @@ func authedDesktop(t *testing.T) (*Hub, *Client) {
 	return h, c
 }
 
-func TestGetMessagesRaw_DoesNotReviveRoom(t *testing.T) {
+func TestRawSnapshots_DoNotReviveMissingRooms(t *testing.T) {
 	h, c := authedDesktop(t)
 
 	h.handleRequest(c, types.Request{ID: "1", Type: "get_messages_raw", Room: "ghost"})
@@ -36,6 +36,9 @@ func TestGetMessagesRaw_DoesNotReviveRoom(t *testing.T) {
 	if h.getRoom("ghost") != nil {
 		t.Fatalf("ham mesaj okuması var-olmayan odayı materialize ETMEMELİ")
 	}
+	if got := h.roomMessagesSnapshot("ghost"); len(got) != 0 {
+		t.Fatalf("missing room messages snapshot should be empty, got %d", len(got))
+	}
 
 	h.handleRequest(c, types.Request{ID: "2", Type: "get_agents", Room: "ghost2"})
 	if resp := readResponse(t, c, "get_agents"); !resp.Success {
@@ -43,6 +46,9 @@ func TestGetMessagesRaw_DoesNotReviveRoom(t *testing.T) {
 	}
 	if h.getRoom("ghost2") != nil {
 		t.Fatalf("ham agent okuması var-olmayan odayı materialize ETMEMELİ")
+	}
+	if got := h.roomAgentsSnapshot("ghost2"); len(got) != 0 {
+		t.Fatalf("missing room agents snapshot should be empty, got %d", len(got))
 	}
 }
 

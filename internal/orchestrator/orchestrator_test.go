@@ -130,7 +130,50 @@ func TestAnalyzeMessage_EmptyContent(t *testing.T) {
 	msg := types.Message{Content: "", Type: "direct", ExpectsReply: false}
 	r := AnalyzeMessage(msg)
 	if r.Action != "notify" {
-		t.Errorf("empty content should default to notify, got %s", r.Action)
+		t.Errorf("empty content should notify, got %s", r.Action)
+	}
+}
+
+func TestNotificationPromptsPreserveText(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "direct single",
+			got:  buildPrompt(false, "backend", "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "broadcast single",
+			got:  buildPrompt(true, "backend", "frontend"),
+			want: `[agent-chat] Broadcast from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched single",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] New message from backend. read_messages("frontend") to read and respond.`,
+		},
+		{
+			name: "batched multiple",
+			got: buildBatchedPrompt([]pendingNotification{
+				{from: "backend"},
+				{from: "mobile"},
+				{from: "backend"},
+			}, "frontend"),
+			want: `[agent-chat] 3 new messages from backend, mobile. read_messages("frontend") to read and respond.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("prompt mismatch\nwant: %s\n got: %s", tt.want, tt.got)
+			}
+		})
 	}
 }
 
@@ -172,6 +215,32 @@ func TestRegisterUnregisterAgent(t *testing.T) {
 func TestUnregisterNonexistent(t *testing.T) {
 	o, _ := newTestOrchestrator()
 	o.UnregisterAgent("/rooms/team1", "ghost") // should not panic
+}
+
+func TestUnregisterLastAgentRemovesChatDir(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-1234-5678")
+
+	o.UnregisterAgent("/rooms/team1", "agent-1")
+
+	if _, exists := o.agentSessions["/rooms/team1"]; exists {
+		t.Fatal("last unregister should remove the empty chatDir entry")
+	}
+}
+
+func TestUnregisterAgentSessionIgnoresStaleSession(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-old")
+	o.RegisterAgent("/rooms/team1", "agent-1", "sess-new")
+
+	o.UnregisterAgentSession("/rooms/team1", "agent-1", "sess-old")
+
+	o.mu.Lock()
+	got := o.agentSessions["/rooms/team1"]["agent-1"]
+	o.mu.Unlock()
+	if got != "sess-new" {
+		t.Fatalf("stale session unregister removed current mapping: got %q", got)
+	}
 }
 
 // ── ProcessMessage routing tests ──
@@ -331,7 +400,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 		t.Errorf("expected 3 pending, got %d", pLen)
 	}
 
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111")
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil)
 
 	o.mu.Lock()
 	rp := len(o.pendingMsgs[key])
@@ -348,7 +417,7 @@ func TestNotifyAgent_BatchFlushDeduplicates(t *testing.T) {
 
 func TestFlushPending_Empty(t *testing.T) {
 	o, _ := newTestOrchestrator()
-	o.flushPending("/rooms/t", "agent-1", "sess-11111111") // should not panic
+	o.flushPending("/rooms/t", "agent-1", "sess-11111111", nil) // should not panic
 }
 
 func TestNotifyAgent_AfterCooldownExpired(t *testing.T) {
@@ -648,7 +717,7 @@ func TestCooldown_IntegrationFlow(t *testing.T) {
 	}
 
 	// Manual flush (simulating timer expiry)
-	o.flushPending("/rooms/t", "bob", "sess-bob")
+	o.flushPending("/rooms/t", "bob", "sess-bob", nil)
 
 	if len(*sent) != 2 {
 		t.Errorf("after flush, expected 2 total sent notifications, got %d", len(*sent))
@@ -699,6 +768,235 @@ func TestUnregisterAgent_CleansCooldownState(t *testing.T) {
 	}
 	if hasDS {
 		t.Error("deferStartedAt should be cleaned up after unregister")
+	}
+}
+
+// ── Case-insensitive routing tests (B4 port) ──
+//
+// Hub and team.Store already use the trimmed, case-insensitive identity model
+// (team.sameAgentName). The orchestrator historically matched sessionsCopy with
+// an exact string key, so a " Pilot " vs "pilot" spelling mismatch silently
+// dropped PTY notifications. These tests pin the aligned behavior.
+
+// TestProcessMessage_DirectCaseInsensitive: a direct message addressed with a
+// different case / surrounding whitespace must still reach the registered agent.
+func TestProcessMessage_DirectCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "pilot", "sess-pilot")
+
+	msg := types.Message{From: "backend", To: " Pilot ", Content: "Can you review?", Type: "direct", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected 1 notification to pilot regardless of casing, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-pilot" {
+		t.Errorf("expected notify to sess-pilot, got %s", (*sent)[0].sessionID)
+	}
+}
+
+// TestProcessMessage_ManagerRoutedCaseInsensitive: manager-routed delivery must
+// resolve the manager target case-insensitively.
+func TestProcessMessage_ManagerRoutedCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "manager", "sess-manager")
+
+	msg := types.Message{
+		From:            "agent-2",
+		To:              "Manager",
+		OriginalTo:      "agent-1",
+		Content:         "review this",
+		Type:            "direct",
+		RoutedByManager: true,
+		ExpectsReply:    true,
+	}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected manager notification regardless of casing, got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-manager" {
+		t.Errorf("expected notify to sess-manager, got %s", (*sent)[0].sessionID)
+	}
+}
+
+// TestProcessMessage_BroadcastSelfExclusionCaseInsensitive: a broadcast sender
+// spelled differently from its registered name must still be excluded from its
+// own broadcast.
+func TestProcessMessage_BroadcastSelfExclusionCaseInsensitive(t *testing.T) {
+	o, sent := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-pilot")
+	o.RegisterAgent("/rooms/t", "bob", "sess-bob")
+
+	msg := types.Message{From: " pilot ", To: "all", Content: "deploy done", Type: "broadcast", ExpectsReply: true}
+	o.ProcessMessage("/rooms/t", msg)
+
+	if len(*sent) != 1 {
+		t.Fatalf("expected only bob notified (sender excluded case-insensitively), got %d", len(*sent))
+	}
+	if (*sent)[0].sessionID != "sess-bob" {
+		t.Errorf("expected notify to sess-bob, got %s", (*sent)[0].sessionID)
+	}
+}
+
+// TestRegisterAgent_CaseVariantReplacesOldEntry: re-registering a case variant of
+// an already-registered agent must replace the old runtime entry rather than
+// creating a duplicate.
+func TestRegisterAgent_CaseVariantReplacesOldEntry(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-old")
+	o.RegisterAgent("/rooms/t", "pilot", "sess-new")
+
+	o.mu.Lock()
+	sessions := o.agentSessions["/rooms/t"]
+	count := len(sessions)
+	newSess := sessions["pilot"]
+	_, stale := sessions["Pilot"]
+	o.mu.Unlock()
+
+	if count != 1 {
+		t.Fatalf("case-variant re-register should not create a duplicate entry, got %d entries", count)
+	}
+	if newSess != "sess-new" {
+		t.Errorf("expected the new spelling 'pilot' bound to sess-new, got %q", newSess)
+	}
+	if stale {
+		t.Error("old 'Pilot' spelling should have been removed")
+	}
+}
+
+// TestRegisterAgent_CaseVariantMigratesPendingNotifications: queued notifications
+// under the old spelling must move to the new spelling's key so they are not
+// stranded when the agent rejoins under a different case.
+func TestRegisterAgent_CaseVariantMigratesPendingNotifications(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "Pilot", "sess-old")
+
+	oldKey := "/rooms/t:Pilot"
+	o.mu.Lock()
+	o.pendingMsgs[oldKey] = []pendingNotification{{from: "backend"}}
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "pilot", "sess-new")
+
+	newKey := "/rooms/t:pilot"
+	o.mu.Lock()
+	oldPending := len(o.pendingMsgs[oldKey])
+	newPending := len(o.pendingMsgs[newKey])
+	if tm := o.pendingTimers[newKey]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if oldPending != 0 {
+		t.Errorf("old key pending should be migrated away, got %d", oldPending)
+	}
+	if newPending != 1 {
+		t.Errorf("pending notification should be migrated to the new spelling, got %d", newPending)
+	}
+}
+
+// TestRegisterAgent_SameNameNewSessionDropsStaleCooldown: restarting a session
+// under the same spelling must drop the previous session's cooldown so the new
+// session is notified immediately rather than being wrongly batched.
+func TestRegisterAgent_SameNameNewSessionDropsStaleCooldown(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-old")
+
+	key := "/rooms/t:agent-1"
+	o.mu.Lock()
+	o.lastNotified[key] = time.Now()
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-new")
+
+	o.mu.Lock()
+	_, hasLN := o.lastNotified[key]
+	o.mu.Unlock()
+	if hasLN {
+		t.Error("re-registering the same agent with a new session should drop the stale cooldown")
+	}
+}
+
+// TestRegisterAgent_SameNameNewSessionPreservesPending: restarting a session
+// under the SAME spelling must drop stale cooldown but PRESERVE queued
+// notifications and re-arm the flush timer against the new session, so a message
+// batched just before the restart is not silently lost (distinct from the
+// cooldown-drop guarantee, which the sibling test covers).
+func TestRegisterAgent_SameNameNewSessionPreservesPending(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-old")
+
+	key := "/rooms/t:agent-1"
+	o.mu.Lock()
+	o.pendingMsgs[key] = []pendingNotification{{from: "backend"}}
+	o.mu.Unlock()
+
+	o.RegisterAgent("/rooms/t", "agent-1", "sess-new")
+
+	o.mu.Lock()
+	pending := len(o.pendingMsgs[key])
+	_, hasTimer := o.pendingTimers[key]
+	if tm := o.pendingTimers[key]; tm != nil {
+		tm.Stop()
+	}
+	o.mu.Unlock()
+
+	if pending != 1 {
+		t.Errorf("pending notification must survive a same-name new-session refresh, got %d", pending)
+	}
+	if !hasTimer {
+		t.Error("refresh must re-arm the flush timer against the new session while pending remains")
+	}
+}
+
+// TestResolveAgentSession_CaseFoldTieBreakDeterministic: when no exact key
+// matches, resolution must pick a case-folded match deterministically (sorted),
+// not by nondeterministic map-iteration order, so routing is stable even if
+// stale duplicate runtime entries somehow coexist.
+func TestResolveAgentSession_CaseFoldTieBreakDeterministic(t *testing.T) {
+	sessions := map[string]string{"Pilot": "sess-P", "pilot": "sess-p"}
+	// "PILOT" has no exact key → falls to the case-folded matches ["Pilot","pilot"].
+	for i := 0; i < 20; i++ {
+		name, sess, ok := resolveAgentSession(sessions, "PILOT")
+		if !ok {
+			t.Fatal("resolveAgentSession should match case-insensitively")
+		}
+		if name != "Pilot" || sess != "sess-P" {
+			t.Fatalf("tie-break must be deterministic (sorted first): got name=%q sess=%q, want Pilot/sess-P", name, sess)
+		}
+	}
+}
+
+// TestUnregisterAgent_CaseInsensitive: unregister must resolve the agent by the
+// same case-insensitive identity used for routing.
+func TestUnregisterAgent_CaseInsensitive(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "pilot", "sess-pilot")
+
+	o.UnregisterAgent("/rooms/t", "PILOT")
+
+	o.mu.Lock()
+	_, exists := o.agentSessions["/rooms/t"]["pilot"]
+	o.mu.Unlock()
+	if exists {
+		t.Error("unregister should resolve the agent case-insensitively and remove 'pilot'")
+	}
+}
+
+// TestUnregisterAgentSession_CaseInsensitive: session-scoped unregister must also
+// resolve the agent case-insensitively before the stale-session guard.
+func TestUnregisterAgentSession_CaseInsensitive(t *testing.T) {
+	o, _ := newTestOrchestrator()
+	o.RegisterAgent("/rooms/t", "pilot", "sess-x")
+
+	o.UnregisterAgentSession("/rooms/t", "PILOT", "sess-x")
+
+	o.mu.Lock()
+	_, exists := o.agentSessions["/rooms/t"]["pilot"]
+	o.mu.Unlock()
+	if exists {
+		t.Error("session unregister should resolve the agent case-insensitively and remove 'pilot'")
 	}
 }
 

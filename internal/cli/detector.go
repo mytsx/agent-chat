@@ -3,6 +3,9 @@ package cli
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -26,19 +29,19 @@ func ensureFullPATH() {
 		home + "/.cargo/bin",
 	}
 
-	// Also try to resolve nvm current node path
-	if nvmDir := os.Getenv("NVM_DIR"); nvmDir == "" && home != "" {
-		entries, _ := os.ReadDir(home + "/.nvm/versions/node")
-		if len(entries) > 0 {
-			// Pick the last entry (usually highest version)
-			last := entries[len(entries)-1]
-			extraDirs = append(extraDirs, home+"/.nvm/versions/node/"+last.Name()+"/bin")
-		}
+	// Also try to resolve nvm-installed Node versions. os.ReadDir is lexical, so
+	// picking the last entry chooses v9 over v20 and can make Finder-launched CLI
+	// terminals miss modern node-based tools. Add semantic-newest bins first so PATH
+	// resolution sees the newest installed version.
+	if os.Getenv("NVM_DIR") == "" && home != "" {
+		extraDirs = append(extraDirs, nvmNodeVersionDirs(home)...)
 	}
 
 	currentPATH := os.Getenv("PATH")
-	pathSet := make(map[string]bool)
-	for _, p := range strings.Split(currentPATH, ":") {
+	pathSeparator := string(os.PathListSeparator)
+	pathEntries, pathChanged := cleanPATHEntries(currentPATH)
+	pathSet := make(map[string]bool, len(pathEntries))
+	for _, p := range pathEntries {
 		pathSet[p] = true
 	}
 
@@ -54,10 +57,97 @@ func ensureFullPATH() {
 		}
 	}
 
-	if len(toAdd) > 0 {
-		newPATH := currentPATH + ":" + strings.Join(toAdd, ":")
-		os.Setenv("PATH", newPATH)
+	if len(toAdd) > 0 || pathChanged {
+		entries := append(pathEntries, toAdd...)
+		// Never blank PATH: if every original entry was unsafe (all empty/relative)
+		// AND no extra dir was found to add, leave PATH untouched rather than wiping
+		// command resolution for this process and its PTY children. The old gate only
+		// rewrote when adding dirs, so it could never zero out PATH.
+		if len(entries) > 0 {
+			os.Setenv("PATH", strings.Join(entries, pathSeparator))
+		}
 	}
+}
+
+// cleanPATHEntries strips empty, relative, and duplicate entries from a PATH
+// value. Empty and relative entries can resolve through the current working
+// directory, so a malicious binary planted in a project dir could shadow a real
+// tool at exec time; dropping them (and dedup'ing) hardens CLI/shell launches.
+// The bool reports whether any entry was removed so the caller knows to rewrite
+// PATH even when it adds no new directories.
+func cleanPATHEntries(pathValue string) ([]string, bool) {
+	entries := filepath.SplitList(pathValue)
+	cleaned := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	changed := false
+	for _, entry := range entries {
+		if entry == "" || !filepath.IsAbs(entry) || seen[entry] {
+			changed = true
+			continue
+		}
+		seen[entry] = true
+		cleaned = append(cleaned, entry)
+	}
+	return cleaned, changed
+}
+
+func nvmNodeVersionDirs(home string) []string {
+	base := filepath.Join(home, ".nvm", "versions", "node")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	type versionDir struct {
+		name  string
+		parts []int
+	}
+	var versions []versionDir
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "v") {
+			continue
+		}
+		binDir := filepath.Join(base, entry.Name(), "bin")
+		if fi, err := os.Stat(binDir); err != nil || !fi.IsDir() {
+			continue
+		}
+		versions = append(versions, versionDir{name: entry.Name(), parts: parseNodeVersion(entry.Name())})
+	}
+	sort.SliceStable(versions, func(i, j int) bool {
+		for p := 0; p < len(versions[i].parts) || p < len(versions[j].parts); p++ {
+			iv, jv := 0, 0
+			if p < len(versions[i].parts) {
+				iv = versions[i].parts[p]
+			}
+			if p < len(versions[j].parts) {
+				jv = versions[j].parts[p]
+			}
+			if iv != jv {
+				return iv > jv
+			}
+		}
+		return versions[i].name > versions[j].name
+	})
+	dirs := make([]string, 0, len(versions))
+	for _, v := range versions {
+		dirs = append(dirs, filepath.Join(base, v.name, "bin"))
+	}
+	return dirs
+}
+
+func parseNodeVersion(name string) []int {
+	name = strings.TrimPrefix(name, "v")
+	fields := strings.Split(name, ".")
+	parts := make([]int, len(fields))
+	for i, field := range fields {
+		// Be tolerant of suffixes like v20.11.1-nightly while preserving useful
+		// numeric ordering for normal nvm directory names.
+		field = strings.TrimLeftFunc(field, func(r rune) bool { return r < '0' || r > '9' })
+		field = strings.TrimRightFunc(field, func(r rune) bool { return r < '0' || r > '9' })
+		if n, err := strconv.Atoi(field); err == nil {
+			parts[i] = n
+		}
+	}
+	return parts
 }
 
 // CLIType represents a supported CLI tool
@@ -107,10 +197,7 @@ func DetectAll() []CLIInfo {
 		result = append(result, info)
 	}
 	// Always add shell
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/zsh"
-	}
+	shell := resolveUserShell()
 	result = append(result, CLIInfo{
 		Type:       CLIShell,
 		Name:       "Shell",
@@ -121,24 +208,50 @@ func DetectAll() []CLIInfo {
 	return result
 }
 
+// resolveUserShell returns an absolute, existing shell path. It prefers $SHELL
+// but only after confirming it resolves via exec.LookPath, so a stale or
+// tampered SHELL value can't hand PTY launches a bogus/relative command; it then
+// falls back to /bin/zsh, /bin/sh, and finally a literal /bin/sh.
+func resolveUserShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		if path, err := exec.LookPath(shell); err == nil {
+			return path
+		}
+	}
+	for _, fallback := range []string{"/bin/zsh", "/bin/sh"} {
+		if path, err := exec.LookPath(fallback); err == nil {
+			return path
+		}
+	}
+	return "/bin/sh"
+}
+
 // GetCommand returns the command and args to start a CLI
 func GetCommand(cliType CLIType) (string, []string) {
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--dangerously-skip-permissions"}
 	case CLIGemini:
-		return "gemini", []string{"--approval-mode", "yolo"}
+		return resolveCLIBinary("gemini"), []string{"--approval-mode", "yolo"}
 	case CLICopilot:
-		return "copilot", []string{"--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--yolo"}
 	case CLICodex:
-		return "codex", []string{"--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"--dangerously-bypass-approvals-and-sandbox"}
 	default:
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/zsh"
-		}
-		return shell, []string{"-l"}
+		return resolveUserShell(), []string{"-l"}
 	}
+}
+
+// resolveCLIBinary resolves a CLI name to its absolute path via exec.LookPath so
+// the spawned process is pinned at launch time rather than re-resolved through
+// PATH by the child shell (which a planted relative binary could hijack). Only an
+// absolute hit is trusted; anything else falls back to the bare name so a
+// LookPath miss or a relative match still lets the launcher resolve it normally.
+func resolveCLIBinary(binary string) string {
+	if path, err := exec.LookPath(binary); err == nil && filepath.IsAbs(path) {
+		return path
+	}
+	return binary
 }
 
 // ResumeSupported reports whether GetCommandResume can build a native resume
@@ -164,11 +277,11 @@ func GetCommandResume(cliType CLIType, sessionID string) (string, []string) {
 	}
 	switch cliType {
 	case CLIClaude:
-		return "claude", []string{"--resume", sessionID, "--dangerously-skip-permissions"}
+		return resolveCLIBinary("claude"), []string{"--resume", sessionID, "--dangerously-skip-permissions"}
 	case CLICopilot:
-		return "copilot", []string{"--resume=" + sessionID, "--yolo"}
+		return resolveCLIBinary("copilot"), []string{"--resume=" + sessionID, "--yolo"}
 	case CLICodex:
-		return "codex", []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
+		return resolveCLIBinary("codex"), []string{"resume", sessionID, "--dangerously-bypass-approvals-and-sandbox"}
 	default:
 		return GetCommand(cliType)
 	}

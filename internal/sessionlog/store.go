@@ -29,7 +29,7 @@ type Record struct {
 
 // Store is the atomic JSON-backed session-history index. Safe for concurrent use.
 type Store struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	filePath string
 	records  map[string]Record // keyed by SessionID
 	now      func() float64
@@ -59,9 +59,26 @@ func New(dataDir string) (*Store, error) {
 		// (Gemini).
 		if err := json.Unmarshal(data, &s.records); err != nil || s.records == nil {
 			s.records = make(map[string]Record)
+		} else {
+			s.records = normalizeLoadedRecords(s.records)
 		}
 	}
 	return s, nil
+}
+
+func normalizeLoadedRecords(records map[string]Record) map[string]Record {
+	normalized := make(map[string]Record, len(records))
+	for id, record := range records {
+		if id == "" {
+			continue
+		}
+		// The JSON map key is the store's authoritative session id. Older/corrupt
+		// files can have a missing or stale embedded session_id; if left as-is the UI
+		// may list an empty/wrong resume target even though the map entry is usable.
+		record.SessionID = id
+		normalized[id] = record
+	}
+	return normalized
 }
 
 // Record adds a session (FirstSeen=LastSeen=now) or, if already present, only
@@ -73,29 +90,41 @@ func (s *Store) Record(sessionID, room, agent, cliType, cwd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.now()
-	if r, ok := s.records[sessionID]; ok {
-		// A re-Record of an existing id is a NEW run — Copilot keeps the same
-		// events.jsonl across resumes, so onSessionID records the same id again. Start
-		// a fresh open-window so "same period" correlation compares the latest run, not
-		// one interval spanning idle days between runs (Codex P2). A re-record within
-		// newWindowGapSec is treated as the same run (defensive against a double-fire)
-		// and only advances LastSeen.
-		if t-r.LastSeen > newWindowGapSec {
-			r.FirstSeen = t
+	previous, hadPrevious := s.records[sessionID]
+	s.records[sessionID] = refreshedRecord(previous, hadPrevious, t, sessionID, room, agent, cliType, cwd)
+	if !s.save() {
+		if hadPrevious {
+			s.records[sessionID] = previous
+		} else {
+			delete(s.records, sessionID)
 		}
-		r.LastSeen = t
-		// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
-		// resumed after a team rename or config change. Re-indexing under the CURRENT
-		// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).
-		r.Room, r.AgentName, r.CLIType, r.Cwd = room, agent, cliType, cwd
-		s.records[sessionID] = r
-	} else {
-		s.records[sessionID] = Record{
+	}
+}
+
+func refreshedRecord(previous Record, hadPrevious bool, t float64, sessionID, room, agent, cliType, cwd string) Record {
+	if !hadPrevious {
+		return Record{
 			SessionID: sessionID, Room: room, AgentName: agent,
 			CLIType: cliType, Cwd: cwd, FirstSeen: t, LastSeen: t,
 		}
 	}
-	s.save()
+
+	r := previous
+	// A re-Record of an existing id is a NEW run — Copilot keeps the same
+	// events.jsonl across resumes, so onSessionID records the same id again. Start
+	// a fresh open-window so "same period" correlation compares the latest run, not
+	// one interval spanning idle days between runs (Codex P2). A re-record within
+	// newWindowGapSec is treated as the same run (defensive against a double-fire)
+	// and only advances LastSeen.
+	if t-r.LastSeen > newWindowGapSec {
+		r.FirstSeen = t
+	}
+	r.LastSeen = t
+	// Refresh metadata: a reused id (Copilot keeps the same events.jsonl) may be
+	// resumed after a team rename or config change. Re-indexing under the CURRENT
+	// room/agent/cli/cwd keeps the picker for the current team showing it (Codex P2).
+	r.Room, r.AgentName, r.CLIType, r.Cwd = room, agent, cliType, cwd
+	return r
 }
 
 // Touch advances LastSeen for a known session (FirstSeen preserved). Unknown → no-op.
@@ -105,11 +134,10 @@ func (s *Store) Touch(sessionID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.records[sessionID]; ok {
+	s.updateExistingRecord(sessionID, func(r Record) (Record, bool) {
 		r.LastSeen = s.now()
-		s.records[sessionID] = r
-		s.save()
-	}
+		return r, true
+	})
 }
 
 // TouchAt sets LastSeen to an EXPLICIT time (unix seconds) for a known session, but
@@ -122,10 +150,27 @@ func (s *Store) TouchAt(sessionID string, t float64) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r, ok := s.records[sessionID]; ok && t > r.LastSeen {
+	s.updateExistingRecord(sessionID, func(r Record) (Record, bool) {
+		if t <= r.LastSeen {
+			return r, false
+		}
 		r.LastSeen = t
-		s.records[sessionID] = r
-		s.save()
+		return r, true
+	})
+}
+
+func (s *Store) updateExistingRecord(sessionID string, update func(Record) (Record, bool)) {
+	previous, ok := s.records[sessionID]
+	if !ok {
+		return
+	}
+	updated, changed := update(previous)
+	if !changed {
+		return
+	}
+	s.records[sessionID] = updated
+	if !s.save() {
+		s.records[sessionID] = previous
 	}
 }
 
@@ -136,8 +181,8 @@ func (s *Store) ListSessions(room, agent string) []Record {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var out []Record
 	for _, r := range s.records {
 		// Case-insensitive: UpsertAgent preserves the config casing while Record stores
@@ -157,8 +202,8 @@ func (s *Store) ListAgents(room string) []string {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	// Group case-insensitively (see ListSessions); the newest-seen casing is the
 	// display name so "Alice"/"alice" collapse to one entry (Codex P2).
 	last := map[string]float64{}
@@ -198,6 +243,7 @@ func (s *Store) RenameRoom(oldRoom, newRoom string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := cloneRecords(s.records)
 	changed := false
 	for id, r := range s.records {
 		if strings.EqualFold(r.Room, oldRoom) {
@@ -207,7 +253,9 @@ func (s *Store) RenameRoom(oldRoom, newRoom string) {
 		}
 	}
 	if changed {
-		s.save()
+		if !s.save() {
+			s.records = previous
+		}
 	}
 }
 
@@ -217,30 +265,42 @@ func (s *Store) Get(sessionID string) (Record, bool) {
 	if s == nil {
 		return Record{}, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	r, ok := s.records[sessionID]
 	return r, ok
+}
+
+func cloneRecords(records map[string]Record) map[string]Record {
+	cloned := make(map[string]Record, len(records))
+	for id, record := range records {
+		cloned[id] = record
+	}
+	return cloned
 }
 
 // save writes records atomically (temp+rename). Called under mu. Record/Touch are
 // void, so a persist failure can't be returned — but it must not be SILENT (the user
 // would lose resume history with no trace), so each failure is logged, mirroring how
-// team.Store surfaces its persistence errors (Copilot).
-func (s *Store) save() {
+// team.Store surfaces its persistence errors (Copilot). The boolean lets callers
+// roll back in-memory mutations when persistence fails, keeping memory and disk in
+// sync for future resume-history reads.
+func (s *Store) save() bool {
 	data, err := json.MarshalIndent(s.records, "", "  ")
 	if err != nil {
 		log.Printf("[SESSIONLOG] marshal failed: %v", err)
-		return
+		return false
 	}
 	tmp := s.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		log.Printf("[SESSIONLOG] write %s failed: %v", tmp, err)
 		os.Remove(tmp)
-		return
+		return false
 	}
 	if err := os.Rename(tmp, s.filePath); err != nil {
 		log.Printf("[SESSIONLOG] rename %s -> %s failed: %v", tmp, s.filePath, err)
 		os.Remove(tmp)
+		return false
 	}
+	return true
 }

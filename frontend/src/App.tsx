@@ -4,6 +4,7 @@ import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
 import { useTerminals } from "./store/useTerminals";
 import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
+import { errorToString } from "./lib/errorText";
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
@@ -18,8 +19,8 @@ class ErrorBoundary extends Component<
 > {
   state = { error: null as string | null };
 
-  static getDerivedStateFromError(error: Error) {
-    return { error: error.message };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: errorToString(error) };
   }
 
   render() {
@@ -42,6 +43,7 @@ function AppContent() {
   const createTeam = useTeams((s) => s.createTeam);
   const { addMessages, setAgents, loadMessages, loadAgents } = useMessages();
   const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const sidebarRef = useRef<PanelImperativeHandle>(null);
@@ -78,8 +80,10 @@ function AppContent() {
         if (!cancelled && currentTeams.length === 0) {
           await createTeam("Default", "2x2", []);
         }
+        if (!cancelled) setStartupError(null);
       } catch (e) {
         console.error("Failed to load teams:", e);
+        if (!cancelled) setStartupError(errorToString(e));
       }
       if (!cancelled) setReady(true);
     };
@@ -177,10 +181,13 @@ function AppContent() {
     []
   );
 
-  const handleSendPrompt = (sessionID: string, content: string) => {
-    SendPromptToAgent(sessionID, content, {}).catch((e) => {
+  const handleSendPrompt = async (sessionID: string, content: string) => {
+    try {
+      await SendPromptToAgent(sessionID, content, {});
+    } catch (e) {
       if (import.meta.env.DEV) console.warn("SendPromptToAgent failed:", e);
-    });
+      throw new Error(errorToString(e));
+    }
   };
 
   return (
@@ -224,6 +231,14 @@ function AppContent() {
       ))}
       <TabBar />
       <BroadcastBar />
+      {startupError && (
+        <div className="broadcast-notice" title={startupError}>
+          <span>
+            ⚠️ Başlangıç oda kurulumu tamamlanamadı. Backend bağlantısını kontrol edip tekrar deneyin: <code>{startupError}</code>
+          </span>
+          <button type="button" onClick={() => setStartupError(null)}>×</button>
+        </div>
+      )}
       <div className="app-body">
         <PanelGroup orientation="horizontal" className="app-panel-group">
           <Panel minSize="30%">

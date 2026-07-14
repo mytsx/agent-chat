@@ -22,3 +22,15 @@ func TestGracefulExitCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestResizeRejectsZeroDimensionBeforeSyscall(t *testing.T) {
+	m := NewManager(nil)
+	newSessionForTest(m, "s1")
+
+	if err := m.Resize("s1", 0, 24); err == nil {
+		t.Fatal("expected zero columns to be rejected")
+	}
+	if err := m.Resize("s1", 80, 0); err == nil {
+		t.Fatal("expected zero rows to be rejected")
+	}
+}

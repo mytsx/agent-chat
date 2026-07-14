@@ -97,6 +97,7 @@ type App struct {
 	newVoiceRecorder func() (voice.Recorder, error)
 	voiceTranscribe  func(ctx context.Context, wav []byte) (string, error)
 	voiceInject      func(sessionID, text string, submit bool) error
+	promptInject     func(sessionID, text string, submit bool) error
 	voiceEmit        func(event string, payload interface{})
 }
 
@@ -162,13 +163,33 @@ func (a *App) startup(ctx context.Context) {
 		return voice.NewWhisperClient(cfg.OpenAIAPIKey).Transcribe(ctx, wav)
 	}
 	a.voiceInject = a.ptyManager.InjectText
+	a.promptInject = a.ptyManager.InjectText
 	a.voiceEmit = func(event string, payload interface{}) {
 		runtime.EventsEmit(a.ctx, event, payload)
 	}
 
-	// Initialize stores
-	a.promptStore, _ = prompt.NewStore(a.dataDir)
-	a.teamStore, _ = team.NewStore(a.dataDir)
+	// Initialize stores. NewStore always returns a usable (non-nil) store even when
+	// the on-disk JSON is corrupt — it falls back to an empty roster and returns the
+	// error — so downstream use (seedPrompts, subscribeExistingTeams) can never nil
+	// deref. Log the error so a corrupt file isn't silently ignored.
+	var promptErr, teamErr error
+	a.promptStore, promptErr = prompt.NewStore(a.dataDir)
+	if promptErr != nil {
+		log.Printf("[STARTUP] prompt store yüklenemedi, boş store ile devam: %v", promptErr)
+	}
+	// NewStore returns nil only when os.MkdirAll fails. The store methods are already
+	// nil-safe, but guarantee a non-nil store anyway so a future method or direct field
+	// access can't nil-deref (belt-and-suspenders; the empty store degrades gracefully).
+	if a.promptStore == nil {
+		a.promptStore = &prompt.Store{}
+	}
+	a.teamStore, teamErr = team.NewStore(a.dataDir)
+	if teamErr != nil {
+		log.Printf("[STARTUP] team store yüklenemedi, boş store ile devam: %v", teamErr)
+	}
+	if a.teamStore == nil {
+		a.teamStore = &team.Store{}
+	}
 
 	// Seed prompts from existing files
 	a.seedPrompts()
@@ -249,7 +270,31 @@ func (a *App) startHub() error {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	log.Printf("[STARTUP] Hub did not create hub.port within 5s; stopping pid=%d", cmd.Process.Pid)
+	a.stopStartedHubProcess(cmd)
 	return fmt.Errorf("hub.port not created within 5s")
+}
+
+func (a *App) stopStartedHubProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// This helper is used before monitorHub is armed (startup) or before it is
+	// re-armed (crash restart). If the just-started hub never reports readiness,
+	// do not leave it running detached from the app lifecycle.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+	a.hubProcess.CompareAndSwap(cmd.Process, nil)
 }
 
 // connectToHub creates a hub client and connects.
@@ -1631,22 +1676,31 @@ func (a *App) logUserPrompt(sessionID, content string) {
 	if a.isObserverAgent(sess.TeamID, sess.AgentName) {
 		return
 	}
+	// Record what the agent's PTY actually received, not the pre-injection payload:
+	// a Copilot session flattens the text to a single line (InjectText →
+	// pty.SanitizeCopilotInput), so logging the multi-line `delivered` verbatim would
+	// show the summary text the Copilot agent never saw (Codex PR #76 P3). Only the
+	// transcript copy is corrected here; the injection fingerprint intentionally keeps
+	// the un-flattened text because normalizeFingerprint already collapses whitespace,
+	// so the record and the CLI's flattened echo canonicalize to the same key (#65).
+	content = deliveredForTranscript(sess.CLIType, content)
 	// Fire-and-forget: this is best-effort summary bookkeeping and LogMessage is a
 	// synchronous 15s hub RPC — it must not block/delay the already-delivered send.
-	// Tracked by promptLogWG so GetRoomTranscript can drain in-flight logs first.
+	// Tracked by promptLogN so GetRoomTranscript can drain in-flight logs first.
 	room, agent := a.logRoomForSession(sess), sess.AgentName
-	// Stamp the delivery moment NOW, synchronously — the prompt was just written to
-	// the agent's PTY, so this precedes any reply the agent can produce. Letting the
-	// hub stamp on (delayed) RPC arrival could order the prompt AFTER that reply in
-	// the timestamp-sorted transcript (#58).
-	ts := types.Timestamp()
-	a.promptLogN.Add(1)
-	go func() {
-		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, agent, content, ts); err != nil {
-			log.Printf("[SUMMARY] prompt loglanamadı (agent=%s): %v", agent, err)
-		}
-	}()
+	a.logPromptAsync(client, room, agent, content, fmt.Sprintf("agent=%s", agent), "prompt")
+}
+
+// deliveredForTranscript returns content as the target agent's PTY actually
+// received it, so the room transcript/summary reflects what the agent saw. Copilot
+// injection flattens newlines/tabs/control chars to single spaces (InjectText →
+// pty.SanitizeCopilotInput); every other CLI receives the bracketed-paste text
+// verbatim, so it is already faithful and passes through unchanged.
+func deliveredForTranscript(cliType, content string) string {
+	if cliType == string(cli.CLICopilot) {
+		return ptymgr.SanitizeCopilotInput(content)
+	}
+	return content
 }
 
 // logTeamBroadcast records a user broadcast (fan-out to all agents) as a single
@@ -1660,14 +1714,19 @@ func (a *App) logTeamBroadcast(room, content string) {
 	}
 	// Fire-and-forget (see logUserPrompt): summary bookkeeping must not block a
 	// broadcast that already reached every agent. Tracked by promptLogN.
-	// Stamp the delivery moment synchronously (see logUserPrompt) — the broadcast
-	// already reached every agent's PTY, so this precedes any reply (#58).
+	a.logPromptAsync(client, room, "all", content, fmt.Sprintf("room=%s", room), "broadcast")
+}
+
+func (a *App) logPromptAsync(client *hubclient.HubClient, room, agent, content, logContext, label string) {
+	// Stamp the delivery moment synchronously — the prompt/broadcast already reached
+	// the agent PTY, so this precedes any reply. Letting the hub stamp on delayed RPC
+	// arrival could order the prompt AFTER that reply in timestamp-sorted transcripts (#58).
 	ts := types.Timestamp()
 	a.promptLogN.Add(1)
 	go func() {
 		defer a.promptLogN.Add(-1)
-		if err := client.LogMessage(room, "all", content, ts); err != nil {
-			log.Printf("[SUMMARY] broadcast loglanamadı (room=%s): %v", room, err)
+		if err := client.LogMessage(room, agent, content, ts); err != nil {
+			log.Printf("[SUMMARY] %s loglanamadı (%s): %v", label, logContext, err)
 		}
 	}()
 }
@@ -1850,6 +1909,12 @@ func (a *App) broadcastRoleLookup(teamID string) func(agentName string) string {
 
 // ResizeTerminal resizes a terminal
 func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("invalid terminal size: cols and rows must be positive")
+	}
+	if cols > int(^uint16(0)) || rows > int(^uint16(0)) {
+		return fmt.Errorf("invalid terminal size: cols and rows must fit in uint16")
+	}
 	return a.ptyManager.Resize(sessionID, uint16(cols), uint16(rows))
 }
 
@@ -1879,7 +1944,7 @@ func (a *App) closeTerminalInternal(sessionID string, cleanupWorktree bool) erro
 			if teamName == "" {
 				teamName = "default"
 			}
-			a.orchestrator.UnregisterAgent(teamName, agentName)
+			a.orchestrator.UnregisterAgentSession(teamName, agentName, sessionID)
 		}
 	}
 
@@ -2390,16 +2455,30 @@ func (a *App) DeletePrompt(id string) error {
 // instructions feed the session summary.
 func (a *App) SendPromptToAgent(sessionID, promptContent string, vars map[string]string) error {
 	rendered := prompt.RenderPrompt(promptContent, vars)
+	// This path is a terminal injection sink just like BroadcastToTeam and startup
+	// prompts. Clean before the PTY write so a user-edited prompt/template variable
+	// cannot embed bracketed-paste terminators, raw ESC/control bytes, or invisible
+	// Trojan-Source format runes. The sanitized text is also what we fingerprint and
+	// log, so the transcript records the bytes intentionally delivered rather than a
+	// more dangerous pre-sanitized payload. A fully stripped payload is a no-op.
+	delivered := sanitize.StripForTerminalPaste(rendered)
+	if strings.TrimSpace(delivered) == "" {
+		return nil
+	}
 	// Record the fingerprint BEFORE the PTY write (as the startup and broadcast paths
 	// do): otherwise a fast CLI could append this prompt and an ingestion tick could
 	// poll it before RecordInjection runs, logging it as a directly-typed message
 	// while logUserPrompt logs it too. An unconsumed fingerprint if the write fails
 	// is harmless (#65 / Codex round-5 P3).
-	a.ingestMgr.RecordInjection(sessionID, rendered)
-	if err := a.ptyManager.Write(sessionID, []byte(rendered+"\n")); err != nil {
+	a.ingestMgr.RecordInjection(sessionID, delivered)
+	inject := a.promptInject
+	if inject == nil {
+		inject = a.ptyManager.InjectText
+	}
+	if err := inject(sessionID, delivered, true); err != nil {
 		return err
 	}
-	a.logUserPrompt(sessionID, rendered)
+	a.logUserPrompt(sessionID, delivered)
 	return nil
 }
 

@@ -568,6 +568,36 @@ func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestSeedSessionTracking_SkipsCorruptNewestSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	pr := PersistedRoom{
+		Messages: []types.Message{{ID: 1, From: "a", To: "all", Content: "one", Type: "broadcast"}},
+		Agents:   map[string]types.Agent{"a": {Role: "dev"}},
+	}
+	writePersistedRoom(t, dir, "proj", pr)
+	writeSessionSnapshot(t, dir, "proj", "1000000000", pr)
+
+	sdir := filepath.Join(dir, "hub-state", "sessions", "proj")
+	if err := os.WriteFile(filepath.Join(sdir, "2000000000.json"), []byte("{corrupt newest"), 0o644); err != nil {
+		t.Fatalf("write corrupt snapshot: %v", err)
+	}
+
+	h := newArchiveHub(dir)
+	h.loadPersistedState()
+	h.seedSessionTracking()
+
+	_, _, skipped, err := h.saveSession("proj")
+	if err != nil {
+		t.Fatalf("saveSession: %v", err)
+	}
+	if !skipped {
+		t.Fatal("seedSessionTracking should fall back to the newest readable snapshot so an idle restart does not duplicate history")
+	}
+	if files := readSessionFiles(t, dir, "proj"); len(files) != 2 {
+		t.Fatalf("idle quit wrote a duplicate after corrupt newest snapshot: %d files, want 2 (valid + corrupt)", len(files))
+	}
+}
+
 // TestSeedSessionTracking_ClearedRoomNotSeeded verifies the clear+restart case:
 // an old snapshot remains under sessions/{room} but the room was cleared (IDs
 // restarted) before restart. Seeding must NOT mark the room captured from the

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,437 @@ func readResponse(t *testing.T, c *Client, reqType string) types.Response {
 		case <-timeout:
 			t.Fatalf("timed out waiting response for %s", reqType)
 		}
+	}
+}
+
+func TestRequireValidNonEmptyNames(t *testing.T) {
+	t.Parallel()
+
+	_, c := newTestHubClient()
+	req := types.Request{ID: "req-1", Type: "set_observers"}
+	if !c.requireValidNonEmptyNames(req, []string{"", "  ", "Alice"}) {
+		t.Fatalf("blank and valid names should be accepted")
+	}
+	select {
+	case payload := <-c.send:
+		t.Fatalf("expected no response for valid names, got %s", string(payload))
+	default:
+	}
+
+	if c.requireValidNonEmptyNames(req, []string{"ok", "../bad"}) {
+		t.Fatalf("invalid non-empty name should be rejected")
+	}
+	resp := readResponse(t, c, "set_observers")
+	if resp.Success || !strings.Contains(resp.Error, "invalid name \"../bad\"") {
+		t.Fatalf("unexpected invalid-name response: success=%v error=%q", resp.Success, resp.Error)
+	}
+}
+
+func TestRequireValidRoomNames(t *testing.T) {
+	t.Parallel()
+
+	_, c := newTestHubClient()
+	req := types.Request{ID: "req-1", Type: "subscribe"}
+	if !c.requireValidRoomNames(req, []string{"", "room one"}) {
+		t.Fatalf("blank default and valid room names should be accepted")
+	}
+	select {
+	case payload := <-c.send:
+		t.Fatalf("expected no response for valid rooms, got %s", string(payload))
+	default:
+	}
+
+	if c.requireValidRoomNames(req, []string{"room", ".hidden"}) {
+		t.Fatalf("invalid room name should be rejected")
+	}
+	resp := readResponse(t, c, "subscribe")
+	want := "geçersiz oda adı \".hidden\": invalid name \".hidden\": leading dot not allowed"
+	if resp.Success || resp.Error != want {
+		t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, want)
+	}
+}
+
+func TestHandleSubscribe_InvalidPayloadRejected(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "sub-bad",
+		Type: "subscribe",
+		Data: json.RawMessage(`{"rooms":`),
+	})
+
+	resp := readResponse(t, c, "subscribe")
+	if resp.Success || resp.Error != "invalid subscribe payload" {
+		t.Fatalf("response success=%v error=%q, want invalid subscribe payload", resp.Success, resp.Error)
+	}
+	if len(c.rooms) != 0 {
+		t.Fatalf("invalid subscribe payload mutated rooms: %#v", c.rooms)
+	}
+}
+
+func TestHandleJoinRoom_InvalidPayloadRejected(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	h.handleRequest(c, types.Request{
+		ID:   "join-bad",
+		Type: "join_room",
+		Room: "r1",
+		Data: json.RawMessage(`{"agent_name":`),
+	})
+
+	resp := readResponse(t, c, "join_room")
+	if resp.Success || resp.Error != "invalid join_room payload" {
+		t.Fatalf("response success=%v error=%q, want invalid join_room payload", resp.Success, resp.Error)
+	}
+	if c.agentName != "" || c.joinedRoom != "" || len(c.rooms) != 0 {
+		t.Fatalf("invalid join_room payload mutated client: agent=%q joined=%q rooms=%#v", c.agentName, c.joinedRoom, c.rooms)
+	}
+	if room := h.getRoom("r1"); room != nil {
+		t.Fatalf("invalid join_room payload created room: %#v", room)
+	}
+}
+
+func TestHandleGetAllMessages_InvalidPayloadRejectedNoRoomMutation(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	c.clientType = "desktop"
+	c.desktopAuthed = true
+	h.handleRequest(c, types.Request{
+		ID:   "get-all-bad",
+		Type: "get_all_messages",
+		Room: "ghost",
+		Data: json.RawMessage(`{"limit":`),
+	})
+
+	resp := readResponse(t, c, "get_all_messages")
+	if resp.Success || resp.Error != "invalid get_all_messages payload" {
+		t.Fatalf("response success=%v error=%q, want invalid get_all_messages payload", resp.Success, resp.Error)
+	}
+	if room := h.getRoom("ghost"); room != nil {
+		t.Fatalf("invalid get_all_messages payload created room: %#v", room)
+	}
+}
+
+func TestHandleGetAllMessages_WrongRoomDoesNotCreateRoom(t *testing.T) {
+	t.Parallel()
+
+	h, c := newTestHubClient()
+	c.agentName = "alice"
+	c.joinedRoom = "joined"
+	h.handleRequest(c, types.Request{
+		ID:   "get-all-wrong-room",
+		Type: "get_all_messages",
+		Room: "other",
+		Data: mustRawJSON(t, map[string]any{"limit": 10}),
+	})
+
+	resp := readResponse(t, c, "get_all_messages")
+	want := "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: joined"
+	if resp.Success || resp.Error != want {
+		t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, want)
+	}
+	if room := h.getRoom("other"); room != nil {
+		t.Fatalf("rejected get_all_messages created wrong room: %#v", room)
+	}
+}
+
+func TestFormatAgentMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []types.Message{{
+		ID:        7,
+		Timestamp: "2026-07-11T08:09:10.000000",
+		From:      "alice",
+		To:        "bob",
+		Content:   "selam",
+	}}
+
+	got := formatAgentMessages(messages, 3, 1)
+	want := "📬 Son 1 mesaj (toplam 3):\n\n[08:09:10] alice → bob: selam\n  (ID: 7)\n\n"
+	if got != want {
+		t.Fatalf("formatAgentMessages() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatAllMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := []types.Message{{
+		ID:        7,
+		Timestamp: "2026-07-11T08:09:10.000000",
+		From:      "alice",
+		To:        "bob",
+		Content:   "selam",
+	}}
+
+	tests := []struct {
+		name       string
+		totalCount int
+		limit      int
+		want       string
+	}{
+		{
+			name:       "all messages header",
+			totalCount: 1,
+			limit:      15,
+			want:       "📬 1 mesaj (tümü):\n\n[08:09:10] #7 alice → bob: selam\n\n",
+		},
+		{
+			name:       "limited header omits all suffix",
+			totalCount: 3,
+			limit:      1,
+			want:       "📬 Son 1 mesaj (toplam 3):\n\n[08:09:10] #7 alice → bob: selam\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := formatAllMessages(messages, tt.totalCount, tt.limit)
+			if got != tt.want {
+				t.Fatalf("formatAllMessages() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientRequireJoinedRoom(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		agentName   string
+		joinedRoom  string
+		room        string
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "not joined",
+			room:      "r1",
+			wantError: "önce join_room çağırmalısınız",
+		},
+		{
+			name:       "wrong room",
+			agentName:  "alice",
+			joinedRoom: "r1",
+			room:       "r2",
+			wantError:  "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: r1",
+		},
+		{
+			name:        "joined room",
+			agentName:   "alice",
+			joinedRoom:  "r1",
+			room:        "r1",
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, c := newTestHubClient()
+			c.agentName = tt.agentName
+			c.joinedRoom = tt.joinedRoom
+			req := types.Request{ID: "req-1", Type: "get_messages"}
+
+			allowed := c.requireJoinedRoom(req, tt.room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s")
+			if allowed != tt.wantAllowed {
+				t.Fatalf("requireJoinedRoom() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "get_messages")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestClientRequireJoinedRoomOrDesktop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		agentName   string
+		joinedRoom  string
+		desktop     bool
+		room        string
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "anonymous non desktop rejected",
+			room:      "r1",
+			wantError: "önce join_room veya yetkili desktop identify çağırmalısınız",
+		},
+		{
+			name:        "authorized desktop allowed",
+			desktop:     true,
+			room:        "r1",
+			wantAllowed: true,
+		},
+		{
+			name:      "identified without joined room rejected",
+			agentName: "alice",
+			room:      "r1",
+			wantError: "yalnızca katıldığınız odanın özetini okuyabilirsiniz: ",
+		},
+		{
+			name:       "joined wrong room rejected",
+			agentName:  "alice",
+			joinedRoom: "r1",
+			room:       "r2",
+			wantError:  "yalnızca katıldığınız odanın özetini okuyabilirsiniz: r1",
+		},
+		{
+			name:        "joined room allowed",
+			agentName:   "alice",
+			joinedRoom:  "r1",
+			room:        "r1",
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, c := newTestHubClient()
+			c.agentName = tt.agentName
+			c.joinedRoom = tt.joinedRoom
+			if tt.desktop {
+				c.clientType = "desktop"
+				c.desktopAuthed = true
+			}
+			req := types.Request{ID: "req-1", Type: "read_summary"}
+
+			allowed := c.requireJoinedRoomOrDesktop(req, tt.room, "önce join_room veya yetkili desktop identify çağırmalısınız", "yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s")
+			if allowed != tt.wantAllowed {
+				t.Fatalf("requireJoinedRoomOrDesktop() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "read_summary")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestAuthorizeReadAllMessages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		setup       func(h *Hub, c *Client, roomState *RoomState)
+		wantAllowed bool
+		wantError   string
+	}{
+		{
+			name:      "anonymous non desktop rejected",
+			wantError: "önce yetkili desktop identify veya join_room çağırmalısınız",
+		},
+		{
+			name: "authorized desktop allowed",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.clientType = "desktop"
+				c.desktopAuthed = true
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "joined wrong room rejected",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.agentName = "alice"
+				c.joinedRoom = "other"
+			},
+			wantError: "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: other",
+		},
+		{
+			name: "joined non manager non observer rejected",
+			setup: func(_ *Hub, c *Client, _ *RoomState) {
+				c.agentName = "alice"
+				c.joinedRoom = "r1"
+			},
+			wantError: "yalnızca aktif manager veya observer tüm mesajları okuyabilir",
+		},
+		{
+			name: "active manager allowed",
+			setup: func(_ *Hub, c *Client, roomState *RoomState) {
+				c.agentName = "manager"
+				c.joinedRoom = "r1"
+				if _, _, err := roomState.Join("manager", "manager"); err != nil {
+					panic(err)
+				}
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "configured observer allowed",
+			setup: func(h *Hub, c *Client, _ *RoomState) {
+				c.agentName = "observer"
+				c.joinedRoom = "r1"
+				h.setConfiguredObservers("r1", []string{"observer"})
+			},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h, c := newTestHubClient()
+			roomState := h.getOrCreateRoom("r1")
+			if tt.setup != nil {
+				tt.setup(h, c, roomState)
+			}
+
+			req := types.Request{ID: "req-1", Type: "get_all_messages"}
+			allowed := h.authorizeReadAllMessages(c, req, "r1", roomState)
+			if allowed != tt.wantAllowed {
+				t.Fatalf("authorizeReadAllMessages() = %v, want %v", allowed, tt.wantAllowed)
+			}
+			if tt.wantAllowed {
+				select {
+				case payload := <-c.send:
+					t.Fatalf("expected no response, got %s", string(payload))
+				default:
+				}
+				return
+			}
+
+			resp := readResponse(t, c, "get_all_messages")
+			if resp.Success || resp.Error != tt.wantError {
+				t.Fatalf("response success=%v error=%q, want error %q", resp.Success, resp.Error, tt.wantError)
+			}
+		})
 	}
 }
 
@@ -96,6 +528,39 @@ func TestHandleSendMessage_FromMismatchRejected(t *testing.T) {
 	resp := readResponse(t, c, "send_message")
 	if resp.Success {
 		t.Fatalf("expected from mismatch rejection")
+	}
+}
+
+func TestHandleSendMessage_InvalidPayloadRejectedAfterJoin(t *testing.T) {
+	h, c := newTestHubClient()
+
+	h.handleRequest(c, types.Request{
+		ID:   "join-1",
+		Type: "join_room",
+		Room: "r1",
+		Data: mustRawJSON(t, map[string]any{
+			"agent_name": "alice",
+			"role":       "developer",
+		}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("expected join success, got error=%s", resp.Error)
+	}
+	before := len(h.getOrCreateRoom("r1").GetMessages())
+
+	h.handleRequest(c, types.Request{
+		ID:   "msg-bad",
+		Type: "send_message",
+		Room: "r1",
+		Data: json.RawMessage(`{"from":"alice","content":123}`),
+	})
+
+	resp := readResponse(t, c, "send_message")
+	if resp.Success || resp.Error != "invalid send_message payload" {
+		t.Fatalf("response success=%v error=%q, want invalid send_message payload", resp.Success, resp.Error)
+	}
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != before {
+		t.Fatalf("invalid send_message payload mutated messages: got %d messages, want %d", got, before)
 	}
 }
 
@@ -605,5 +1070,127 @@ func TestHandleSetManager_RequiresDesktopAuth(t *testing.T) {
 	}
 	if got := h.getConfiguredManager("r1"); got != "manager" {
 		t.Fatalf("expected configured manager to be manager, got %q", got)
+	}
+}
+
+func TestWriteAgentMessageLineFormatsExistingCases(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  types.Message
+		want string
+	}{
+		{
+			name: "system",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				Type:      "system",
+				Content:   "joined",
+			},
+			want: "[01:02:03] joined\n",
+		},
+		{
+			name: "broadcast",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "all",
+				Content:   "hello",
+			},
+			want: "[01:02:03] alice → HERKESE: hello\n",
+		},
+		{
+			name: "routed",
+			msg: types.Message{
+				Timestamp:  "2026-07-11T01:02:03.000000",
+				From:       "alice",
+				To:         "manager",
+				OriginalTo: "bob",
+				Content:    "please check",
+			},
+			want: "[01:02:03] alice → manager (orijinal: bob): please check\n",
+		},
+		{
+			name: "direct",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "bob",
+				Content:   "hello",
+			},
+			want: "[01:02:03] alice → bob: hello\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			writeAgentMessageLine(&sb, tt.msg)
+			if got := sb.String(); got != tt.want {
+				t.Fatalf("formatted line mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteAllMessagesLineFormatsExistingCases(t *testing.T) {
+	longContent := strings.Repeat("x", 101)
+	tests := []struct {
+		name string
+		msg  types.Message
+		want string
+	}{
+		{
+			name: "system",
+			msg: types.Message{
+				Timestamp: "2026-07-11T01:02:03.000000",
+				Type:      "system",
+				Content:   "joined",
+			},
+			want: "[01:02:03] SYSTEM: joined\n",
+		},
+		{
+			name: "routed",
+			msg: types.Message{
+				ID:         42,
+				Timestamp:  "2026-07-11T01:02:03.000000",
+				From:       "alice",
+				To:         "manager",
+				OriginalTo: "bob",
+				Content:    longContent,
+			},
+			want: "[01:02:03] #42 alice → manager (orijinal: bob): " + strings.Repeat("x", 100) + "\n",
+		},
+		{
+			name: "broadcast",
+			msg: types.Message{
+				ID:        8,
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "all",
+				Content:   "hello all",
+			},
+			want: "[01:02:03] #8 alice → all: hello all\n",
+		},
+		{
+			name: "direct",
+			msg: types.Message{
+				ID:        7,
+				Timestamp: "2026-07-11T01:02:03.000000",
+				From:      "alice",
+				To:        "bob",
+				Content:   "hello",
+			},
+			want: "[01:02:03] #7 alice → bob: hello\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			writeAllMessagesLine(&sb, tt.msg)
+			if got := sb.String(); got != tt.want {
+				t.Fatalf("formatted line mismatch\n got: %q\nwant: %q", got, tt.want)
+			}
+		})
 	}
 }

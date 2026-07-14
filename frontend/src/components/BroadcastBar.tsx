@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { type KeyboardEvent, useRef, useState } from "react";
 import { useTeams } from "../store/useTeams";
 import { useTerminals } from "../store/useTerminals";
 import {
@@ -6,6 +6,7 @@ import {
   StopBroadcastVoiceCapture,
 } from "../../wailsjs/go/main/App";
 import { VoiceState } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 // BroadcastBar lets the user type once and fan the text out to every agent
 // terminal of the active team at the same time — as if they typed it into each
@@ -49,7 +50,7 @@ export default function BroadcastBar() {
       .catch((e) => {
         busyVoiceRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
 
@@ -74,7 +75,7 @@ export default function BroadcastBar() {
         busyVoiceRef.current = false;
         releasePendingRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
 
@@ -88,21 +89,48 @@ export default function BroadcastBar() {
     finishVoiceStop();
   };
 
+  const handleVoiceKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    if (e.repeat) return;
+    startVoice();
+  };
+
+  const handleVoiceKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    stopVoice();
+  };
+
+  const voiceButtonLabel =
+    voiceState === "recording"
+      ? "Toplu mesaj sesi kaydediliyor — bırakınca metne eklenir"
+      : voiceState === "transcribing"
+        ? "Toplu mesaj sesi çevriliyor"
+        : voiceError
+          ? `Toplu mesaj ses hatası: ${voiceError}`
+          : "Toplu mesaj için sesli prompt — basılı tutarak konuş";
+  const voiceCapturePending =
+    voiceState === "recording" || voiceState === "transcribing";
+
   const handleSend = async () => {
-    if (!text.trim() || !activeTeamID || busy) return;
+    // Don't race a pending transcript: sending while Whisper is still resolving
+    // can clear the textarea, then append the transcript as a stranded follow-up
+    // prompt instead of including it in the intended broadcast.
+    if (!text.trim() || !activeTeamID || busy || voiceCapturePending) return;
     setBusy(true);
     setError(null);
     try {
       await broadcastToTeam(activeTeamID, text, submit);
       setText("");
     } catch (e) {
-      setError(String(e));
+      setError(errorToString(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // ⌘/Ctrl+Enter dispatches the broadcast; a plain Enter inserts a newline so
     // the broadcast text can be multi-line.
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -142,7 +170,11 @@ export default function BroadcastBar() {
         onMouseUp={stopVoice}
         onMouseLeave={stopVoice}
         disabled={busy || !activeTeamID || voiceState === "transcribing"}
-        aria-label="Toplu mesaj için sesli prompt"
+        onKeyDown={handleVoiceKeyDown}
+        onKeyUp={handleVoiceKeyUp}
+        onBlur={stopVoice}
+        aria-label={voiceButtonLabel}
+        aria-pressed={voiceState === "recording"}
         title={
           voiceState === "recording"
             ? "Kaydediliyor… bırakınca metne eklenir"
@@ -200,8 +232,12 @@ export default function BroadcastBar() {
       <button
         className="broadcast-bar-send"
         onClick={handleSend}
-        disabled={busy || !text.trim() || !activeTeamID}
-        title="Metni tüm agent terminallerine yaz"
+        disabled={busy || voiceCapturePending || !text.trim() || !activeTeamID}
+        title={
+          voiceCapturePending
+            ? "Sesli prompt tamamlanınca gönderilebilir"
+            : "Metni tüm agent terminallerine yaz"
+        }
       >
         {busy ? "Gönderiliyor…" : "Gönder"}
       </button>

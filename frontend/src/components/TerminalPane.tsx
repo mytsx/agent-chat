@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { WriteToTerminal, ResizeTerminal, StartVoiceCapture, StopVoiceCapture } from "../../wailsjs/go/main/App";
 import { CLIType, VoiceState } from "../lib/types";
+import { errorToString } from "../lib/errorText";
 
 // fmtRecTime formats elapsed recording seconds as m:ss for the live timer pill.
 function fmtRecTime(s: number): string {
@@ -46,6 +47,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
   const startedRef = useRef(false);
   const releasePendingRef = useRef(false);
   const [recSecs, setRecSecs] = useState(0);
+  const terminalLabel = agentName || "Terminal";
 
   useEffect(() => {
     if (!containerRef.current || !sessionID) return;
@@ -216,7 +218,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
       .catch((e) => {
         busyRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
   const startVoice = () => {
@@ -242,7 +244,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
         busyRef.current = false;
         releasePendingRef.current = false;
         setVoiceState("error");
-        setVoiceError(String(e));
+        setVoiceError(errorToString(e));
       });
   };
   const stopVoice = () => {
@@ -257,10 +259,32 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
     finishStop();
   };
 
+  const handleVoiceKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    if (e.repeat) return;
+    startVoice();
+  };
+
+  const handleVoiceKeyUp = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== " " && e.key !== "Enter") return;
+    e.preventDefault();
+    stopVoice();
+  };
+
+  const voiceButtonLabel =
+    voiceState === "recording"
+      ? "Recording voice prompt — release to insert"
+      : voiceState === "transcribing"
+      ? "Transcribing voice prompt"
+      : voiceError
+      ? `Voice prompt error: ${voiceError}`
+      : "Voice prompt — hold to speak";
+
   return (
     <div className="terminal-pane">
       <div className="terminal-header">
-        <span className="terminal-agent-name">{agentName || "Terminal"}</span>
+        <span className="terminal-agent-name">{terminalLabel}</span>
         {cliType && cliType !== "shell" && (
           <span className={`cli-badge cli-badge-${cliType}`}>{cliType}</span>
         )}
@@ -277,15 +301,19 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
             }}
             onMouseUp={stopVoice}
             onMouseLeave={stopVoice}
-            aria-label="Sesli prompt — bas-konuş"
+            onKeyDown={handleVoiceKeyDown}
+            onKeyUp={handleVoiceKeyUp}
+            onBlur={stopVoice}
+            aria-label={voiceButtonLabel}
+            aria-pressed={voiceState === "recording"}
             title={
               voiceState === "recording"
-                ? "Kaydediliyor… bırakınca yazılır"
+                ? "Recording… release to insert"
                 : voiceState === "transcribing"
-                ? "Çevriliyor…"
+                ? "Transcribing…"
                 : voiceError
                 ? voiceError
-                : "Bas-konuş (sesli prompt)"
+                : "Push to talk (voice prompt)"
             }
           >
             {voiceState === "recording" ? (
@@ -324,7 +352,8 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               className="terminal-btn-resume"
               onClick={onResume}
               disabled={!canResume}
-              title={canResume ? "Oturumdan devam et (--resume)" : "Devam edilebilir oturum hen\u00FCz yakalanmad\u0131"}
+              aria-label={canResume ? `Resume ${terminalLabel} session` : `No resumable session for ${terminalLabel}`}
+              title={canResume ? "Resume session (--resume)" : "No resumable session captured yet"}
             >
               {"\u23EF"}
             </button>
@@ -334,6 +363,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-restart"
               onClick={onRestart}
+              aria-label={`Restart ${terminalLabel} terminal`}
               title="Restart terminal"
             >
               {"\u21BB"}
@@ -344,6 +374,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-focus"
               onClick={onToggleFocus}
+              aria-label={isFocused ? `Restore ${terminalLabel} terminal to grid` : `Maximize ${terminalLabel} terminal`}
               title={isFocused ? "Restore" : "Maximize"}
             >
               {isFocused ? "\u25A3" : "\u25A1"}
@@ -354,6 +385,7 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
               type="button"
               className="terminal-btn-remove"
               onClick={onRemove}
+              aria-label={`Close ${terminalLabel} terminal`}
               title="Close terminal"
             >
               {"\u00D7"}
@@ -361,7 +393,12 @@ export default function TerminalPane({ sessionID, agentName, cliType, isFocused,
           )}
         </div>
       </div>
-      <div className="terminal-container" ref={containerRef} />
+      <div
+        className="terminal-container"
+        ref={containerRef}
+        role="region"
+        aria-label={`${terminalLabel} terminal session`}
+      />
     </div>
   );
 }

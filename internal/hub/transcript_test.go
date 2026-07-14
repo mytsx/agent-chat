@@ -214,6 +214,37 @@ func TestReadFullTranscriptKeepsDistinctMessagesSameIDAndTimestamp(t *testing.T)
 	}
 }
 
+// Same-id/same-timestamp messages can also share from+content while differing
+// only in routing metadata (for example, a visible broadcast plus a direct copy).
+// Dedup must preserve both; otherwise the transcript silently loses one boundary
+// record even though the user-visible text looks identical.
+func TestReadFullTranscriptKeepsMessagesDifferentRoutingMetadata(t *testing.T) {
+	dataDir := t.TempDir()
+	room := "route-collide"
+	const ts = "2026-06-22T10:00:00.000000"
+	txWriteArchive(t, dataDir, room, []types.Message{
+		{ID: 1, From: "alice", To: "all", Content: "same text", Timestamp: ts, Type: "broadcast"},
+	})
+	txWriteSnapshot(t, dataDir, room, "1700000100", []types.Message{
+		{ID: 1, From: "alice", To: "bob", Content: "same text", Timestamp: ts, Type: "direct"},
+	})
+
+	got, err := ReadFullTranscript(dataDir, room, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("routing-distinct messages conflated: got %d, want 2: %+v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, m := range got {
+		seen[m.Type+":"+m.To] = true
+	}
+	if !seen["broadcast:all"] || !seen["direct:bob"] {
+		t.Fatalf("routing metadata not preserved: %+v", got)
+	}
+}
+
 // A true duplicate (same message present in BOTH archive and snapshot) still
 // dedupes — identical id AND timestamp.
 func TestReadFullTranscriptDedupsTrueDuplicate(t *testing.T) {

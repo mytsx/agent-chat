@@ -23,19 +23,16 @@ type copilotLine struct {
 }
 
 func (copilotAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMessage, Cursor, error) {
-	lines, next, err := readCompleteJSONLines(path, cur.Offset)
-	var out []ParsedMessage
-	for _, line := range lines {
+	return parseCompleteJSONLUserMessages(path, cur, func(line []byte) (string, string, bool) {
 		var cl copilotLine
-		if json.Unmarshal(line.Data, &cl) != nil {
-			continue
+		if json.Unmarshal(line, &cl) != nil {
+			return "", "", false
 		}
 		if cl.Type != "user.message" || cl.Data.Content == "" {
-			continue
+			return "", "", false
 		}
-		out = append(out, ParsedMessage{Content: cl.Data.Content, Timestamp: cl.Timestamp, After: Cursor{Offset: line.OffsetAfter}})
-	}
-	return out, Cursor{Offset: next}, err
+		return cl.Data.Content, cl.Timestamp, true
+	})
 }
 
 func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {
@@ -68,7 +65,7 @@ func (copilotAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed 
 		}
 		ev := filepath.Join(dir, "events.jsonl")
 		info, serr := os.Stat(ev)
-		if serr != nil || info.ModTime().Before(cutoff) {
+		if serr != nil || !info.Mode().IsRegular() || info.ModTime().Before(cutoff) {
 			continue
 		}
 		if claimed != nil && claimed(ev) {

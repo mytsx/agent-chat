@@ -75,10 +75,17 @@ func (geminiAdapter) ParseNewUserMessages(path string, cur Cursor) ([]ParsedMess
 		all = append(all, ParsedMessage{Content: text, Timestamp: m.Timestamp, After: Cursor{Count: len(all) + 1}})
 	}
 	final := Cursor{Count: len(all), ModTime: mt}
-	if cur.Count >= len(all) {
+	start := cur.Count
+	if start > len(all) {
+		// The monolithic Gemini file can be replaced/truncated at the same path
+		// (cleanup, resume, or crash recovery). A stale count from the old file would
+		// otherwise skip every user message in the new, shorter transcript.
+		start = 0
+	}
+	if start >= len(all) {
 		return nil, final, nil
 	}
-	return all[cur.Count:], final, nil
+	return all[start:], final, nil
 }
 
 func (geminiAdapter) DiscoverFile(cwd string, spawnedAtUnixNano int64, claimed func(string) bool) (string, error) {

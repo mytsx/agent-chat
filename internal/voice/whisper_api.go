@@ -8,6 +8,8 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strings"
+	"time"
 )
 
 // whisperEndpoint is the OpenAI transcription endpoint. A var (not const) so tests
@@ -21,9 +23,17 @@ type WhisperClient struct {
 	http   *http.Client
 }
 
-// NewWhisperClient builds a client bound to an API key.
+// defaultWhisperHTTPClient is shared across all WhisperClients. The API key lives on
+// the WhisperClient (rebuilt per request so a Settings change takes effect immediately),
+// but the underlying http.Client/Transport is reused so TCP keep-alive and TLS sessions
+// survive across transcriptions instead of leaking a fresh connection pool each call.
+// The bounded timeout stops a hung/slow OpenAI response from blocking forever (the
+// per-request context still applies on top, whichever fires first).
+var defaultWhisperHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// NewWhisperClient builds a client bound to an API key, reusing the shared HTTP client.
 func NewWhisperClient(apiKey string) *WhisperClient {
-	return &WhisperClient{apiKey: apiKey, http: &http.Client{}}
+	return &WhisperClient{apiKey: strings.TrimSpace(apiKey), http: defaultWhisperHTTPClient}
 }
 
 // Transcribe uploads wav as multipart/form-data (model=whisper-1, language=tr)
