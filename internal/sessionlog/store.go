@@ -212,10 +212,17 @@ func (s *Store) ListAgents(room string) []string {
 		if !strings.EqualFold(r.Room, room) {
 			continue
 		}
+		agentName := strings.TrimSpace(r.AgentName)
+		if agentName == "" {
+			continue
+		}
 		key := strings.ToLower(r.AgentName)
-		if r.LastSeen > last[key] {
+		// Track the FIRST time we see a key (not just LastSeen > current): a record
+		// with LastSeen == 0 (never touched) would otherwise be dropped, since 0 > 0
+		// is false and the zero-value map default is also 0.
+		if _, seen := last[key]; !seen || r.LastSeen > last[key] {
 			last[key] = r.LastSeen
-			display[key] = r.AgentName
+			display[key] = agentName
 		}
 	}
 	// Sort the already-lowercased keys by last-seen, THEN map to display names — sorting
@@ -225,7 +232,12 @@ func (s *Store) ListAgents(room string) []string {
 	for key := range last {
 		keys = append(keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool { return last[keys[i]] > last[keys[j]] })
+	sort.Slice(keys, func(i, j int) bool {
+		if last[keys[i]] != last[keys[j]] {
+			return last[keys[i]] > last[keys[j]]
+		}
+		return keys[i] < keys[j] // deterministic tie-break for equal last-seen
+	})
 	names := make([]string, 0, len(keys))
 	for _, key := range keys {
 		names = append(names, display[key])
