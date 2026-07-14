@@ -162,6 +162,25 @@ func TestResolveUserShellFallsBackWhenSHELLIsInvalid(t *testing.T) {
 	}
 }
 
+// TestResolveUserShellRejectsRelativeSHELL: a $SHELL that resolves to a RELATIVE
+// path (an executable planted in the cwd) must be rejected in favor of an
+// absolute fallback, so a project-dir ./shell can't be launched (Gemini PR #78
+// security-high; mirrors the resolveCLIBinary IsAbs guard).
+func TestResolveUserShellRejectsRelativeSHELL(t *testing.T) {
+	dir := t.TempDir()
+	evil := filepath.Join(dir, "evilsh")
+	if err := os.WriteFile(evil, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write fake shell: %v", err)
+	}
+	t.Chdir(dir)                  // so "./evilsh" resolves via cwd
+	t.Setenv("SHELL", "./evilsh") // exec.LookPath returns this verbatim (relative)
+
+	got := resolveUserShell()
+	if !filepath.IsAbs(got) {
+		t.Fatalf("resolveUserShell must return an absolute path, got relative %q", got)
+	}
+}
+
 func TestGetCommandShellUsesResolvedFallback(t *testing.T) {
 	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 

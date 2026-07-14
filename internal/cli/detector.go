@@ -214,7 +214,11 @@ func DetectAll() []CLIInfo {
 // falls back to /bin/zsh, /bin/sh, and finally a literal /bin/sh.
 func resolveUserShell() string {
 	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
-		if path, err := exec.LookPath(shell); err == nil {
+		// Require an ABSOLUTE resolution: exec.LookPath returns a value containing a
+		// slash (e.g. SHELL="./evilsh") verbatim, so without this a relative SHELL
+		// would launch a binary resolved through the cwd — exactly the bogus/relative
+		// command this function documents it must reject (mirrors resolveCLIBinary).
+		if path, err := exec.LookPath(shell); err == nil && filepath.IsAbs(path) {
 			return path
 		}
 	}
