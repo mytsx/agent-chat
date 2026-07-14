@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,8 +235,113 @@ func (o *Orchestrator) isCurrentSessionLocked(chatDir, agentName, sessionID stri
 	return ok && sessions[agentName] == sessionID
 }
 
+// registeredAgentNameLocked returns the currently registered key for agentName
+// in chatDir using the same trimmed, case-insensitive identity model as routing.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) registeredAgentNameLocked(chatDir, agentName string) (string, bool) {
+	sessions := o.agentSessions[chatDir]
+	if sessions == nil {
+		return "", false
+	}
+	registeredName, _, ok := resolveAgentSession(sessions, agentName)
+	return registeredName, ok
+}
+
+// clearNotificationStateLocked drops cooldown/deferral state for a registered
+// agent key. Caller MUST hold o.mu.
+func (o *Orchestrator) clearNotificationStateLocked(chatDir, agentName string) {
+	key := notificationKey(chatDir, agentName)
+	delete(o.lastNotified, key)
+	if timer, ok := o.pendingTimers[key]; ok {
+		timer.Stop()
+		delete(o.pendingTimers, key)
+	}
+	delete(o.pendingMsgs, key)
+	delete(o.deferStartedAt, key)
+}
+
+// refreshNotificationStateForSessionReplaceLocked drops stale cooldown/deferral
+// state when the same agent name is rebound to a new PTY session. Pending
+// notifications are preserved and re-armed against the new session so queued
+// messages do not rot behind a stopped timer for the old session.
+// Caller MUST hold o.mu.
+func (o *Orchestrator) refreshNotificationStateForSessionReplaceLocked(chatDir, agentName, sessionID string) {
+	key := notificationKey(chatDir, agentName)
+	delete(o.lastNotified, key)
+	delete(o.deferStartedAt, key)
+	if timer, ok := o.pendingTimers[key]; ok {
+		timer.Stop()
+		delete(o.pendingTimers, key)
+	}
+	if len(o.pendingMsgs[key]) > 0 {
+		o.armFlushTimerLocked(key, chatDir, agentName, sessionID, o.reArmInterval)
+	}
+}
+
+// moveNotificationStateForSessionReplaceLocked moves queued notifications when
+// a case-variant spelling of the same agent replaces the old runtime key. This
+// mirrors the exact-name session replacement refresh while preserving queued
+// messages under the newly registered spelling, so pending notifications do not
+// disappear just because the agent rejoined as "pilot" instead of "Pilot".
+// Caller MUST hold o.mu.
+func (o *Orchestrator) moveNotificationStateForSessionReplaceLocked(chatDir, oldAgentName, newAgentName, sessionID string) {
+	oldKey := notificationKey(chatDir, oldAgentName)
+	newKey := notificationKey(chatDir, newAgentName)
+	pending := append([]pendingNotification(nil), o.pendingMsgs[oldKey]...)
+	if oldKey != newKey {
+		pending = append(pending, o.pendingMsgs[newKey]...)
+	}
+
+	for _, key := range []string{oldKey, newKey} {
+		delete(o.lastNotified, key)
+		delete(o.deferStartedAt, key)
+		delete(o.pendingMsgs, key)
+		if timer, ok := o.pendingTimers[key]; ok {
+			timer.Stop()
+			delete(o.pendingTimers, key)
+		}
+	}
+
+	if len(pending) > 0 {
+		o.pendingMsgs[newKey] = pending
+		o.armFlushTimerLocked(newKey, chatDir, newAgentName, sessionID, o.reArmInterval)
+	}
+}
+
 func notificationKey(chatDir, agentName string) string {
 	return chatDir + ":" + agentName
+}
+
+// resolveAgentSession finds target in a session snapshot using the same trimmed,
+// case-insensitive identity model as team.Store. Prefer an exact key match, then
+// a deterministic case-folded match, so message routing doesn't depend on UI
+// casing while still avoiding map-iteration nondeterminism if stale duplicate
+// runtime entries somehow exist.
+func resolveAgentSession(sessions map[string]string, target string) (agentName, sessionID string, ok bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", "", false
+	}
+	if sessionID, ok := sessions[target]; ok {
+		return target, sessionID, true
+	}
+
+	matches := make([]string, 0, 1)
+	for agent := range sessions {
+		if strings.EqualFold(strings.TrimSpace(agent), target) {
+			matches = append(matches, agent)
+		}
+	}
+	if len(matches) == 0 {
+		return "", "", false
+	}
+	sort.Strings(matches)
+	agentName = matches[0]
+	return agentName, sessions[agentName], true
+}
+
+func sameAgentName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // armFlushTimerLocked schedules a pending-notification flush for the agent.
@@ -278,9 +384,26 @@ func (o *Orchestrator) snapshotAgentSessions(chatDir string) (sessionsCopy map[s
 
 // RegisterAgent registers an agent's PTY session for a chat directory
 func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return
+	}
+
 	o.mu.Lock()
 	if o.agentSessions[chatDir] == nil {
 		o.agentSessions[chatDir] = make(map[string]string)
+	}
+	// Collapse any stale case-variant spelling of the same agent onto the new
+	// spelling so routing (which matches case-insensitively) can never see two
+	// runtime entries for one identity. Deleting during range is spec-safe.
+	for existingName := range o.agentSessions[chatDir] {
+		if existingName != agentName && sameAgentName(existingName, agentName) {
+			delete(o.agentSessions[chatDir], existingName)
+			o.moveNotificationStateForSessionReplaceLocked(chatDir, existingName, agentName, sessionID)
+		}
+	}
+	if existingSession, ok := o.agentSessions[chatDir][agentName]; ok && existingSession != sessionID {
+		o.refreshNotificationStateForSessionReplaceLocked(chatDir, agentName, sessionID)
 	}
 	o.agentSessions[chatDir][agentName] = sessionID
 	o.mu.Unlock()
@@ -291,6 +414,9 @@ func (o *Orchestrator) RegisterAgent(chatDir, agentName, sessionID string) {
 func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if registeredName, ok := o.registeredAgentNameLocked(chatDir, agentName); ok {
+		agentName = registeredName
+	}
 	o.unregisterAgentLocked(chatDir, agentName)
 }
 
@@ -300,6 +426,9 @@ func (o *Orchestrator) UnregisterAgent(chatDir, agentName string) {
 func (o *Orchestrator) UnregisterAgentSession(chatDir, agentName, sessionID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if registeredName, ok := o.registeredAgentNameLocked(chatDir, agentName); ok {
+		agentName = registeredName
+	}
 	if sessions, ok := o.agentSessions[chatDir]; ok && sessions[agentName] != sessionID {
 		return
 	}
@@ -316,14 +445,7 @@ func (o *Orchestrator) unregisterAgentLocked(chatDir, agentName string) {
 		}
 	}
 	// F007: Clean up cooldown/deferral tracking for this agent
-	key := notificationKey(chatDir, agentName)
-	delete(o.lastNotified, key)
-	if timer, ok := o.pendingTimers[key]; ok {
-		timer.Stop()
-		delete(o.pendingTimers, key)
-	}
-	delete(o.pendingMsgs, key)
-	delete(o.deferStartedAt, key)
+	o.clearNotificationStateLocked(chatDir, agentName)
 }
 
 // AnalyzeMessage analyzes a message and decides what action to take
@@ -733,12 +855,12 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 			return
 		}
 
-		target := msg.To
-		if sessionID, ok := sessionsCopy[target]; ok {
+		target, sessionID, ok := resolveAgentSession(sessionsCopy, msg.To)
+		if ok {
 			log.Printf("[ORCH] Manager-routed notify: from=%s manager=%s original_to=%s", msg.From, target, msg.OriginalTo)
 			o.notifyAgent(chatDir, target, sessionID, msg.From, false)
 		} else {
-			log.Printf("[ORCH] Manager-routed target not found: %s", target)
+			log.Printf("[ORCH] Manager-routed target not found: %s", msg.To)
 		}
 		return
 	}
@@ -764,13 +886,13 @@ func (o *Orchestrator) ProcessMessage(chatDir string, msg types.Message) {
 	if toAgent == "all" {
 		// Broadcast - notify everyone except sender
 		for agent, sessionID := range sessionsCopy {
-			if agent != fromAgent {
+			if !sameAgentName(agent, fromAgent) {
 				o.notifyAgent(chatDir, agent, sessionID, fromAgent, true)
 			}
 		}
-	} else if sessionID, ok := sessionsCopy[toAgent]; ok {
+	} else if target, sessionID, ok := resolveAgentSession(sessionsCopy, toAgent); ok {
 		// Direct message - notify target only
-		o.notifyAgent(chatDir, toAgent, sessionID, fromAgent, false)
+		o.notifyAgent(chatDir, target, sessionID, fromAgent, false)
 	} else {
 		log.Printf("[ORCH] Target agent=%s not found in sessions", toAgent)
 	}
