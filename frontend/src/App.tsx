@@ -3,7 +3,8 @@ import { Panel, Group as PanelGroup, Separator as PanelResizeHandle, type PanelI
 import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
 import { useTerminals } from "./store/useTerminals";
-import { MessagesNewEvent, AgentsUpdatedEvent } from "./lib/types";
+import { useUsage } from "./store/useUsage";
+import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent } from "./lib/types";
 import { errorToString } from "./lib/errorText";
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
@@ -136,6 +137,12 @@ function AppContent() {
       EventsOn("terminal:resume-available", (data: { sessionID: string; cliSessionID: string }) => {
         useTerminals.getState().setCLISessionID(data.sessionID, data.cliSessionID);
       });
+      EventsOn("usage:updated", (data: UsageUpdatedEvent) => {
+        useUsage.getState().applySnapshot(data);
+      });
+      EventsOn("usage:limit-hit", (data: { sessionID: string }) => {
+        useUsage.getState().markLimitHit(data.sessionID);
+      });
       cleanupFn = () => {
         try {
           EventsOff("messages:new");
@@ -144,6 +151,8 @@ function AppContent() {
           EventsOff("notification:deferred");
           EventsOff("broadcast:partial");
           EventsOff("terminal:resume-available");
+          EventsOff("usage:updated");
+          EventsOff("usage:limit-hit");
         } catch (e) {
           if (import.meta.env.DEV) console.warn("EventsOff cleanup failed:", e);
         }
