@@ -93,7 +93,9 @@ func (s *Store) List() []Prompt {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Prompt, len(s.prompts))
-	copy(result, s.prompts)
+	for i, p := range s.prompts {
+		result[i] = clonePrompt(p)
+	}
 	return result
 }
 
@@ -107,7 +109,7 @@ func (s *Store) Get(id string) (Prompt, error) {
 
 	for _, p := range s.prompts {
 		if p.ID == id {
-			return p, nil
+			return clonePrompt(p), nil
 		}
 	}
 	return Prompt{}, fmt.Errorf("prompt not found: %s", id)
@@ -138,7 +140,7 @@ func (s *Store) Create(name, content, category string, tags []string) (Prompt, e
 		s.prompts = s.prompts[:len(s.prompts)-1]
 		return Prompt{}, err
 	}
-	return p, nil
+	return clonePrompt(p), nil
 }
 
 // Update updates an existing prompt
@@ -163,7 +165,7 @@ func (s *Store) Update(id, name, content, category string, tags []string) (Promp
 				s.prompts[i] = prev
 				return Prompt{}, err
 			}
-			return s.prompts[i], nil
+			return clonePrompt(s.prompts[i]), nil
 		}
 	}
 	return Prompt{}, fmt.Errorf("prompt not found: %s", id)
@@ -278,7 +280,23 @@ func (s *Store) SeedIfMissingByName(name, content, category string, tags []strin
 		s.prompts = s.prompts[:len(s.prompts)-1] // roll back the in-memory add so it doesn't diverge from disk
 		return Prompt{}, false, err
 	}
-	return p, true, nil
+	return clonePrompt(p), true, nil
+}
+
+// clonePrompt returns a deep copy of p: the Tags/Variables slices are duplicated so a
+// caller mutating a returned prompt can't reach into the store's own backing slices
+// (List/Get/Create/Update all hand these out under the store's own lock).
+func clonePrompt(p Prompt) Prompt {
+	p.Tags = cloneStringSlice(p.Tags)
+	p.Variables = cloneStringSlice(p.Variables)
+	return p
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 // extractVariables finds {{VAR_NAME}} patterns in content
