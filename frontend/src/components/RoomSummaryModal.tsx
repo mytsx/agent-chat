@@ -18,6 +18,9 @@ interface RoomSummaryModalProps {
 export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProps) {
   const loadSummary = useSummaries((s) => s.loadSummary);
   const saveSummary = useSummaries((s) => s.saveSummary);
+  const titleId = "room-summary-title";
+  const summaryEditorId = "room-summary-editor";
+  const transcriptId = "room-summary-transcript";
 
   const [text, setText] = useState("");
   const [initialText, setInitialText] = useState("");
@@ -180,8 +183,14 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
 
   return (
     <div className="modal-overlay" onClick={requestClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>📝 Session Özeti — {room}</h3>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id={titleId}>📝 Session Özeti — {room}</h3>
 
         <p className="form-hint">
           Özeti <strong>tarafsız bir göz</strong> üretmeli. "Özet promptunu
@@ -201,8 +210,9 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
 
         {showTranscript && (
           <div className="form-group">
-            <label>Transcript (snapshot ∪ arşiv)</label>
+            <label htmlFor={transcriptId}>Transcript (snapshot ∪ arşiv)</label>
             <textarea
+              id={transcriptId}
               readOnly
               value={busyTranscript ? "Yükleniyor…" : transcript ?? ""}
               rows={8}
@@ -211,13 +221,14 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
         )}
 
         <div className="form-group">
-          <label>
+          <label htmlFor={summaryEditorId}>
             Özet{" "}
             {generatedAt && (
               <span className="form-hint">(son kayıt: {generatedAt})</span>
             )}
           </label>
           <textarea
+            id={summaryEditorId}
             autoFocus
             disabled={loading}
             value={loading ? "" : text}
@@ -241,8 +252,8 @@ export default function RoomSummaryModal({ room, onClose }: RoomSummaryModalProp
           </span>
         </div>
 
-        {notice && <div className="form-hint">{notice}</div>}
-        {error && <div className="form-error">⚠️ {error}</div>}
+        {notice && <div className="form-hint" role="status">{notice}</div>}
+        {error && <div className="form-error" role="alert">⚠️ {error}</div>}
 
         <div className="modal-actions">
           <button className="btn" onClick={handleSave} disabled={!canSave}>
