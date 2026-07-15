@@ -12,6 +12,22 @@ func TestScanRateLimitHit(t *testing.T) {
 		// case. A fixed set of lowercase/uppercase variants would miss "RaTe LiMiTeD",
 		// which is exactly why we fold case instead of listing variants.
 		"RaTe LiMiTeD now",
+		// Real Gemini 429 wording: "quota" comes AFTER "exceeded your ... quota".
+		"You exceeded your current quota",
+		// Real Gemini 429 wording: gRPC RESOURCE_EXHAUSTED style.
+		"Resource has been exhausted (e.g. check quota)",
+		// The three canonical Google/gRPC "resource exhausted" forms WITHOUT the word
+		// "quota" — so they exercise the cheap fast-path gate (which now includes
+		// "exhaust") as well as the regex. These prove the pattern
+		// `resource( has been)?[ _]?exhausted` matches all three spellings:
+		//   "resource has been exhausted" → resource + " has been" + " " + exhausted
+		//   "resource exhausted"          → resource + ""          + " " + exhausted
+		//   "resource_exhausted"          → resource + ""          + "_" + exhausted
+		// Before this fix the gate returned false (no quota/limit/429/request word) and
+		// the regex missed "resource exhausted" (single space, no "has been").
+		"Resource has been exhausted",
+		"Resource exhausted",
+		"RESOURCE_EXHAUSTED",
 	}
 	for _, s := range hits {
 		if !ScanRateLimitHit([]byte(s)) {
