@@ -76,3 +76,59 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Points the Homebrew tap at the release built above, so `brew upgrade --cask`
+  # picks it up. Runs only after the release exists, because the cask checksum is
+  # taken from the published DMG.
+  bump-cask:
+    name: Bump Homebrew Cask
+    needs: build-and-release
+    # Prereleases must not reach stable `brew upgrade` users. Mirrors the
+    # `prerelease:` expression the release step above uses.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      # GITHUB_TOKEN cannot write to another repository, so the tap needs its own
+      # credential. Fail with an actionable message instead of an opaque 403.
+      - name: Verify tap token is configured
+        env:
+          TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
+        run: |
+          if [ -z "$TAP_REPO_TOKEN" ]; then
+            echo "::error::TAP_REPO_TOKEN secret is not set. Create a PAT with 'repo' scope on mytsx/homebrew-agent-chat and add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Checkout tap repository
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: mytsx/homebrew-agent-chat
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap
+
+      - name: Render cask from the published DMG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p tap/Casks
+          ./packaging/homebrew/render-cask.sh "$version" > tap/Casks/agent-chat.rb
+          cat tap/Casks/agent-chat.rb
+
+      - name: Commit and push cask
+        working-directory: tap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ -z "$(git status --porcelain -- Casks/agent-chat.rb)" ]; then
+            echo "Cask already describes ${version}; nothing to push."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/agent-chat.rb
+          git commit -m "agent-chat ${version}"
+          git push
