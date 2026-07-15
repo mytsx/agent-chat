@@ -4,7 +4,7 @@
 
 **AI agent'larınızı tek bir masaüstü uygulamasından yönetin ve birbirleriyle konuşturun.**
 
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25.5+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Wails](https://img.shields.io/badge/Wails-v2-412991?logo=webassembly&logoColor=white)](https://wails.io)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-green?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiLz48L3N2Zz4=)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -71,7 +71,7 @@ Manager bir agent `join_room(..., role="manager")` ile aktif olduğunda, hub tü
 
 ### Kaynaktan Derleme
 
-Go 1.25+, Node.js 20.19+ veya 22.12+ (21.x ve 22.12 öncesi desteklenmez) ve [Wails CLI v2](https://wails.io/docs/gettingstarted/installation) gerekir.
+Go 1.25.5+, Node.js 20.19+ veya 22.12+ (21.x ve 22.12 öncesi desteklenmez) ve [Wails CLI v2](https://wails.io/docs/gettingstarted/installation) gerekir.
 
 ```bash
 git clone https://github.com/mytsx/agent-chat.git
