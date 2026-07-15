@@ -14,6 +14,33 @@ işaret eder. Uygulama kodunda karşılığı yoktur.
 
 CI ile lokal aynı script'i çağırır, yani lokalde denediğin çıktı CI'ın ürettiğiyle birebir aynıdır.
 
+## Tek seferlik kurulum (bakımcı)
+
+Bu ikisi yapılmadan `bump-cask` job'ı çalışmaz ve cask tap'e hiç düşmez.
+
+**1. Tap repo'sunu oluştur: `mytsx/homebrew-agent-chat`**
+
+Ad birebir bu olmalı — `brew`, `mytsx/agent-chat` tap'ini `homebrew-agent-chat`
+repo'suna çevirir. Public olmalı.
+
+> **Repo'yu boş bırakma.** GitHub'da "Add a README" işaretlenmeden açılan repo'nun hiç
+> commit'i ve dolayısıyla default branch'i olmaz; `actions/checkout` bunu
+> "couldn't find remote ref" ile reddeder. En az bir commit'le oluştur.
+
+`Casks/agent-chat.rb`'yi elle eklemeye gerek yok — ilk `v*` tag'inde CI oluşturur.
+
+**2. `TAP_REPO_TOKEN` secret'ını ekle**
+
+Workflow'un varsayılan `GITHUB_TOKEN`'ı yalnız kendi repo'suna yazabilir, tap'e yazamaz.
+Bu yüzden ayrı bir kimlik gerekir:
+
+- `homebrew-agent-chat` üzerinde yazma yetkisi olan bir PAT üret (classic: `repo` scope;
+  fine-grained: yalnız o repo + Contents: Read and write).
+- `mytsx/agent-chat` → Settings → Secrets and variables → Actions → New repository secret,
+  ad: `TAP_REPO_TOKEN`.
+
+Secret eksikse `bump-cask` job'ı 403 yerine açık bir hata mesajıyla durur.
+
 ## Nasıl çalışıyor
 
 1. `v*` tag'i → `build-and-release` job'ı DMG'yi üretip GitHub Release'e yükler.

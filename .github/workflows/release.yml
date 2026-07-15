@@ -115,20 +115,41 @@ jobs:
       - name: Render cask from the published DMG
         run: |
           version="${GITHUB_REF_NAME#v}"
-          mkdir -p tap/Casks
-          ./packaging/homebrew/render-cask.sh "$version" > tap/Casks/agent-chat.rb
-          cat tap/Casks/agent-chat.rb
+          ./packaging/homebrew/render-cask.sh "$version" > "${RUNNER_TEMP}/agent-chat.rb"
+          cat "${RUNNER_TEMP}/agent-chat.rb"
 
       - name: Commit and push cask
         working-directory: tap
         run: |
           version="${GITHUB_REF_NAME#v}"
-          if [ -z "$(git status --porcelain -- Casks/agent-chat.rb)" ]; then
-            echo "Cask already describes ${version}; nothing to push."
-            exit 0
-          fi
+          branch="$(git rev-parse --abbrev-ref HEAD)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/agent-chat.rb
-          git commit -m "agent-chat ${version}"
-          git push
+
+          # A release tagged moments earlier (or a manual tap edit) can land
+          # between checkout and push. Re-apply onto the refreshed tap and retry
+          # rather than leaving the tap pointing at the older version.
+          for attempt in 1 2 3; do
+            mkdir -p Casks
+            cp "${RUNNER_TEMP}/agent-chat.rb" Casks/agent-chat.rb
+
+            # Pathspec matters: a bare `git status --porcelain` collapses an
+            # untracked Casks/ to "?? Casks/" and would miss the new file.
+            if [ -z "$(git status --porcelain -- Casks/agent-chat.rb)" ]; then
+              echo "Cask already describes ${version}; nothing to push."
+              exit 0
+            fi
+
+            git add Casks/agent-chat.rb
+            git commit -m "agent-chat ${version}"
+            if git push origin "HEAD:${branch}"; then
+              exit 0
+            fi
+
+            echo "Push rejected (attempt ${attempt}); refreshing tap and retrying."
+            git fetch origin "${branch}"
+            git reset --hard "origin/${branch}"
+          done
+
+          echo "::error::Could not push the cask to mytsx/homebrew-agent-chat after 3 attempts."
+          exit 1

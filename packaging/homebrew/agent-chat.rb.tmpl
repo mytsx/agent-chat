@@ -13,5 +13,10 @@ cask "agent-chat" do
 
   app "Agent Chat.app"
 
-  zap trash: "~/.agent-chat"
+  zap trash: [
+    "~/.agent-chat",
+    "~/Library/Caches/com.mehmetyerli.agent-chat",
+    "~/Library/Preferences/com.mehmetyerli.agent-chat.plist",
+    "~/Library/WebKit/com.mehmetyerli.agent-chat",
+  ]
 end
