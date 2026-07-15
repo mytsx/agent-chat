@@ -71,7 +71,7 @@ Manager bir agent `join_room(..., role="manager")` ile aktif olduğunda, hub tü
 
 ### Kaynaktan Derleme
 
-Go 1.25+, Node.js 20.19+ (veya 22.12+) ve [Wails CLI v2](https://wails.io/docs/gettingstarted/installation) gerekir.
+Go 1.25+, Node.js 20.19+ veya 22.12+ (21.x ve 22.12 öncesi desteklenmez) ve [Wails CLI v2](https://wails.io/docs/gettingstarted/installation) gerekir.
 
 ```bash
 git clone https://github.com/mytsx/agent-chat.git
