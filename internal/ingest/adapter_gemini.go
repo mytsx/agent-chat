@@ -120,9 +120,11 @@ func (geminiAdapter) SessionID(path string) string {
 
 // ParseUsage sums Gemini's per-message token/cache counters (no denominator) and
 // returns the last-seen model. The real chat schema stores `tokens` as an OBJECT
-// {input,output,cached,...} — NOT an integer — so input/output are already separated
-// and no user/model heuristic is needed; per-field sums match the Claude/Copilot
-// display-only pattern (#10 follow-up). A message with all-zero tokens is skipped.
+// {input,output,cached,thoughts,tool,...} — NOT an integer — so input/output are
+// already separated and no user/model heuristic is needed; per-field sums match the
+// Claude/Copilot display-only pattern. thoughts (reasoning) and tool tokens are
+// model-produced, so they fold into OutputTokens (#10 follow-up). A message with
+// all-zero tokens is skipped.
 // (nil,nil) when the file is missing/unparsable or carries no token counters.
 func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	data, err := os.ReadFile(path)
@@ -137,9 +139,11 @@ func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 			Type   string `json:"type"`
 			Model  string `json:"model"`
 			Tokens struct {
-				Input  int64 `json:"input"`
-				Output int64 `json:"output"`
-				Cached int64 `json:"cached"`
+				Input    int64 `json:"input"`
+				Output   int64 `json:"output"`
+				Cached   int64 `json:"cached"`
+				Thoughts int64 `json:"thoughts"`
+				Tool     int64 `json:"tool"`
 			} `json:"tokens"`
 		} `json:"messages"`
 	}
@@ -150,12 +154,14 @@ func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	found := false
 	for _, m := range gf.Messages {
 		t := m.Tokens
-		if t.Input == 0 && t.Output == 0 && t.Cached == 0 {
+		if t.Input == 0 && t.Output == 0 && t.Cached == 0 && t.Thoughts == 0 && t.Tool == 0 {
 			continue
 		}
 		found = true
 		snap.InputTokens += t.Input
-		snap.OutputTokens += t.Output
+		// thoughts (reasoning) and tool tokens are model-produced output — fold them in
+		// so a reasoning/tool-heavy turn isn't under-reported (#10 follow-up).
+		snap.OutputTokens += t.Output + t.Thoughts + t.Tool
 		snap.CacheTokens += t.Cached
 		if m.Model != "" {
 			snap.Model = m.Model

@@ -110,9 +110,11 @@ func copilotWorkspaceCwd(dir string) string {
 }
 
 type copilotUsageTokens struct {
-	InputTokens     int64 `json:"inputTokens"`
-	OutputTokens    int64 `json:"outputTokens"`
-	CacheReadTokens int64 `json:"cacheReadTokens"`
+	InputTokens      int64 `json:"inputTokens"`
+	OutputTokens     int64 `json:"outputTokens"`
+	CacheReadTokens  int64 `json:"cacheReadTokens"`
+	CacheWriteTokens int64 `json:"cacheWriteTokens"`
+	ReasoningTokens  int64 `json:"reasoningTokens"`
 }
 
 // copilotUsageLine decodes BOTH usage schemas Copilot emits (#10 follow-up):
@@ -161,7 +163,13 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 				u, have := copilotUsageFrom(cl)
 				if have {
 					found = true
-					snap.InputTokens, snap.OutputTokens, snap.CacheTokens = u.InputTokens, u.OutputTokens, u.CacheReadTokens
+					// cacheWriteTokens folds into CacheTokens (like Claude's
+					// cache-creation) and reasoningTokens fold into OutputTokens
+					// (model-produced, like Gemini's thoughts) — else both are
+					// dropped and the session is under-reported (#10 follow-up).
+					snap.InputTokens = u.InputTokens
+					snap.OutputTokens = u.OutputTokens + u.ReasoningTokens
+					snap.CacheTokens = u.CacheReadTokens + u.CacheWriteTokens
 					if cl.Data.CurrentModel != "" {
 						snap.Model = cl.Data.CurrentModel
 					}
@@ -186,25 +194,29 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 
 // copilotUsageFrom extracts the non-zero token aggregate from a decoded usage line,
 // preferring the direct data.usage block (turn events) and falling back to the
-// session.shutdown modelMetrics map: the current model's usage if present, else the
-// sum across all models. Reports have=false when no non-zero counters are found (#10).
+// session.shutdown modelMetrics map. modelMetrics is a SESSION TOTAL, so it sums the
+// usage across ALL models — not just currentModel — otherwise a mid-session model
+// switch / auxiliary model would be dropped and the session under-reported. The
+// currentModel is kept only as the display label by the caller. Reports have=false
+// when no non-zero counters are found (#10 follow-up).
 func copilotUsageFrom(cl copilotUsageLine) (copilotUsageTokens, bool) {
 	nonZero := func(u copilotUsageTokens) bool {
-		return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0
+		return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 ||
+			u.CacheWriteTokens != 0 || u.ReasoningTokens != 0
 	}
 	if cl.Data.Usage != nil && nonZero(*cl.Data.Usage) {
 		return *cl.Data.Usage, true
 	}
 	if len(cl.Data.ModelMetrics) > 0 {
-		if mm, ok := cl.Data.ModelMetrics[cl.Data.CurrentModel]; ok {
-			return mm.Usage, nonZero(mm.Usage)
-		}
-		// CurrentModel isn't a key (or is empty) — sum every model's usage.
+		// Sum every model's usage — the aggregate is a per-session total across all
+		// models Copilot recorded, keyed by model name.
 		var sum copilotUsageTokens
 		for _, mm := range cl.Data.ModelMetrics {
 			sum.InputTokens += mm.Usage.InputTokens
 			sum.OutputTokens += mm.Usage.OutputTokens
 			sum.CacheReadTokens += mm.Usage.CacheReadTokens
+			sum.CacheWriteTokens += mm.Usage.CacheWriteTokens
+			sum.ReasoningTokens += mm.Usage.ReasoningTokens
 		}
 		return sum, nonZero(sum)
 	}
