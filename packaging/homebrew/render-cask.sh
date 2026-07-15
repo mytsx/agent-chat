@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # The rendered cask is written to stdout; progress goes to stderr.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 TEMPLATE="${TEMPLATE:-$SCRIPT_DIR/agent-chat.rb.tmpl}"
 REPO="${REPO:-mytsx/agent-chat}"
 
@@ -59,10 +59,11 @@ fi
 
 rendered="$(sed -e "s|__VERSION__|${version}|g" -e "s|__SHA256__|${sha256}|g" "$TEMPLATE")"
 
-# A renamed placeholder in the template would otherwise ship a cask still
-# carrying __VERSION__/__SHA256__ literals.
-if printf '%s' "$rendered" | grep -q '__VERSION__\|__SHA256__'; then
-    die "template still contains placeholders after substitution: $TEMPLATE"
+# Catch any leftover __PLACEHOLDER__, not just the two substituted above: a
+# renamed or newly added placeholder in the template would otherwise ship a cask
+# carrying the literal to the tap.
+if printf '%s' "$rendered" | grep -Eq '__[A-Z0-9_]+__'; then
+    die "unsubstituted placeholder left in rendered cask (template: $TEMPLATE)"
 fi
 
 printf '%s\n' "$rendered"
