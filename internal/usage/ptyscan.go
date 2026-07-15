@@ -13,7 +13,12 @@ var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 // phrasing must be present. Codex stays the authoritative source; this is a
 // best-effort reactive fallback for the token-only CLIs whose files don't
 // expose a denominator.
-var rateLimitPhrases = regexp.MustCompile(`(?i)(rate limited|rate limits? (exceeded|reached|hit)|hit (your )?rate limit|reached your [a-z ]*limit|usage limit reached|429 too many|too many requests|quota (exceeded|exhausted))`)
+//
+// `exceeded your [a-z ]*quota` and `resource (has been )?exhausted` cover the real
+// Gemini 429 wording where "quota" comes AFTER ("You exceeded your current quota")
+// or the gRPC RESOURCE_EXHAUSTED phrasing ("Resource has been exhausted (e.g. check
+// quota)") — neither of which the `quota (exceeded|exhausted)` order matched (#10).
+var rateLimitPhrases = regexp.MustCompile(`(?i)(rate limited|rate limits? (exceeded|reached|hit)|hit (your )?rate limit|reached your [a-z ]*limit|usage limit reached|429 too many|too many requests|quota (exceeded|exhausted)|exceeded your [a-z ]*quota|resource (has been )?exhausted)`)
 
 // containsFoldASCII reports whether b contains substr using ASCII case-insensitive
 // matching, with no allocation (unlike strings.ToLower + Contains). substr must be

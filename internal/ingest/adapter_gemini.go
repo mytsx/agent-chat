@@ -119,9 +119,11 @@ func (geminiAdapter) SessionID(path string) string {
 }
 
 // ParseUsage sums Gemini's per-message token/cache counters (no denominator) and
-// returns the last-seen model. User-message tokens are counted as input, model-
-// message tokens as output (#10). (nil,nil) when the file is missing/unparsable or
-// carries no token counters.
+// returns the last-seen model. The real chat schema stores `tokens` as an OBJECT
+// {input,output,cached,...} — NOT an integer — so input/output are already separated
+// and no user/model heuristic is needed; per-field sums match the Claude/Copilot
+// display-only pattern (#10 follow-up). A message with all-zero tokens is skipped.
+// (nil,nil) when the file is missing/unparsable or carries no token counters.
 func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -134,8 +136,11 @@ func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 		Messages []struct {
 			Type   string `json:"type"`
 			Model  string `json:"model"`
-			Tokens int64  `json:"tokens"`
-			Cached int64  `json:"cached"`
+			Tokens struct {
+				Input  int64 `json:"input"`
+				Output int64 `json:"output"`
+				Cached int64 `json:"cached"`
+			} `json:"tokens"`
 		} `json:"messages"`
 	}
 	if json.Unmarshal(data, &gf) != nil {
@@ -144,18 +149,14 @@ func (geminiAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 	snap := usage.Snapshot{CLI: "gemini", Kind: usage.KindTokenCount}
 	found := false
 	for _, m := range gf.Messages {
-		if m.Tokens == 0 && m.Cached == 0 {
+		t := m.Tokens
+		if t.Input == 0 && t.Output == 0 && t.Cached == 0 {
 			continue
 		}
 		found = true
-		// A user message's tokens are the PROMPT (input); model messages are output.
-		// m.Type == "user" is the human turn, everything else is a model turn (#10).
-		if m.Type == "user" {
-			snap.InputTokens += m.Tokens
-		} else {
-			snap.OutputTokens += m.Tokens
-		}
-		snap.CacheTokens += m.Cached
+		snap.InputTokens += t.Input
+		snap.OutputTokens += t.Output
+		snap.CacheTokens += t.Cached
 		if m.Model != "" {
 			snap.Model = m.Model
 		}

@@ -67,7 +67,7 @@ export default function SwitchDialog({
     }
   };
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div
         className="modal"
         role="dialog"

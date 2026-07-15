@@ -165,7 +165,10 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		}
 		return emit(content, ts)
 	}
-	discoverAndPoll := func() {
+	// forceUsage bypasses the usageParseInterval throttle for the single final drain
+	// (cancel/exited): a CLI that writes its last usage at shutdown within 2s of the
+	// previous parse would otherwise have it skipped and the final totals lost (#10).
+	discoverAndPoll := func(forceUsage bool) {
 		// Discover + claim FIRST, regardless of hub state: claiming this terminal's
 		// file (so a sibling same-cwd watcher can't grab it) doesn't need the hub, and
 		// a muted observer watcher must claim even while the hub is down (#65).
@@ -219,7 +222,7 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 		// messages.
 		up, canUsage := ad.(UsageParser)
 		if canUsage && onUsage != nil && path != "" && !s.muted.Load() {
-			if lastUsageParse.IsZero() || time.Since(lastUsageParse) >= usageParseInterval {
+			if forceUsage || lastUsageParse.IsZero() || time.Since(lastUsageParse) >= usageParseInterval {
 				lastUsageParse = time.Now()
 				if snap, uerr := up.ParseUsage(path); uerr != nil {
 					log.Printf("[USAGE] parse error (%s): %v", path, uerr)
@@ -237,14 +240,15 @@ func (m *Manager) run(s *session, ad SessionAdapter, cwd string, spawnedAtUnixNa
 			// tick (a quick prompt then immediate close) may have flushed its transcript
 			// on the way out, so the drain must DISCOVER the file too, not just poll an
 			// already-found one. The claim it may take is released right after by the
-			// deferred finish(), so there's no leak (#65 / Codex round-5).
-			discoverAndPoll()
+			// deferred finish(), so there's no leak (#65 / Codex round-5). forceUsage so
+			// a shutdown-time usage write isn't dropped by the throttle (#10).
+			discoverAndPoll(true)
 			return
 		case <-exited:
-			discoverAndPoll()
+			discoverAndPoll(true)
 			return
 		case <-ticker.C:
-			discoverAndPoll()
+			discoverAndPoll(false)
 		}
 	}
 }

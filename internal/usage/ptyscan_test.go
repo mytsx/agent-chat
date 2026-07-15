@@ -12,6 +12,10 @@ func TestScanRateLimitHit(t *testing.T) {
 		// case. A fixed set of lowercase/uppercase variants would miss "RaTe LiMiTeD",
 		// which is exactly why we fold case instead of listing variants.
 		"RaTe LiMiTeD now",
+		// Real Gemini 429 wording: "quota" comes AFTER "exceeded your ... quota".
+		"You exceeded your current quota",
+		// Real Gemini 429 wording: gRPC RESOURCE_EXHAUSTED style.
+		"Resource has been exhausted (e.g. check quota)",
 	}
 	for _, s := range hits {
 		if !ScanRateLimitHit([]byte(s)) {

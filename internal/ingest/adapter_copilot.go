@@ -109,14 +109,23 @@ func copilotWorkspaceCwd(dir string) string {
 	return ""
 }
 
+type copilotUsageTokens struct {
+	InputTokens     int64 `json:"inputTokens"`
+	OutputTokens    int64 `json:"outputTokens"`
+	CacheReadTokens int64 `json:"cacheReadTokens"`
+}
+
+// copilotUsageLine decodes BOTH usage schemas Copilot emits (#10 follow-up):
+//   - some turn events carry the aggregate directly under data.usage;
+//   - the session.shutdown event has NO data.usage — the aggregate lives under
+//     data.modelMetrics[<model>].usage (verified from a live events.jsonl).
 type copilotUsageLine struct {
 	Type string `json:"type"`
 	Data struct {
-		Usage struct {
-			InputTokens     int64 `json:"inputTokens"`
-			OutputTokens    int64 `json:"outputTokens"`
-			CacheReadTokens int64 `json:"cacheReadTokens"`
-		} `json:"usage"`
+		Usage        *copilotUsageTokens `json:"usage"`
+		ModelMetrics map[string]struct {
+			Usage copilotUsageTokens `json:"usage"`
+		} `json:"modelMetrics"`
 		CurrentModel string `json:"currentModel"`
 	} `json:"data"`
 }
@@ -144,11 +153,13 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 		// Process each complete line, plus the final partial chunk at EOF. ReadBytes
 		// keeps the '\n'; json.Unmarshal ignores trailing whitespace.
 		// Fast-path: only lines carrying a usage block matter; skip the rest.
+		// Both data.usage and modelMetrics[...].usage contain the substring "usage",
+		// so this fast-path still matches the shutdown event.
 		if len(line) > 0 && bytes.Contains(line, []byte(`"usage"`)) {
 			var cl copilotUsageLine
 			if json.Unmarshal(line, &cl) == nil {
-				u := cl.Data.Usage
-				if u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 {
+				u, have := copilotUsageFrom(cl)
+				if have {
 					found = true
 					snap.InputTokens, snap.OutputTokens, snap.CacheTokens = u.InputTokens, u.OutputTokens, u.CacheReadTokens
 					if cl.Data.CurrentModel != "" {
@@ -171,4 +182,31 @@ func (copilotAdapter) ParseUsage(path string) (*usage.Snapshot, error) {
 		return nil, nil
 	}
 	return &snap, nil
+}
+
+// copilotUsageFrom extracts the non-zero token aggregate from a decoded usage line,
+// preferring the direct data.usage block (turn events) and falling back to the
+// session.shutdown modelMetrics map: the current model's usage if present, else the
+// sum across all models. Reports have=false when no non-zero counters are found (#10).
+func copilotUsageFrom(cl copilotUsageLine) (copilotUsageTokens, bool) {
+	nonZero := func(u copilotUsageTokens) bool {
+		return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0
+	}
+	if cl.Data.Usage != nil && nonZero(*cl.Data.Usage) {
+		return *cl.Data.Usage, true
+	}
+	if len(cl.Data.ModelMetrics) > 0 {
+		if mm, ok := cl.Data.ModelMetrics[cl.Data.CurrentModel]; ok {
+			return mm.Usage, nonZero(mm.Usage)
+		}
+		// CurrentModel isn't a key (or is empty) — sum every model's usage.
+		var sum copilotUsageTokens
+		for _, mm := range cl.Data.ModelMetrics {
+			sum.InputTokens += mm.Usage.InputTokens
+			sum.OutputTokens += mm.Usage.OutputTokens
+			sum.CacheReadTokens += mm.Usage.CacheReadTokens
+		}
+		return sum, nonZero(sum)
+	}
+	return copilotUsageTokens{}, false
 }
