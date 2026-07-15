@@ -46,9 +46,13 @@ esac
 dmg_url="https://github.com/${REPO}/releases/download/v${version}/AgentChat-${version}-universal.dmg"
 
 if [ -z "$sha256" ]; then
-    tmp="$(mktemp -t agent-chat-dmg.XXXXXX)"
+    # Explicit template rather than `-t`: BSD mktemp treats the -t argument as a
+    # prefix and leaves a literal "XXXXXX" in the name, and GNU deprecates -t.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/agent-chat-dmg.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT
     echo "==> Downloading $dmg_url" >&2
+    # --retry-all-errors is load-bearing: plain --retry ignores 404, and this runs
+    # right after the release is published, when the asset may not be served yet.
     curl -fSL --retry 5 --retry-delay 5 --retry-all-errors -o "$tmp" "$dmg_url" ||
         die "could not download $dmg_url (is the release published?)"
     sha256="$(hash_file "$tmp")"
