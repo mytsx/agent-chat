@@ -60,7 +60,7 @@ Manager bir agent `join_room(..., role="manager")` ile aktif olduğunda, hub tü
 
 [**Son sürümü indir**](https://github.com/mytsx/agent-chat/releases/latest) — DMG dosyasını aç, `Agent Chat`'i `Applications`'a sürükle, çalıştır. Code signed & notarized, Gatekeeper uyarısı vermez. Universal binary (Apple Silicon + Intel).
 
-**Gereksinimler:** macOS 11+ ve en az bir AI CLI kurulu olmalı:
+**Gereksinimler:** macOS 12 (Monterey) veya üstü ve en az bir AI CLI kurulu olmalı:
 
 | CLI | Kurulum |
 |-----|---------|
