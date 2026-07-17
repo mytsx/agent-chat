@@ -1,0 +1,22 @@
+cask "agent-chat" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/mytsx/agent-chat/releases/download/v#{version}/AgentChat-#{version}-universal.dmg"
+  name "Agent Chat"
+  desc "Multi-agent AI CLI orchestration desktop app"
+  homepage "https://github.com/mytsx/agent-chat"
+
+  auto_updates false
+  # Bare symbol means ">= monterey"; Go 1.25 (go.mod) dropped macOS 11 and older.
+  depends_on macos: :monterey
+
+  app "Agent Chat.app"
+
+  zap trash: [
+    "~/.agent-chat",
+    "~/Library/Caches/com.mehmetyerli.agent-chat",
+    "~/Library/Preferences/com.mehmetyerli.agent-chat.plist",
+    "~/Library/WebKit/com.mehmetyerli.agent-chat",
+  ]
+end

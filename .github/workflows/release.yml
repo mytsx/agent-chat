@@ -76,3 +76,92 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Points the Homebrew tap at the release built above, so `brew upgrade --cask`
+  # picks it up. Runs only after the release exists, because the cask checksum is
+  # taken from the published DMG.
+  bump-cask:
+    name: Bump Homebrew Cask
+    needs: build-and-release
+    # Prereleases must not reach stable `brew upgrade` users. Mirrors the
+    # `prerelease:` expression the release step above uses.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      # GITHUB_TOKEN cannot write to another repository, so the tap needs its own
+      # credential. Fail with an actionable message instead of an opaque 403.
+      - name: Verify tap token is configured
+        env:
+          TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
+        run: |
+          if [ -z "$TAP_REPO_TOKEN" ]; then
+            echo "::error::TAP_REPO_TOKEN secret is not set. Create a PAT with 'repo' scope on mytsx/homebrew-agent-chat and add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Checkout tap repository
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: mytsx/homebrew-agent-chat
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap
+
+      - name: Render cask from the published DMG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./packaging/homebrew/render-cask.sh "$version" > "${RUNNER_TEMP}/agent-chat.rb"
+          cat "${RUNNER_TEMP}/agent-chat.rb"
+
+      - name: Commit and push cask
+        working-directory: tap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # A release tagged moments earlier (or a manual tap edit) can land
+          # between checkout and push. Re-apply onto the refreshed tap and retry
+          # rather than leaving the tap pointing at the older version.
+          for attempt in 1 2 3; do
+            # Never move the tap backwards. This job may be the *loser* of a race
+            # with a newer release, or an old tag (a v0.6.1 backport) may be built
+            # after v0.7.0 shipped. Read the tap's version before overwriting it.
+            existing="$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/agent-chat.rb 2>/dev/null || true)"
+            if [ -n "$existing" ] && [ "$existing" != "${version}" ]; then
+              newest="$(printf '%s\n%s\n' "$existing" "${version}" | sort -V | tail -1)"
+              if [ "$newest" = "$existing" ]; then
+                echo "Tap already describes ${existing}, which is newer than ${version}; not downgrading."
+                exit 0
+              fi
+            fi
+
+            mkdir -p Casks
+            cp "${RUNNER_TEMP}/agent-chat.rb" Casks/agent-chat.rb
+
+            # Pathspec matters: a bare `git status --porcelain` collapses an
+            # untracked Casks/ to "?? Casks/" and would miss the new file.
+            if [ -z "$(git status --porcelain -- Casks/agent-chat.rb)" ]; then
+              echo "Cask already describes ${version}; nothing to push."
+              exit 0
+            fi
+
+            git add Casks/agent-chat.rb
+            git commit -m "agent-chat ${version}"
+            if git push origin "HEAD:${branch}"; then
+              exit 0
+            fi
+
+            echo "Push rejected (attempt ${attempt}); refreshing tap and retrying."
+            git fetch origin "${branch}"
+            git reset --hard "origin/${branch}"
+          done
+
+          echo "::error::Could not push the cask to mytsx/homebrew-agent-chat after 3 attempts."
+          exit 1

@@ -56,7 +56,21 @@ Manager bir agent `join_room(..., role="manager")` ile aktif olduğunda, hub tü
 
 ## Kurulum
 
-### macOS (Hazır Uygulama)
+### macOS (Homebrew — önerilen)
+
+```bash
+brew install --cask mytsx/agent-chat/agent-chat
+```
+
+Ayrıca `brew tap` çalıştırmaya gerek yok; tam isim verildiğinde Homebrew tap'i kendisi ekler.
+
+Güncellemek için:
+
+```bash
+brew upgrade --cask agent-chat
+```
+
+### macOS (DMG'yi elle indir)
 
 [**Son sürümü indir**](https://github.com/mytsx/agent-chat/releases/latest) — DMG dosyasını aç, `Agent Chat`'i `Applications`'a sürükle, çalıştır. Code signed & notarized, Gatekeeper uyarısı vermez. Universal binary (Apple Silicon + Intel).
 
@@ -184,6 +198,9 @@ make release VERSION=x.y.z
 ```
 
 Bu komut sırayla: universal binary build → code signing → Apple notarization → DMG paketleme yapar. Çıktı: `dist/AgentChat-x.y.z-universal.dmg`
+
+CI'da `v*` tag'i push'landığında aynı akış çalışır, DMG GitHub Release'e yüklenir ve ardından
+Homebrew cask'ı otomatik olarak yeni sürüme bump'lanır. Ayrıntılar: [`packaging/homebrew/`](packaging/homebrew/README.md).
 
 ## Katkıda Bulunma
 
