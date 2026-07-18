@@ -7,7 +7,7 @@ import { useUsage } from "./store/useUsage";
 import { useUpdate } from "./store/useUpdate";
 import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent, UpdateInfo } from "./lib/types";
 import { errorToString } from "./lib/errorText";
-import { SendPromptToAgent, GetPendingUpdate } from "../wailsjs/go/main/App";
+import { SendPromptToAgent, GetPendingUpdate, ToggleFullscreen, GetAppVersion } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
@@ -49,6 +49,7 @@ function AppContent() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
   // Notifications that couldn't be injected into a terminal because the user kept
@@ -134,6 +135,20 @@ function AppContent() {
       mounted = false;
       off();
     };
+  }, []);
+
+  // Fetch the embedded build version once for the subtle top-right badge (#UI).
+  // Wrapped in try/catch: a Wails binding dereferences window.go synchronously, which
+  // throws (not rejects) outside the Wails runtime (browser preview / tests) and would
+  // otherwise crash the render — the .catch alone can't catch that synchronous throw.
+  useEffect(() => {
+    try {
+      GetAppVersion()
+        .then(setAppVersion)
+        .catch(() => {});
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("GetAppVersion failed:", e);
+    }
   }, []);
 
   // Set up event listeners for messages and agents
@@ -246,15 +261,7 @@ function AppContent() {
 
   return (
     <div className="app">
-      <button
-        type="button"
-        className="app-settings-btn"
-        onClick={() => setShowSettings(true)}
-        title="Ayarlar (sesli prompt / API anahtarı)"
-      >
-        ⚙️
-      </button>
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} appVersion={appVersion} />}
       <UpdateBanner />
       {worktreeNotice && (
         <div className="worktree-notice">
@@ -284,7 +291,45 @@ function AppContent() {
           <button type="button" onClick={() => dismissBroadcastNotice(notice.id)}>×</button>
         </div>
       ))}
-      <TabBar />
+      {/* Controls live in a relative row WITH the TabBar (not position:fixed to the
+          viewport) so they flow down together when the UpdateBanner/notices push the
+          header down, instead of hanging over the banner (review). */}
+      <div className="app-header-row">
+        <TabBar />
+        {appVersion && (
+          <span className="app-version-badge" title="Uygulama sürümü">
+            {/^\d/.test(appVersion) ? `v${appVersion}` : appVersion}
+          </span>
+        )}
+        <button
+          type="button"
+          className="app-fullscreen-btn"
+          onClick={() => {
+            // try/catch: the binding throws synchronously outside the Wails runtime
+            // (browser preview / tests); .catch alone can't catch that. In the real app
+            // it always succeeds, so no user-facing alert is warranted.
+            try {
+              ToggleFullscreen().catch((e) => {
+                if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+              });
+            } catch (e) {
+              if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+            }
+          }}
+          title="Tam ekran (aç/kapat)"
+          aria-label="Tam ekran"
+        >
+          ⛶
+        </button>
+        <button
+          type="button"
+          className="app-settings-btn"
+          onClick={() => setShowSettings(true)}
+          title="Ayarlar (sesli prompt / API anahtarı)"
+        >
+          ⚙️
+        </button>
+      </div>
       <BroadcastBar />
       {startupError && (
         <div className="broadcast-notice" title={startupError}>

@@ -1457,7 +1457,7 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 48px 6px 12px;
+  padding: 6px 12px;
   background: rgba(63, 185, 80, 0.15);
   border-bottom: 1px solid rgba(63, 185, 80, 0.3);
   font-size: 12px;
@@ -1916,8 +1916,20 @@ html, body, #root {
   animation: voice-spin 0.7s linear infinite;
 }
 @keyframes voice-spin { to { transform: rotate(360deg); } }
+/* Header row: TabBar + the absolutely-positioned top-right controls. Relative so the
+   controls anchor to the row (and flow with it under the banner), not the viewport. */
+.app-header-row {
+  position: relative;
+}
+
+/* Reserve room on the tab strip for the absolute controls (version + ⛶ + ⚙️, ~110px
+   from the right edge) so tabs can't slide under and overlap them when many are open. */
+.app-header-row .tab-bar {
+  padding-right: 140px;
+}
+
 .app-settings-btn {
-  position: fixed;
+  position: absolute;
   top: 8px;
   right: 12px;
   z-index: 50;
@@ -1927,8 +1939,45 @@ html, body, #root {
   font-size: 14px;
   padding: 4px 6px;
   opacity: 0.75;
+  /* Sits over the tab-bar's -webkit-app-region:drag zone; without no-drag the OS eats
+     the click as a window drag and the button becomes unclickable. */
+  -webkit-app-region: no-drag;
 }
 .app-settings-btn:hover {
+  opacity: 1;
+}
+
+/* Subtle always-visible build-version badge, top-right, left of the ⛶/⚙️ buttons. */
+.app-version-badge {
+  position: absolute;
+  top: 11px;
+  right: 68px;
+  z-index: 50;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  pointer-events: none;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* In-app fullscreen toggle (⛶), sits just left of the settings gear. */
+.app-fullscreen-btn {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+  z-index: 50;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  opacity: 0.75;
+  color: var(--text-primary);
+  /* Same as the settings button: escape the tab-bar drag region so clicks register. */
+  -webkit-app-region: no-drag;
+}
+.app-fullscreen-btn:hover {
   opacity: 1;
 }
 

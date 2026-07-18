@@ -34,6 +34,7 @@ import (
 	"desktop/internal/update"
 	"desktop/internal/usage"
 	"desktop/internal/validation"
+	"desktop/internal/version"
 	"desktop/internal/voice"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -699,6 +700,38 @@ func (a *App) CheckForUpdate() (*UpdateInfo, error) {
 // event-registration race without a second GitHub round-trip.
 func (a *App) GetPendingUpdate() *UpdateInfo {
 	return a.pendingUpdate.Load()
+}
+
+// GetAppVersion returns the embedded build version for display in the UI (Settings +
+// badge). Any dev/placeholder build (incl. the "0.1.0" Makefile default) normalizes to
+// "dev" so the UI can't show a release-looking "v0.1.0" while the update check silently
+// treats it as a dev build — the two must agree.
+func (a *App) GetAppVersion() string {
+	if version.IsDevBuild(buildVersion) {
+		return "dev"
+	}
+	return buildVersion
+}
+
+// domReady runs once the webview DOM is ready (Wails OnDomReady). It enables native
+// macOS fullscreen for the green title-bar button, which Wails otherwise leaves doing
+// a plain zoom (see fullscreen_darwin.go). Kept minimal — no blocking work.
+func (a *App) domReady(ctx context.Context) {
+	enableNativeFullscreen()
+}
+
+// ToggleFullscreen flips the window between fullscreen and windowed. Exposed so an
+// in-app control (the ⛶ button next to Settings) can offer fullscreen directly,
+// independent of the native title-bar button.
+func (a *App) ToggleFullscreen() {
+	if a.ctx == nil {
+		return // not started (e.g. a hand-constructed test App) — nothing to toggle
+	}
+	if runtime.WindowIsFullscreen(a.ctx) {
+		runtime.WindowUnfullscreen(a.ctx)
+	} else {
+		runtime.WindowFullscreen(a.ctx)
+	}
 }
 
 func (a *App) seedPrompts() {

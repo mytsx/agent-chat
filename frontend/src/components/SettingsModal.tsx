@@ -14,12 +14,14 @@ import { errorToString } from "../lib/errorText";
 
 interface SettingsModalProps {
   onClose: () => void;
+  // Fetched once by App and passed down, so the version isn't loaded twice over IPC.
+  appVersion?: string;
 }
 
 // SettingsModal edits the OpenAI Whisper API key for voice prompts (#16). The raw
 // key is never read back from the backend — only a masked hint + ffmpeg presence.
 // Reuses the shared .modal / .form-group / .modal-actions styles.
-export default function SettingsModal({ onClose }: SettingsModalProps) {
+export default function SettingsModal({ onClose, appVersion = "" }: SettingsModalProps) {
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -204,6 +206,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           }}
         >
           <label>Güncelleme</label>
+          <span className="form-hint" style={{ marginBottom: 6 }}>
+            Sürüm:{" "}
+            <strong>
+              {appVersion
+                ? /^\d/.test(appVersion)
+                  ? `v${appVersion}`
+                  : appVersion
+                : "…"}
+            </strong>
+          </span>
           <button
             className="btn btn-secondary"
             type="button"

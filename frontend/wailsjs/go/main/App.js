@@ -50,6 +50,10 @@ export function GetAgents(arg1) {
   return window['go']['main']['App']['GetAgents'](arg1);
 }
 
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
+}
+
 export function GetDeferralEnabled() {
   return window['go']['main']['App']['GetDeferralEnabled']();
 }
@@ -204,6 +208,10 @@ export function StopVoiceCapture(arg1) {
 
 export function SwitchTerminal(arg1, arg2) {
   return window['go']['main']['App']['SwitchTerminal'](arg1, arg2);
+}
+
+export function ToggleFullscreen() {
+  return window['go']['main']['App']['ToggleFullscreen']();
 }
 
 export function UpdatePrompt(arg1, arg2, arg3, arg4, arg5) {
