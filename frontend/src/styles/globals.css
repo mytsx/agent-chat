@@ -1939,6 +1939,9 @@ html, body, #root {
   font-size: 14px;
   padding: 4px 6px;
   opacity: 0.75;
+  /* Sits over the tab-bar's -webkit-app-region:drag zone; without no-drag the OS eats
+     the click as a window drag and the button becomes unclickable. */
+  -webkit-app-region: no-drag;
 }
 .app-settings-btn:hover {
   opacity: 1;
@@ -1971,6 +1974,8 @@ html, body, #root {
   padding: 4px 6px;
   opacity: 0.75;
   color: var(--text-primary);
+  /* Same as the settings button: escape the tab-bar drag region so clicks register. */
+  -webkit-app-region: no-drag;
 }
 .app-fullscreen-btn:hover {
   opacity: 1;
