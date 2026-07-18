@@ -261,7 +261,7 @@ function AppContent() {
 
   return (
     <div className="app">
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} appVersion={appVersion} />}
       <UpdateBanner />
       {worktreeNotice && (
         <div className="worktree-notice">

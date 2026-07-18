@@ -7,7 +7,6 @@ import {
   GetUsageThresholds,
   SetUsageThresholds,
   CheckForUpdate,
-  GetAppVersion,
 } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
 import { useUpdate } from "../store/useUpdate";
@@ -15,12 +14,14 @@ import { errorToString } from "../lib/errorText";
 
 interface SettingsModalProps {
   onClose: () => void;
+  // Fetched once by App and passed down, so the version isn't loaded twice over IPC.
+  appVersion?: string;
 }
 
 // SettingsModal edits the OpenAI Whisper API key for voice prompts (#16). The raw
 // key is never read back from the backend — only a masked hint + ffmpeg presence.
 // Reuses the shared .modal / .form-group / .modal-actions styles.
-export default function SettingsModal({ onClose }: SettingsModalProps) {
+export default function SettingsModal({ onClose, appVersion = "" }: SettingsModalProps) {
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -31,7 +32,6 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [critPct, setCritPct] = useState(95);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
-  const [appVersion, setAppVersion] = useState("");
 
   // #83: manual "Güncellemeleri kontrol et". Reuses the same CheckForUpdate binding
   // as the startup check; on a hit the banner also shows via the emitted event, but we
@@ -68,16 +68,6 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         setCritPct(t.criticalPercent ?? 95);
       })
       .catch(() => {});
-    // try/catch: a Wails binding dereferences window.go synchronously, which throws
-    // (not rejects) outside the Wails runtime (browser preview / tests). Silent in
-    // production — the version line is cosmetic, so a failure needs no user-facing alert.
-    try {
-      GetAppVersion()
-        .then(setAppVersion)
-        .catch(() => {});
-    } catch (e) {
-      if (import.meta.env.DEV) console.warn("GetAppVersion failed:", e);
-    }
   }, []);
 
   // Persist thresholds on blur, not on every keystroke — saving each edit causes
