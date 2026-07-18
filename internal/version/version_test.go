@@ -66,6 +66,10 @@ func TestCompare(t *testing.T) {
 		{"1.0.0-alpha.1", "1.0.0-alpha", 1},    // more fields wins
 		{"1.0.0-alpha.1", "1.0.0-alpha.2", -1}, // numeric field compare
 		{"1.0.0-1", "1.0.0-alpha", -1},         // numeric < alphanumeric
+		// SemVer 2.0.0: a leading-zero prerelease identifier ("01") is NOT numeric — it
+		// is alphanumeric, so numeric "1" ranks below it.
+		{"1.0.0-alpha.1", "1.0.0-alpha.01", -1},
+		{"1.0.0-alpha.01", "1.0.0-alpha.1", 1},
 	}
 	for _, tt := range tests {
 		a, okA := Parse(tt.a)
@@ -130,14 +134,18 @@ func TestIsDevBuild(t *testing.T) {
 		{"dev", true},
 		{"", true},
 		{"unknown", true},
-		{"0.1.0", true},       // Makefile/wails.json placeholder default
-		{"  0.1.0 ", true},    // trimmed
-		{"0.6.0-dirty", true}, // dirty working tree marker
+		{"0.1.0", true},         // Makefile/wails.json placeholder default
+		{"  0.1.0 ", true},      // trimmed
+		{"v0.1.0", true},        // v-prefixed placeholder
+		{"0.1.0-rc1", true},     // prerelease of the placeholder is still a dev build
+		{"0.1.0+build.5", true}, // placeholder with build metadata
+		{"0.6.0-dirty", true},   // dirty working tree marker
 		{"0.6.0-5-gabc-dirty", true},
 		{"not-a-version", true}, // unparseable → treat as dev, don't nag
 		{"0.6.0", false},        // real release
 		{"v1.2.3", false},
-		{"1.0.0-rc1", false}, // a prerelease build is not a dev build
+		{"0.1.05", false},    // genuine 0.1.5 patch, NOT the 0.1.0 placeholder
+		{"1.0.0-rc1", false}, // a non-placeholder prerelease build is not a dev build
 	}
 	for _, tt := range tests {
 		if got := IsDevBuild(tt.in); got != tt.want {

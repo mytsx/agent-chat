@@ -121,10 +121,12 @@ func comparePre(a, b string) int {
 }
 
 func comparePreField(a, b string) int {
-	an, aNum := parseNonNegInt(a)
-	bn, bNum := parseNonNegInt(b)
+	aNum := isNumericIdent(a)
+	bNum := isNumericIdent(b)
 	switch {
 	case aNum && bNum:
+		an, _ := parseNonNegInt(a)
+		bn, _ := parseNonNegInt(b)
 		return cmpInt(an, bn)
 	case aNum && !bNum:
 		return -1 // numeric identifiers have lower precedence than alphanumeric
@@ -133,6 +135,21 @@ func comparePreField(a, b string) int {
 	default:
 		return strings.Compare(a, b)
 	}
+}
+
+// isNumericIdent reports whether s is a SemVer 2.0.0 numeric prerelease identifier:
+// all digits and, per the spec, WITHOUT a leading zero. So "1" is numeric but "01" is
+// alphanumeric (compared lexically) — which changes precedence, e.g. alpha.1 < alpha.01.
+func isNumericIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s == "0" || s[0] != '0'
 }
 
 func cmpInt(a, b int) int {
@@ -167,19 +184,27 @@ func IsStable(s string) bool {
 
 // IsDevBuild reports whether the embedded build version indicates a non-release build,
 // for which the update check must be skipped (no nagging during `make dev`/`make
-// build`). It treats the known placeholders ("", "dev", "unknown", "0.1.0"), any
-// value carrying a "dirty" working-tree marker, and anything that does not parse as a
-// version as a dev build.
+// build`). It treats the known placeholders ("", "dev", "unknown", and the 0.1.0
+// default in any form), any value carrying a "dirty" working-tree marker, and anything
+// that does not parse as a version as a dev build.
 func IsDevBuild(v string) bool {
 	t := strings.TrimSpace(v)
 	switch strings.ToLower(t) {
-	case "", "dev", "unknown", "0.1.0":
+	case "", "dev", "unknown":
 		return true
 	}
 	if strings.Contains(strings.ToLower(t), "dirty") {
 		return true
 	}
-	if _, ok := Parse(t); !ok {
+	parsed, ok := Parse(t)
+	if !ok {
+		return true // unparseable → treat as dev, don't nag
+	}
+	// The 0.1.0 placeholder (Makefile / wails.json default) in ANY form — bare,
+	// prerelease ("0.1.0-rc1"), or with build metadata — is a dev build, not a real
+	// release. Parsing first (rather than a "0.1.0" string prefix) avoids
+	// misclassifying a genuine "0.1.05" and correctly catches the "v0.1.0" form.
+	if parsed.Major == 0 && parsed.Minor == 1 && parsed.Patch == 0 {
 		return true
 	}
 	return false

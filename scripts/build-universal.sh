@@ -13,7 +13,7 @@ VERSION="${VERSION:-dev}"
 COMMIT="${COMMIT:-$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
-LDFLAGS="-s -w -X main.version=$VERSION -X main.commit=$COMMIT -X main.buildDate=$BUILD_DATE"
+LDFLAGS="-s -w -X main.buildVersion=$VERSION -X main.commit=$COMMIT -X main.buildDate=$BUILD_DATE"
 
 APP_NAME="Agent Chat"
 OUTPUT_FILENAME="AgentChat"

@@ -671,7 +671,7 @@ func (a *App) CheckForUpdate() (*UpdateInfo, error) {
 	// Client left nil: update.Checker defaults to a 5s-timeout http.Client (see
 	// httpClient()), the single source of truth for the check timeout (C1).
 	checker := &update.Checker{}
-	info, err := checker.Check(a.ctx, version)
+	info, err := checker.Check(a.ctx, buildVersion)
 	if err != nil {
 		return nil, err
 	}
