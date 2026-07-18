@@ -1457,9 +1457,7 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  /* Clears the fixed top-right cluster (version badge + ⛶ + ⚙️) so the dismiss ×
-     never overlaps them when both the banner and the badge are visible. */
-  padding: 6px 120px 6px 12px;
+  padding: 6px 12px;
   background: rgba(63, 185, 80, 0.15);
   border-bottom: 1px solid rgba(63, 185, 80, 0.3);
   font-size: 12px;
@@ -1918,8 +1916,14 @@ html, body, #root {
   animation: voice-spin 0.7s linear infinite;
 }
 @keyframes voice-spin { to { transform: rotate(360deg); } }
+/* Header row: TabBar + the absolutely-positioned top-right controls. Relative so the
+   controls anchor to the row (and flow with it under the banner), not the viewport. */
+.app-header-row {
+  position: relative;
+}
+
 .app-settings-btn {
-  position: fixed;
+  position: absolute;
   top: 8px;
   right: 12px;
   z-index: 50;
@@ -1936,7 +1940,7 @@ html, body, #root {
 
 /* Subtle always-visible build-version badge, top-right, left of the ⛶/⚙️ buttons. */
 .app-version-badge {
-  position: fixed;
+  position: absolute;
   top: 11px;
   right: 68px;
   z-index: 50;
@@ -1950,7 +1954,7 @@ html, body, #root {
 
 /* In-app fullscreen toggle (⛶), sits just left of the settings gear. */
 .app-fullscreen-btn {
-  position: fixed;
+  position: absolute;
   top: 8px;
   right: 40px;
   z-index: 50;

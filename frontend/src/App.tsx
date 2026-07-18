@@ -261,42 +261,6 @@ function AppContent() {
 
   return (
     <div className="app">
-      {appVersion && (
-        <span
-          className="app-version-badge"
-          title="Uygulama sürümü"
-        >
-          {/^\d/.test(appVersion) ? `v${appVersion}` : appVersion}
-        </span>
-      )}
-      <button
-        type="button"
-        className="app-fullscreen-btn"
-        onClick={() => {
-          // try/catch: the binding throws synchronously outside the Wails runtime
-          // (browser preview / tests); .catch alone can't catch that. In the real app
-          // it always succeeds, so no user-facing alert is warranted.
-          try {
-            ToggleFullscreen().catch((e) => {
-              if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
-            });
-          } catch (e) {
-            if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
-          }
-        }}
-        title="Tam ekran (aç/kapat)"
-        aria-label="Tam ekran"
-      >
-        ⛶
-      </button>
-      <button
-        type="button"
-        className="app-settings-btn"
-        onClick={() => setShowSettings(true)}
-        title="Ayarlar (sesli prompt / API anahtarı)"
-      >
-        ⚙️
-      </button>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <UpdateBanner />
       {worktreeNotice && (
@@ -327,7 +291,45 @@ function AppContent() {
           <button type="button" onClick={() => dismissBroadcastNotice(notice.id)}>×</button>
         </div>
       ))}
-      <TabBar />
+      {/* Controls live in a relative row WITH the TabBar (not position:fixed to the
+          viewport) so they flow down together when the UpdateBanner/notices push the
+          header down, instead of hanging over the banner (review). */}
+      <div className="app-header-row">
+        <TabBar />
+        {appVersion && (
+          <span className="app-version-badge" title="Uygulama sürümü">
+            {/^\d/.test(appVersion) ? `v${appVersion}` : appVersion}
+          </span>
+        )}
+        <button
+          type="button"
+          className="app-fullscreen-btn"
+          onClick={() => {
+            // try/catch: the binding throws synchronously outside the Wails runtime
+            // (browser preview / tests); .catch alone can't catch that. In the real app
+            // it always succeeds, so no user-facing alert is warranted.
+            try {
+              ToggleFullscreen().catch((e) => {
+                if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+              });
+            } catch (e) {
+              if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+            }
+          }}
+          title="Tam ekran (aç/kapat)"
+          aria-label="Tam ekran"
+        >
+          ⛶
+        </button>
+        <button
+          type="button"
+          className="app-settings-btn"
+          onClick={() => setShowSettings(true)}
+          title="Ayarlar (sesli prompt / API anahtarı)"
+        >
+          ⚙️
+        </button>
+      </div>
       <BroadcastBar />
       {startupError && (
         <div className="broadcast-notice" title={startupError}>
