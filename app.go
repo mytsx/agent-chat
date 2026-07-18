@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -669,7 +668,9 @@ type UpdateInfo struct {
 //   - network / HTTP / parse failure               → (nil, err)  [logged; the startup
 //     caller ignores it so a failed check never disrupts the app]
 func (a *App) CheckForUpdate() (*UpdateInfo, error) {
-	checker := &update.Checker{Client: &http.Client{Timeout: 5 * time.Second}}
+	// Client left nil: update.Checker defaults to a 5s-timeout http.Client (see
+	// httpClient()), the single source of truth for the check timeout (C1).
+	checker := &update.Checker{}
 	info, err := checker.Check(a.ctx, version)
 	if err != nil {
 		return nil, err

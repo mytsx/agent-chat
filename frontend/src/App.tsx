@@ -101,8 +101,14 @@ function AppContent() {
   // (which makes NO network call) — this covers the race where the emit fired before
   // the listener was attached. setUpdate is idempotent, so both channels firing is fine.
   useEffect(() => {
+    // `mounted` guards the async import: if the component unmounts before the dynamic
+    // import resolves, the cleanup below has already run with `off` still a no-op, so we
+    // must skip registering the listener entirely — otherwise it would leak (never
+    // removed). Relevant under React StrictMode's mount→unmount→mount in dev.
+    let mounted = true;
     let off = () => {};
     import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      if (!mounted) return;
       EventsOn("update:available", (data: UpdateInfo) => {
         if (data?.version) useUpdate.getState().setUpdate(data);
       });
@@ -124,7 +130,10 @@ function AppContent() {
     }).catch((e) => {
       if (import.meta.env.DEV) console.warn("Failed to attach update listener:", e);
     });
-    return () => off();
+    return () => {
+      mounted = false;
+      off();
+    };
   }, []);
 
   // Set up event listeners for messages and agents
