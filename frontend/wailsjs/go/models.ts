@@ -105,6 +105,24 @@ export namespace main {
 	        this.fileMissing = source["fileMissing"];
 	    }
 	}
+	export class UpdateInfo {
+	    version: string;
+	    currentVersion: string;
+	    releaseURL: string;
+	    dmgURL: string;
+
+	    static createFrom(source: any = {}) {
+	        return new UpdateInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.currentVersion = source["currentVersion"];
+	        this.releaseURL = source["releaseURL"];
+	        this.dmgURL = source["dmgURL"];
+	    }
+	}
 	export class VoiceStatus {
 	    hasKey: boolean;
 	    keyHint: string;

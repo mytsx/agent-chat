@@ -182,3 +182,13 @@ export interface UsageUpdatedEvent {
   snapshot: UsageSnapshot;
   status: UsageStatus;
 }
+
+// In-app update notification (#83). Mirrors main.UpdateInfo — both the payload of the
+// "update:available" event and the return value of the CheckForUpdate binding. The app
+// only notifies + opens a URL; it never self-updates.
+export interface UpdateInfo {
+  version: string; // latest release version, no leading "v"
+  currentVersion: string; // embedded build version
+  releaseURL: string; // release page URL (always present)
+  dmgURL: string; // direct .dmg download URL, "" when the release has no dmg asset
+}

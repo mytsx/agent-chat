@@ -31,6 +31,7 @@ import (
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
+	"desktop/internal/update"
 	"desktop/internal/usage"
 	"desktop/internal/validation"
 	"desktop/internal/voice"
@@ -83,6 +84,13 @@ type App struct {
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
 	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
 	promptLogN atomic.Int64
+	// pendingUpdate caches the latest positive update-check result (#83) so the
+	// frontend can PULL it via GetPendingUpdate even if it missed the pushed
+	// "update:available" event (the startup goroutine may emit before the webview has
+	// attached its listener — Wails does not buffer events). Written by CheckForUpdate
+	// (startup goroutine + manual button), read by the GetPendingUpdate binding, so it
+	// is atomic like the other cross-goroutine App fields.
+	pendingUpdate atomic.Pointer[UpdateInfo]
 	// Voice/STT state (#16). voiceMu guards the single active microphone capture —
 	// only one panel records at a time (one mic). activeRecorder/activeVoiceSession
 	// are non-nil exactly while a capture is in flight; transcription runs after the
@@ -237,6 +245,16 @@ func (a *App) startup(ctx context.Context) {
 
 	// Monitor hub process
 	a.monitorHub()
+
+	// #83: fire-and-forget update check. Runs in its own goroutine with a short HTTP
+	// timeout so it never blocks or slows startup; on a dev build or any network/parse
+	// failure it silently no-ops (see CheckForUpdate). A positive result emits
+	// "update:available" for the frontend banner.
+	go func() {
+		if _, err := a.CheckForUpdate(); err != nil {
+			log.Printf("[UPDATE] açılış kontrolü başarısız (sessiz): %v", err)
+		}
+	}()
 }
 
 func newHubAuthToken() (string, error) {
@@ -625,6 +643,62 @@ func (a *App) shutdown(ctx context.Context) {
 	// NOTE: PTYs were already closed at the top of shutdown (before the snapshot) so
 	// the ingest watchers could drain each CLI's final flushed prompt into the hub
 	// before it was snapshotted (#65 / Codex round-5).
+}
+
+// ===================== Update Check (#83) =====================
+
+// UpdateInfo is the payload returned by CheckForUpdate and emitted as the
+// "update:available" event. It mirrors update.Info; it carries no download/install
+// action — the app only notifies and opens a URL, never self-updates.
+type UpdateInfo struct {
+	Version        string `json:"version"`        // latest release, no leading "v"
+	CurrentVersion string `json:"currentVersion"` // embedded build version
+	ReleaseURL     string `json:"releaseURL"`     // release page (Notları gör)
+	DMGURL         string `json:"dmgURL"`         // direct .dmg link, "" if none
+}
+
+// CheckForUpdate queries GitHub for the latest stable release and, when it is newer
+// than the embedded build version, emits "update:available" and returns the info.
+//
+// It is an exported Wails binding so a manual "Güncellemeleri kontrol et" action can
+// call it directly; it is also invoked once (fire-and-forget) at the end of startup.
+// Contract:
+//   - up to date / dev build / draft / prerelease → (nil, nil)
+//   - a newer stable release                       → (*UpdateInfo, nil) + event
+//   - network / HTTP / parse failure               → (nil, err)  [logged; the startup
+//     caller ignores it so a failed check never disrupts the app]
+func (a *App) CheckForUpdate() (*UpdateInfo, error) {
+	// Client left nil: update.Checker defaults to a 5s-timeout http.Client (see
+	// httpClient()), the single source of truth for the check timeout (C1).
+	checker := &update.Checker{}
+	info, err := checker.Check(a.ctx, buildVersion)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	payload := &UpdateInfo{
+		Version:        info.Version,
+		CurrentVersion: info.CurrentVersion,
+		ReleaseURL:     info.ReleaseURL,
+		DMGURL:         info.DMGURL,
+	}
+	// Cache BEFORE emitting so a frontend GetPendingUpdate racing the emit still sees
+	// it; then push the event for a frontend that is already listening.
+	a.pendingUpdate.Store(payload)
+	runtime.EventsEmit(a.ctx, "update:available", payload)
+	log.Printf("[UPDATE] yeni sürüm bulundu: %s (mevcut: %s)", payload.Version, payload.CurrentVersion)
+	return payload, nil
+}
+
+// GetPendingUpdate returns the update found by a prior CheckForUpdate (the startup
+// goroutine or a manual check), or nil if none. It makes NO network request — it lets
+// the frontend PULL the startup-check result on mount even if the pushed
+// "update:available" event fired before its listener was attached, closing the
+// event-registration race without a second GitHub round-trip.
+func (a *App) GetPendingUpdate() *UpdateInfo {
+	return a.pendingUpdate.Load()
 }
 
 func (a *App) seedPrompts() {

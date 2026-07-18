@@ -6,8 +6,10 @@ import {
   SetDeferralEnabled,
   GetUsageThresholds,
   SetUsageThresholds,
+  CheckForUpdate,
 } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
+import { useUpdate } from "../store/useUpdate";
 import { errorToString } from "../lib/errorText";
 
 interface SettingsModalProps {
@@ -26,6 +28,30 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [deferralEnabled, setDeferralEnabled] = useState(false);
   const [warnPct, setWarnPct] = useState(85);
   const [critPct, setCritPct] = useState(95);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+
+  // #83: manual "Güncellemeleri kontrol et". Reuses the same CheckForUpdate binding
+  // as the startup check; on a hit the banner also shows via the emitted event, but we
+  // set the store directly too so it's guaranteed. A network/rate-limit error is shown
+  // here (the user explicitly asked) — the silent-skip rule applies only to startup.
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateMsg(null);
+    try {
+      const info = await CheckForUpdate();
+      if (info && info.version) {
+        useUpdate.getState().setUpdate(info);
+        setUpdateMsg(`🎉 Yeni sürüm mevcut: v${info.version}`);
+      } else {
+        setUpdateMsg("✅ Zaten en güncel sürümü kullanıyorsunuz.");
+      }
+    } catch (e) {
+      setUpdateMsg(`⚠️ Kontrol edilemedi: ${errorToString(e)}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   useEffect(() => {
     GetVoiceStatus()
@@ -166,6 +192,35 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
             Codex limitin bu yüzdesine ulaşınca rozet sararır/kızarır ve geçiş
             önerilir. Token-tabanlı CLI'lar (Claude/Copilot/Gemini) yalnız gösterim
             amaçlıdır.
+          </span>
+        </div>
+
+        <div
+          className="form-group"
+          style={{
+            borderTop: "1px solid var(--border)",
+            paddingTop: 12,
+            marginTop: 4,
+          }}
+        >
+          <label>Güncelleme</label>
+          <button
+            className="btn btn-secondary"
+            type="button"
+            onClick={handleCheckUpdate}
+            disabled={checkingUpdate}
+            style={{ alignSelf: "flex-start" }}
+          >
+            {checkingUpdate ? "Kontrol ediliyor…" : "Güncellemeleri kontrol et"}
+          </button>
+          {updateMsg && (
+            <span className="form-hint" role="status">
+              {updateMsg}
+            </span>
+          )}
+          <span className="form-hint">
+            GitHub'daki en son sürümle karşılaştırır. Uygulama kendini güncellemez —
+            yalnız bildirir ve indirme sayfasına yönlendirir.
           </span>
         </div>
 

@@ -6,11 +6,16 @@ BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 export VERSION COMMIT BUILD_DATE
 
+# Version metadata injected into the desktop binary (mirrors scripts/build-universal.sh).
+# A plain `make build` uses VERSION=0.1.0, which version.IsDevBuild treats as a dev
+# build (no update check); `make build VERSION=x.y.z` produces a real versioned artifact.
+GO_LDFLAGS = -X main.buildVersion=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
+
 mcp-server:
 	go build -o build/mcp-server-bin ./cmd/mcp-server
 
 build: mcp-server
-	wails build
+	wails build -ldflags "$(GO_LDFLAGS)"
 
 dev: mcp-server
 	wails dev

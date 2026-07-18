@@ -9,6 +9,8 @@ import {usage} from '../models';
 
 export function BroadcastToTeam(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
+export function CheckForUpdate():Promise<main.UpdateInfo>;
+
 export function CloseTerminal(arg1:string):Promise<void>;
 
 export function CreatePrompt(arg1:string,arg2:string,arg3:string,arg4:Array<string>):Promise<prompt.Prompt>;
@@ -34,6 +36,8 @@ export function GetDeferralEnabled():Promise<boolean>;
 export function GetGlobalPrompt():Promise<string>;
 
 export function GetMessages(arg1:string):Promise<Array<types.Message>>;
+
+export function GetPendingUpdate():Promise<main.UpdateInfo>;
 
 export function GetPrompt(arg1:string):Promise<prompt.Prompt>;
 
