@@ -29,6 +29,13 @@ func TestParse(t *testing.T) {
 		{"v.1.2", false, 0, 0, 0, ""},
 		{"1..3", false, 0, 0, 0, ""},
 		{"-1.2.3", false, 0, 0, 0, ""}, // negative
+		// malformed suffixes must fail (not be read as a stable version).
+		{"0.8.0-", false, 0, 0, 0, ""},       // dangling prerelease separator
+		{"1.0.0-", false, 0, 0, 0, ""},       // dangling prerelease separator
+		{"1.0.0+", false, 0, 0, 0, ""},       // dangling build separator
+		{"1.0.0-a..b", false, 0, 0, 0, ""},   // empty prerelease identifier
+		{"1.0.0-alpha.", false, 0, 0, 0, ""}, // trailing empty identifier
+		{"1.0.0-.alpha", false, 0, 0, 0, ""}, // leading empty identifier
 	}
 	for _, tt := range tests {
 		got, ok := Parse(tt.in)
@@ -124,6 +131,7 @@ func TestIsStable(t *testing.T) {
 		{"dev", false},
 		{"", false},
 		{"1.2", false},
+		{"0.8.0-", false}, // malformed dangling separator is NOT a stable release
 	}
 	for _, tt := range tests {
 		if got := IsStable(tt.in); got != tt.want {

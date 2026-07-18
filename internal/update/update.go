@@ -148,9 +148,15 @@ func (c *Checker) fetchLatest(ctx context.Context) (*Release, error) {
 	}
 
 	// Bound the response body so a malicious/huge payload can't exhaust memory.
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	var rel Release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+	if err := dec.Decode(&rel); err != nil {
 		return nil, fmt.Errorf("update: JSON çözümlenemedi: %w", err)
+	}
+	// Require EOF after the release object: trailing bytes (a truncated-through-a-proxy
+	// or otherwise malformed response) must fail safe rather than be silently accepted.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("update: yanıtta beklenmeyen fazladan veri")
 	}
 	return &rel, nil
 }

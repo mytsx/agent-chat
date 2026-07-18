@@ -16,6 +16,16 @@ interface UpdateState {
 export const useUpdate = create<UpdateState>((set) => ({
   info: null,
   dismissed: false,
-  setUpdate: (info) => set({ info, dismissed: false }),
+  setUpdate: (info) =>
+    set((s) => ({
+      info,
+      // Only a genuinely NEWER version re-surfaces a dismissed banner. Re-setting the
+      // SAME version preserves the dismissal — otherwise the push+pull channels both
+      // delivering the same startup result (or a manual re-check finding the same
+      // version) would un-dismiss a banner the user just closed. The SettingsModal
+      // gives its own feedback for a manual same-version check, so the banner needn't
+      // reappear.
+      dismissed: s.info?.version === info.version ? s.dismissed : false,
+    })),
   dismiss: () => set({ dismissed: true }),
 }));

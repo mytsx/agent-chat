@@ -35,15 +35,24 @@ func Parse(s string) (Semver, bool) {
 	if s[0] == 'v' || s[0] == 'V' {
 		s = s[1:]
 	}
-	// Strip build metadata (does not affect precedence).
+	// Strip build metadata (does not affect precedence); a dangling '+' ("1.2.3+") is
+	// malformed and must fail rather than be accepted.
 	if i := strings.IndexByte(s, '+'); i >= 0 {
+		if i == len(s)-1 {
+			return Semver{}, false
+		}
 		s = s[:i]
 	}
-	// Split off the prerelease label.
+	// Split off the prerelease label. A dangling '-' ("0.8.0-") or an empty
+	// dot-separated identifier ("1.0.0-a..b") is malformed — reject it so a bad tag
+	// fails safe (no banner) instead of being read as a stable release.
 	var pre string
 	if i := strings.IndexByte(s, '-'); i >= 0 {
 		pre = s[i+1:]
 		s = s[:i]
+		if !validPrerelease(pre) {
+			return Semver{}, false
+		}
 	}
 	parts := strings.Split(s, ".")
 	if len(parts) != 3 {
@@ -58,6 +67,22 @@ func Parse(s string) (Semver, bool) {
 		nums[i] = n
 	}
 	return Semver{Major: nums[0], Minor: nums[1], Patch: nums[2], Pre: pre}, true
+}
+
+// validPrerelease reports whether pre is a well-formed SemVer 2.0.0 prerelease label:
+// non-empty, with every dot-separated identifier non-empty. It rejects a dangling
+// separator ("0.8.0-" → pre "") and empty identifiers ("1.0.0-a..b") so a malformed
+// tag fails safe rather than being accepted as a (stable) version.
+func validPrerelease(pre string) bool {
+	if pre == "" {
+		return false
+	}
+	for _, id := range strings.Split(pre, ".") {
+		if id == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // parseNonNegInt parses a non-empty, all-digit, non-negative integer. strconv.Atoi

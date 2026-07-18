@@ -1448,13 +1448,16 @@ html, body, #root {
   padding: 0 4px;
 }
 
-/* In-app update banner (#83): non-intrusive top bar, distinct green tint. */
+/* In-app update banner (#83): non-intrusive top bar, distinct green tint. The extra
+   right padding keeps the dismiss (×) button clear of the fixed settings gear
+   (.app-settings-btn, top:8px right:12px z-index:50), which would otherwise overlap it
+   and steal the click. */
 .update-notice {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 6px 48px 6px 12px;
   background: rgba(63, 185, 80, 0.15);
   border-bottom: 1px solid rgba(63, 185, 80, 0.3);
   font-size: 12px;

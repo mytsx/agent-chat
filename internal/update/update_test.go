@@ -205,6 +205,31 @@ func TestCheck_MalformedJSON(t *testing.T) {
 	}
 }
 
+func TestCheck_TrailingGarbageRejected(t *testing.T) {
+	// A valid release object followed by trailing bytes must fail safe (no banner),
+	// not be silently accepted by decoding only the first value.
+	srv, _ := serve(t, 200, newerReleaseJSON()+"  garbage")
+	info, err := testChecker(srv.URL).Check(context.Background(), "0.6.0")
+	if err == nil {
+		t.Error("expected error on trailing bytes after the JSON object")
+	}
+	if info != nil {
+		t.Errorf("expected nil info, got %+v", info)
+	}
+}
+
+func TestCheck_TrailingWhitespaceOK(t *testing.T) {
+	// Trailing whitespace after the object is valid and must still be accepted.
+	srv, _ := serve(t, 200, newerReleaseJSON()+"\n  \n")
+	info, err := testChecker(srv.URL).Check(context.Background(), "0.6.0")
+	if err != nil {
+		t.Fatalf("unexpected error on trailing whitespace: %v", err)
+	}
+	if info == nil || info.Version != "0.7.0" {
+		t.Fatalf("expected update info, got %+v", info)
+	}
+}
+
 func TestCheck_NetworkError(t *testing.T) {
 	// Point at a closed server address so the request fails at the transport layer.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
