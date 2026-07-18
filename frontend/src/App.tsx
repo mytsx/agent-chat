@@ -273,9 +273,16 @@ function AppContent() {
         type="button"
         className="app-fullscreen-btn"
         onClick={() => {
-          ToggleFullscreen().catch((e) => {
+          // try/catch: the binding throws synchronously outside the Wails runtime
+          // (browser preview / tests); .catch alone can't catch that. In the real app
+          // it always succeeds, so no user-facing alert is warranted.
+          try {
+            ToggleFullscreen().catch((e) => {
+              if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+            });
+          } catch (e) {
             if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
-          });
+          }
         }}
         title="Tam ekran (aç/kapat)"
         aria-label="Tam ekran"

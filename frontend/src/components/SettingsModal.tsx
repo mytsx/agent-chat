@@ -68,9 +68,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         setCritPct(t.criticalPercent ?? 95);
       })
       .catch(() => {});
-    GetAppVersion()
-      .then(setAppVersion)
-      .catch(() => {});
+    // try/catch: a Wails binding dereferences window.go synchronously, which throws
+    // (not rejects) outside the Wails runtime (browser preview / tests). Silent in
+    // production — the version line is cosmetic, so a failure needs no user-facing alert.
+    try {
+      GetAppVersion()
+        .then(setAppVersion)
+        .catch(() => {});
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("GetAppVersion failed:", e);
+    }
   }, []);
 
   // Persist thresholds on blur, not on every keystroke — saving each edit causes
