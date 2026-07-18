@@ -6,6 +6,10 @@ export function BroadcastToTeam(arg1, arg2, arg3) {
   return window['go']['main']['App']['BroadcastToTeam'](arg1, arg2, arg3);
 }
 
+export function CheckForUpdate() {
+  return window['go']['main']['App']['CheckForUpdate']();
+}
+
 export function CloseTerminal(arg1) {
   return window['go']['main']['App']['CloseTerminal'](arg1);
 }

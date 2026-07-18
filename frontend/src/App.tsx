@@ -4,7 +4,8 @@ import { useTeams } from "./store/useTeams";
 import { useMessages } from "./store/useMessages";
 import { useTerminals } from "./store/useTerminals";
 import { useUsage } from "./store/useUsage";
-import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent } from "./lib/types";
+import { useUpdate } from "./store/useUpdate";
+import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent, UpdateInfo } from "./lib/types";
 import { errorToString } from "./lib/errorText";
 import { SendPromptToAgent } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
@@ -12,6 +13,7 @@ import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
 import Sidebar from "./components/Sidebar";
 import SettingsModal from "./components/SettingsModal";
+import UpdateBanner from "./components/UpdateBanner";
 import "./styles/globals.css";
 
 class ErrorBoundary extends Component<
@@ -90,6 +92,28 @@ function AppContent() {
     };
     init();
     return () => { cancelled = true; };
+  }, []);
+
+  // #83: attach the update-available listener on mount (NOT gated on `ready`), so it
+  // is registered before the Go startup check's network round-trip can emit. A missed
+  // event would leave the banner hidden until a manual re-check.
+  useEffect(() => {
+    let off = () => {};
+    import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
+      EventsOn("update:available", (data: UpdateInfo) => {
+        if (data?.version) useUpdate.getState().setUpdate(data);
+      });
+      off = () => {
+        try {
+          EventsOff("update:available");
+        } catch (e) {
+          if (import.meta.env.DEV) console.warn("update EventsOff failed:", e);
+        }
+      };
+    }).catch((e) => {
+      if (import.meta.env.DEV) console.warn("Failed to attach update listener:", e);
+    });
+    return () => off();
   }, []);
 
   // Set up event listeners for messages and agents
@@ -211,6 +235,7 @@ function AppContent() {
         ⚙️
       </button>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      <UpdateBanner />
       {worktreeNotice && (
         <div className="worktree-notice">
           <span>

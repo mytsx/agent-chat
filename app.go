@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 	"desktop/internal/summary"
 	"desktop/internal/team"
 	"desktop/internal/types"
+	"desktop/internal/update"
 	"desktop/internal/usage"
 	"desktop/internal/validation"
 	"desktop/internal/voice"
@@ -237,6 +239,16 @@ func (a *App) startup(ctx context.Context) {
 
 	// Monitor hub process
 	a.monitorHub()
+
+	// #83: fire-and-forget update check. Runs in its own goroutine with a short HTTP
+	// timeout so it never blocks or slows startup; on a dev build or any network/parse
+	// failure it silently no-ops (see CheckForUpdate). A positive result emits
+	// "update:available" for the frontend banner.
+	go func() {
+		if _, err := a.CheckForUpdate(); err != nil {
+			log.Printf("[UPDATE] açılış kontrolü başarısız (sessiz): %v", err)
+		}
+	}()
 }
 
 func newHubAuthToken() (string, error) {
@@ -625,6 +637,48 @@ func (a *App) shutdown(ctx context.Context) {
 	// NOTE: PTYs were already closed at the top of shutdown (before the snapshot) so
 	// the ingest watchers could drain each CLI's final flushed prompt into the hub
 	// before it was snapshotted (#65 / Codex round-5).
+}
+
+// ===================== Update Check (#83) =====================
+
+// UpdateInfo is the payload returned by CheckForUpdate and emitted as the
+// "update:available" event. It mirrors update.Info; it carries no download/install
+// action — the app only notifies and opens a URL, never self-updates.
+type UpdateInfo struct {
+	Version        string `json:"version"`        // latest release, no leading "v"
+	CurrentVersion string `json:"currentVersion"` // embedded build version
+	ReleaseURL     string `json:"releaseURL"`     // release page (Notları gör)
+	DMGURL         string `json:"dmgURL"`         // direct .dmg link, "" if none
+}
+
+// CheckForUpdate queries GitHub for the latest stable release and, when it is newer
+// than the embedded build version, emits "update:available" and returns the info.
+//
+// It is an exported Wails binding so a manual "Güncellemeleri kontrol et" action can
+// call it directly; it is also invoked once (fire-and-forget) at the end of startup.
+// Contract:
+//   - up to date / dev build / draft / prerelease → (nil, nil)
+//   - a newer stable release                       → (*UpdateInfo, nil) + event
+//   - network / HTTP / parse failure               → (nil, err)  [logged; the startup
+//     caller ignores it so a failed check never disrupts the app]
+func (a *App) CheckForUpdate() (*UpdateInfo, error) {
+	checker := &update.Checker{Client: &http.Client{Timeout: 5 * time.Second}}
+	info, err := checker.Check(a.ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	payload := &UpdateInfo{
+		Version:        info.Version,
+		CurrentVersion: info.CurrentVersion,
+		ReleaseURL:     info.ReleaseURL,
+		DMGURL:         info.DMGURL,
+	}
+	runtime.EventsEmit(a.ctx, "update:available", payload)
+	log.Printf("[UPDATE] yeni sürüm bulundu: %s (mevcut: %s)", payload.Version, payload.CurrentVersion)
+	return payload, nil
 }
 
 func (a *App) seedPrompts() {

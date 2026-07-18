@@ -9,6 +9,8 @@ import {usage} from '../models';
 
 export function BroadcastToTeam(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
+export function CheckForUpdate():Promise<main.UpdateInfo>;
+
 export function CloseTerminal(arg1:string):Promise<void>;
 
 export function CreatePrompt(arg1:string,arg2:string,arg3:string,arg4:Array<string>):Promise<prompt.Prompt>;
