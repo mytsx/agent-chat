@@ -50,6 +50,10 @@ export function GetAgents(arg1) {
   return window['go']['main']['App']['GetAgents'](arg1);
 }
 
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
+}
+
 export function GetDeferralEnabled() {
   return window['go']['main']['App']['GetDeferralEnabled']();
 }

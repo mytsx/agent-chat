@@ -701,6 +701,19 @@ func (a *App) GetPendingUpdate() *UpdateInfo {
 	return a.pendingUpdate.Load()
 }
 
+// GetAppVersion returns the embedded build version for display in the UI (Settings).
+// It is "dev" for a non-release build; a real release shows e.g. "0.7.0".
+func (a *App) GetAppVersion() string {
+	return buildVersion
+}
+
+// domReady runs once the webview DOM is ready (Wails OnDomReady). It enables native
+// macOS fullscreen for the green title-bar button, which Wails otherwise leaves doing
+// a plain zoom (see fullscreen_darwin.go). Kept minimal — no blocking work.
+func (a *App) domReady(ctx context.Context) {
+	enableNativeFullscreen()
+}
+
 func (a *App) seedPrompts() {
 	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
 	managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")

@@ -7,6 +7,7 @@ import {
   GetUsageThresholds,
   SetUsageThresholds,
   CheckForUpdate,
+  GetAppVersion,
 } from "../../wailsjs/go/main/App";
 import { VoiceStatus } from "../lib/types";
 import { useUpdate } from "../store/useUpdate";
@@ -30,6 +31,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [critPct, setCritPct] = useState(95);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState("");
 
   // #83: manual "Güncellemeleri kontrol et". Reuses the same CheckForUpdate binding
   // as the startup check; on a hit the banner also shows via the emitted event, but we
@@ -65,6 +67,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         setWarnPct(t.warnPercent ?? 85);
         setCritPct(t.criticalPercent ?? 95);
       })
+      .catch(() => {});
+    GetAppVersion()
+      .then(setAppVersion)
       .catch(() => {});
   }, []);
 
@@ -204,6 +209,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           }}
         >
           <label>Güncelleme</label>
+          <span className="form-hint" style={{ marginBottom: 6 }}>
+            Sürüm:{" "}
+            <strong>
+              {appVersion
+                ? /^\d/.test(appVersion)
+                  ? `v${appVersion}`
+                  : appVersion
+                : "…"}
+            </strong>
+          </span>
           <button
             className="btn btn-secondary"
             type="button"

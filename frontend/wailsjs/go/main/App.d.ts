@@ -31,6 +31,8 @@ export function DetectCLIs():Promise<Array<cli.CLIInfo>>;
 
 export function GetAgents(arg1:string):Promise<Record<string, types.Agent>>;
 
+export function GetAppVersion():Promise<string>;
+
 export function GetDeferralEnabled():Promise<boolean>;
 
 export function GetGlobalPrompt():Promise<string>;
