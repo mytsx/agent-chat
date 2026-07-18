@@ -718,6 +718,9 @@ func (a *App) domReady(ctx context.Context) {
 // in-app control (the ⛶ button next to Settings) can offer fullscreen directly,
 // independent of the native title-bar button.
 func (a *App) ToggleFullscreen() {
+	if a.ctx == nil {
+		return // not started (e.g. a hand-constructed test App) — nothing to toggle
+	}
 	if runtime.WindowIsFullscreen(a.ctx) {
 		runtime.WindowUnfullscreen(a.ctx)
 	} else {
