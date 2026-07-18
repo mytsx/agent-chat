@@ -714,6 +714,17 @@ func (a *App) domReady(ctx context.Context) {
 	enableNativeFullscreen()
 }
 
+// ToggleFullscreen flips the window between fullscreen and windowed. Exposed so an
+// in-app control (the ⛶ button next to Settings) can offer fullscreen directly,
+// independent of the native title-bar button.
+func (a *App) ToggleFullscreen() {
+	if runtime.WindowIsFullscreen(a.ctx) {
+		runtime.WindowUnfullscreen(a.ctx)
+	} else {
+		runtime.WindowFullscreen(a.ctx)
+	}
+}
+
 func (a *App) seedPrompts() {
 	basePrompt := a.readEmbeddedPrompt("prompts/base_prompt.md")
 	managerPrompt := a.readEmbeddedPrompt("prompts/manager_prompt.md")

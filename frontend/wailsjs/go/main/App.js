@@ -210,6 +210,10 @@ export function SwitchTerminal(arg1, arg2) {
   return window['go']['main']['App']['SwitchTerminal'](arg1, arg2);
 }
 
+export function ToggleFullscreen() {
+  return window['go']['main']['App']['ToggleFullscreen']();
+}
+
 export function UpdatePrompt(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['UpdatePrompt'](arg1, arg2, arg3, arg4, arg5);
 }

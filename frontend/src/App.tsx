@@ -7,7 +7,7 @@ import { useUsage } from "./store/useUsage";
 import { useUpdate } from "./store/useUpdate";
 import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent, UpdateInfo } from "./lib/types";
 import { errorToString } from "./lib/errorText";
-import { SendPromptToAgent, GetPendingUpdate } from "../wailsjs/go/main/App";
+import { SendPromptToAgent, GetPendingUpdate, ToggleFullscreen, GetAppVersion } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
@@ -49,6 +49,7 @@ function AppContent() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
   const sidebarRef = useRef<PanelImperativeHandle>(null);
   const [worktreeNotice, setWorktreeNotice] = useState<{ agentName: string; worktreeDir: string } | null>(null);
   // Notifications that couldn't be injected into a terminal because the user kept
@@ -134,6 +135,13 @@ function AppContent() {
       mounted = false;
       off();
     };
+  }, []);
+
+  // Fetch the embedded build version once for the subtle top-right badge (#UI).
+  useEffect(() => {
+    GetAppVersion()
+      .then(setAppVersion)
+      .catch(() => {});
   }, []);
 
   // Set up event listeners for messages and agents
@@ -246,6 +254,27 @@ function AppContent() {
 
   return (
     <div className="app">
+      {appVersion && (
+        <span
+          className="app-version-badge"
+          title="Uygulama sürümü"
+        >
+          {/^\d/.test(appVersion) ? `v${appVersion}` : appVersion}
+        </span>
+      )}
+      <button
+        type="button"
+        className="app-fullscreen-btn"
+        onClick={() => {
+          ToggleFullscreen().catch((e) => {
+            if (import.meta.env.DEV) console.warn("ToggleFullscreen failed:", e);
+          });
+        }}
+        title="Tam ekran (aç/kapat)"
+        aria-label="Tam ekran"
+      >
+        ⛶
+      </button>
       <button
         type="button"
         className="app-settings-btn"

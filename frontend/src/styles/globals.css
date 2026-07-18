@@ -1457,7 +1457,7 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 48px 6px 12px;
+  padding: 6px 72px 6px 12px;
   background: rgba(63, 185, 80, 0.15);
   border-bottom: 1px solid rgba(63, 185, 80, 0.3);
   font-size: 12px;
@@ -1929,6 +1929,38 @@ html, body, #root {
   opacity: 0.75;
 }
 .app-settings-btn:hover {
+  opacity: 1;
+}
+
+/* Subtle always-visible build-version badge, top-right, left of the ⛶/⚙️ buttons. */
+.app-version-badge {
+  position: fixed;
+  top: 11px;
+  right: 68px;
+  z-index: 50;
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  pointer-events: none;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* In-app fullscreen toggle (⛶), sits just left of the settings gear. */
+.app-fullscreen-btn {
+  position: fixed;
+  top: 8px;
+  right: 40px;
+  z-index: 50;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  opacity: 0.75;
+  color: var(--text-primary);
+}
+.app-fullscreen-btn:hover {
   opacity: 1;
 }
 
