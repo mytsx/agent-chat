@@ -16,7 +16,12 @@ package main
 static void enableFullScreenPrimary() {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (NSWindow *w in [NSApp windows]) {
-            [w setCollectionBehavior:[w collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary];
+            // Only titled windows carry the green fullscreen button; skip borderless
+            // helpers (tooltips, popovers, panels) which don't need — and could be
+            // upset by — the fullscreen collection behavior.
+            if ([w styleMask] & NSWindowStyleMaskTitled) {
+                [w setCollectionBehavior:[w collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary];
+            }
         }
     });
 }
