@@ -125,9 +125,14 @@ func comparePreField(a, b string) int {
 	bNum := isNumericIdent(b)
 	switch {
 	case aNum && bNum:
-		an, _ := parseNonNegInt(a)
-		bn, _ := parseNonNegInt(b)
-		return cmpInt(an, bn)
+		// Both are numeric identifiers WITHOUT a leading zero (guaranteed by
+		// isNumericIdent), so the longer string is the larger number and equal-length
+		// strings compare correctly lexically. This avoids an int overflow on a very
+		// large identifier (strconv.Atoi would fail) and needs no numeric parse.
+		if len(a) != len(b) {
+			return cmpInt(len(a), len(b))
+		}
+		return strings.Compare(a, b)
 	case aNum && !bNum:
 		return -1 // numeric identifiers have lower precedence than alphanumeric
 	case !aNum && bNum:

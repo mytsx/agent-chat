@@ -70,6 +70,12 @@ func TestCompare(t *testing.T) {
 		// is alphanumeric, so numeric "1" ranks below it.
 		{"1.0.0-alpha.1", "1.0.0-alpha.01", -1},
 		{"1.0.0-alpha.01", "1.0.0-alpha.1", 1},
+		// numeric identifiers compared by length-then-lexical (overflow-safe): 10 > 9.
+		{"1.0.0-alpha.10", "1.0.0-alpha.9", 1},
+		// identifiers far beyond int64 must not overflow — compared as digit strings.
+		{"1.0.0-99999999999999999999999", "1.0.0-1", 1},
+		{"1.0.0-99999999999999999999999", "1.0.0-99999999999999999999998", 1},
+		{"1.0.0-99999999999999999999998", "1.0.0-99999999999999999999999", -1},
 	}
 	for _, tt := range tests {
 		a, okA := Parse(tt.a)
