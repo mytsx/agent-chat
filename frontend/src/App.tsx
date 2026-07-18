@@ -138,10 +138,17 @@ function AppContent() {
   }, []);
 
   // Fetch the embedded build version once for the subtle top-right badge (#UI).
+  // Wrapped in try/catch: a Wails binding dereferences window.go synchronously, which
+  // throws (not rejects) outside the Wails runtime (browser preview / tests) and would
+  // otherwise crash the render — the .catch alone can't catch that synchronous throw.
   useEffect(() => {
-    GetAppVersion()
-      .then(setAppVersion)
-      .catch(() => {});
+    try {
+      GetAppVersion()
+        .then(setAppVersion)
+        .catch(() => {});
+    } catch (e) {
+      if (import.meta.env.DEV) console.warn("GetAppVersion failed:", e);
+    }
   }, []);
 
   // Set up event listeners for messages and agents

@@ -34,6 +34,7 @@ import (
 	"desktop/internal/update"
 	"desktop/internal/usage"
 	"desktop/internal/validation"
+	"desktop/internal/version"
 	"desktop/internal/voice"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -701,9 +702,14 @@ func (a *App) GetPendingUpdate() *UpdateInfo {
 	return a.pendingUpdate.Load()
 }
 
-// GetAppVersion returns the embedded build version for display in the UI (Settings).
-// It is "dev" for a non-release build; a real release shows e.g. "0.7.0".
+// GetAppVersion returns the embedded build version for display in the UI (Settings +
+// badge). Any dev/placeholder build (incl. the "0.1.0" Makefile default) normalizes to
+// "dev" so the UI can't show a release-looking "v0.1.0" while the update check silently
+// treats it as a dev build — the two must agree.
 func (a *App) GetAppVersion() string {
+	if version.IsDevBuild(buildVersion) {
+		return "dev"
+	}
 	return buildVersion
 }
 
