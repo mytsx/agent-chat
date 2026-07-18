@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // releaseJSON builds a minimal GitHub /releases/latest response body.
@@ -234,6 +235,20 @@ func TestCheck_SendsRequiredHeaders(t *testing.T) {
 	}
 	if gotAccept == "" {
 		t.Error("expected an Accept header")
+	}
+}
+
+func TestHTTPClientDefaultTimeout(t *testing.T) {
+	// When no Client is injected (the production path), the check must use a short
+	// bounded timeout so a hung endpoint can never stall the startup goroutine (C1).
+	got := (&Checker{}).httpClient()
+	if got.Timeout != 5*time.Second {
+		t.Errorf("default httpClient timeout = %v, want 5s", got.Timeout)
+	}
+	// An injected client is used as-is.
+	custom := &http.Client{Timeout: time.Second}
+	if (&Checker{Client: custom}).httpClient() != custom {
+		t.Error("injected Client should be returned unchanged")
 	}
 }
 

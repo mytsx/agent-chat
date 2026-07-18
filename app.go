@@ -85,6 +85,13 @@ type App struct {
 	// (#29). An atomic counter (not a WaitGroup) because new logs can start
 	// concurrently with a drain — Add racing Wait violates the WaitGroup contract.
 	promptLogN atomic.Int64
+	// pendingUpdate caches the latest positive update-check result (#83) so the
+	// frontend can PULL it via GetPendingUpdate even if it missed the pushed
+	// "update:available" event (the startup goroutine may emit before the webview has
+	// attached its listener — Wails does not buffer events). Written by CheckForUpdate
+	// (startup goroutine + manual button), read by the GetPendingUpdate binding, so it
+	// is atomic like the other cross-goroutine App fields.
+	pendingUpdate atomic.Pointer[UpdateInfo]
 	// Voice/STT state (#16). voiceMu guards the single active microphone capture —
 	// only one panel records at a time (one mic). activeRecorder/activeVoiceSession
 	// are non-nil exactly while a capture is in flight; transcription runs after the
@@ -676,9 +683,21 @@ func (a *App) CheckForUpdate() (*UpdateInfo, error) {
 		ReleaseURL:     info.ReleaseURL,
 		DMGURL:         info.DMGURL,
 	}
+	// Cache BEFORE emitting so a frontend GetPendingUpdate racing the emit still sees
+	// it; then push the event for a frontend that is already listening.
+	a.pendingUpdate.Store(payload)
 	runtime.EventsEmit(a.ctx, "update:available", payload)
 	log.Printf("[UPDATE] yeni sürüm bulundu: %s (mevcut: %s)", payload.Version, payload.CurrentVersion)
 	return payload, nil
+}
+
+// GetPendingUpdate returns the update found by a prior CheckForUpdate (the startup
+// goroutine or a manual check), or nil if none. It makes NO network request — it lets
+// the frontend PULL the startup-check result on mount even if the pushed
+// "update:available" event fired before its listener was attached, closing the
+// event-registration race without a second GitHub round-trip.
+func (a *App) GetPendingUpdate() *UpdateInfo {
+	return a.pendingUpdate.Load()
 }
 
 func (a *App) seedPrompts() {

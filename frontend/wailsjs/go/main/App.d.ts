@@ -37,6 +37,8 @@ export function GetGlobalPrompt():Promise<string>;
 
 export function GetMessages(arg1:string):Promise<Array<types.Message>>;
 
+export function GetPendingUpdate():Promise<main.UpdateInfo>;
+
 export function GetPrompt(arg1:string):Promise<prompt.Prompt>;
 
 export function GetRoomSummary(arg1:string):Promise<main.RoomSummaryInfo>;

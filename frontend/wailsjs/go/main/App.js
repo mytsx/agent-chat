@@ -62,6 +62,10 @@ export function GetMessages(arg1) {
   return window['go']['main']['App']['GetMessages'](arg1);
 }
 
+export function GetPendingUpdate() {
+  return window['go']['main']['App']['GetPendingUpdate']();
+}
+
 export function GetPrompt(arg1) {
   return window['go']['main']['App']['GetPrompt'](arg1);
 }

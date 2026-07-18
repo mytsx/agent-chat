@@ -7,7 +7,7 @@ import { useUsage } from "./store/useUsage";
 import { useUpdate } from "./store/useUpdate";
 import { MessagesNewEvent, AgentsUpdatedEvent, UsageUpdatedEvent, UpdateInfo } from "./lib/types";
 import { errorToString } from "./lib/errorText";
-import { SendPromptToAgent } from "../wailsjs/go/main/App";
+import { SendPromptToAgent, GetPendingUpdate } from "../wailsjs/go/main/App";
 import TabBar from "./components/TabBar";
 import BroadcastBar from "./components/BroadcastBar";
 import TerminalGrid from "./components/TerminalGrid";
@@ -94,9 +94,12 @@ function AppContent() {
     return () => { cancelled = true; };
   }, []);
 
-  // #83: attach the update-available listener on mount (NOT gated on `ready`), so it
-  // is registered before the Go startup check's network round-trip can emit. A missed
-  // event would leave the banner hidden until a manual re-check.
+  // #83: the update banner is delivered over two independent channels so a lost event
+  // can never hide it. (1) Attach the "update:available" listener on mount (NOT gated
+  // on `ready`) so it's live before the Go startup check's network round-trip can emit.
+  // (2) Also PULL any result the startup check already cached via GetPendingUpdate
+  // (which makes NO network call) — this covers the race where the emit fired before
+  // the listener was attached. setUpdate is idempotent, so both channels firing is fine.
   useEffect(() => {
     let off = () => {};
     import("../wailsjs/runtime/runtime").then(({ EventsOn, EventsOff }) => {
@@ -110,6 +113,14 @@ function AppContent() {
           if (import.meta.env.DEV) console.warn("update EventsOff failed:", e);
         }
       };
+      // Pull AFTER the listener is live so the two channels can't both miss the result.
+      GetPendingUpdate()
+        .then((info) => {
+          if (info?.version) useUpdate.getState().setUpdate(info);
+        })
+        .catch((e) => {
+          if (import.meta.env.DEV) console.warn("GetPendingUpdate failed:", e);
+        });
     }).catch((e) => {
       if (import.meta.env.DEV) console.warn("Failed to attach update listener:", e);
     });
