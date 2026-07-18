@@ -1922,6 +1922,12 @@ html, body, #root {
   position: relative;
 }
 
+/* Reserve room on the tab strip for the absolute controls (version + ⛶ + ⚙️, ~110px
+   from the right edge) so tabs can't slide under and overlap them when many are open. */
+.app-header-row .tab-bar {
+  padding-right: 140px;
+}
+
 .app-settings-btn {
   position: absolute;
   top: 8px;
