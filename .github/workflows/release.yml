@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -92,7 +92,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       # GITHUB_TOKEN cannot write to another repository, so the tap needs its own
       # credential. Fail with an actionable message instead of an opaque 403.
@@ -106,7 +106,7 @@ jobs:
           fi
 
       - name: Checkout tap repository
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           repository: mytsx/homebrew-agent-chat
           token: ${{ secrets.TAP_REPO_TOKEN }}
