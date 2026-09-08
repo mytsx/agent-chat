@@ -84,21 +84,32 @@ type HubClient struct {
 	resolveAddr func() (string, error)
 	// bootstrap establishes the session on the FIRST successful connection.
 	// Later reconnects replay what it recorded rather than running it again.
-	bootstrap   func(*HubClient)
-	sess        session
-	supervising bool
+	bootstrap func(*HubClient)
+	sess      session
+	// reconnectCh carries "the connection is gone" to the single long-lived
+	// supervisor. Buffered by one and written non-blockingly, so a signal raised
+	// while the supervisor is mid-work is never lost — unlike an edge-triggered
+	// relaunch guarded by a flag, where a socket dying between the supervisor's
+	// last check and its return left nobody scheduled to redial.
+	reconnectCh chan struct{}
 }
 
 // New creates a new HubClient.
 func New(hubAddr string, logger *log.Logger) *HubClient {
-	return &HubClient{
-		pending:    make(map[string]chan *types.Response),
-		hubAddr:    hubAddr,
-		logger:     logger,
-		done:       make(chan struct{}),
-		minBackoff: defaultMinBackoff,
-		maxBackoff: defaultMaxBackoff,
+	c := &HubClient{
+		pending:     make(map[string]chan *types.Response),
+		hubAddr:     hubAddr,
+		logger:      logger,
+		done:        make(chan struct{}),
+		minBackoff:  defaultMinBackoff,
+		maxBackoff:  defaultMaxBackoff,
+		reconnectCh: make(chan struct{}, 1),
 	}
+	// One supervisor for the client's whole life. It idles until something
+	// signals a lost connection, so constructing a client that never connects
+	// costs nothing.
+	go c.runSupervisor()
+	return c
 }
 
 // DiscoverHubAddr reads the hub port from the data directory.
@@ -188,17 +199,7 @@ func (c *HubClient) runBootstrap() {
 // the desktop may not have written hub.port yet. Serve first, connect when the
 // hub shows up.
 func (c *HubClient) StartBackgroundConnect() {
-	go func() {
-		if err := c.Connect(); err != nil {
-			c.superviseReconnect() // keeps trying, then establishes the session
-			return
-		}
-		if err := c.afterConnect(); err != nil {
-			c.logger.Printf("Hub session setup failed, retrying: %v", err)
-			c.dropConn()
-			c.superviseReconnect()
-		}
-	}()
+	c.notifyDisconnected()
 }
 
 // Connect establishes the WebSocket connection to the hub.
@@ -273,60 +274,75 @@ func (c *HubClient) nextBackoff(prev time.Duration) time.Duration {
 	return jittered
 }
 
-// superviseReconnect redials until it succeeds or the client is closed, then
-// restores the session. Runs at most once at a time.
-func (c *HubClient) superviseReconnect() {
-	c.mu.Lock()
-	if c.closed || c.supervising {
-		c.mu.Unlock()
-		return
+// notifyDisconnected asks the supervisor to (re)establish the connection.
+// Non-blocking: the channel holds one pending request, which is all that is
+// needed — "reconnect" is not a queue, it is a level.
+func (c *HubClient) notifyDisconnected() {
+	select {
+	case c.reconnectCh <- struct{}{}:
+	default:
 	}
-	c.supervising = true
-	c.mu.Unlock()
+}
 
-	defer func() {
-		c.mu.Lock()
-		c.supervising = false
-		c.mu.Unlock()
-	}()
+// runSupervisor owns reconnection for the client's whole life.
+//
+// It is level-triggered on purpose. The earlier design relaunched a supervisor
+// per disconnect and guarded it with a "supervising" flag, which had a
+// check-then-act hole: a socket dying between the supervisor's last check and
+// its return had its wake-up swallowed as a duplicate, leaving the client
+// disconnected with nobody scheduled to redial — #98's symptom, reintroduced.
+// A buffered signal cannot be lost that way.
+func (c *HubClient) runSupervisor() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-c.reconnectCh:
+		}
+		c.reconnectUntilLive()
+	}
+}
 
+// reconnectUntilLive dials and restores until the client holds a live session
+// or is closed. The first attempt is immediate; only failures back off.
+func (c *HubClient) reconnectUntilLive() {
 	var backoff time.Duration
 	for {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+		if c.isConnected() {
+			return // someone else got there first
+		}
+
+		if err := c.Connect(); err != nil {
+			c.logger.Printf("Hub connect failed, retrying: %v", err)
+		} else if err := c.afterConnect(); err != nil {
+			// The socket is up but the hub would not have us back. Drop it and
+			// try again rather than pretending we are joined.
+			c.logger.Printf("Hub session restore failed, retrying: %v", err)
+			c.dropConn()
+		} else if c.isConnected() {
+			c.logger.Printf("Hub connection restored")
+			return
+		}
+
 		backoff = c.nextBackoff(backoff)
 		select {
 		case <-time.After(backoff):
 		case <-c.done:
 			return
 		}
-
-		if err := c.Connect(); err != nil {
-			c.logger.Printf("Hub reconnect failed, retrying: %v", err)
-			continue
-		}
-		if err := c.afterConnect(); err != nil {
-			// The socket is up but the hub would not have us back. Drop it and
-			// let the loop try again rather than pretending we are joined.
-			c.logger.Printf("Hub session restore failed, retrying: %v", err)
-			c.dropConn()
-			continue
-		}
-
-		// The socket can die WHILE the session is being replayed. Its read loop
-		// calls superviseReconnect, which this still-running supervisor would
-		// swallow as a duplicate — so returning blindly here can leave the
-		// client disconnected with nobody scheduled to redial. Only exit if the
-		// connection actually survived.
-		c.mu.Lock()
-		live := c.conn != nil
-		c.mu.Unlock()
-		if !live {
-			c.logger.Printf("Hub connection lost during restore, retrying")
-			continue
-		}
-
-		c.logger.Printf("Hub connection restored")
-		return
 	}
+}
+
+// isConnected reports whether a socket is currently installed.
+func (c *HubClient) isConnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil
 }
 
 // dropConn tears down the current socket without closing the client, so the
@@ -538,10 +554,10 @@ func (c *HubClient) readLoop(conn *websocket.Conn) {
 		}
 		closed := c.closed
 		c.mu.Unlock()
-		// A read error used to end the client's life. Hand off to the supervisor
+		// A read error used to end the client's life. Signal the supervisor
 		// instead — unless the teardown was deliberate.
 		if !closed {
-			go c.superviseReconnect()
+			c.notifyDisconnected()
 		}
 	}()
 

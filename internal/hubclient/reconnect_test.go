@@ -467,3 +467,48 @@ func TestSupervisorRetriesWhenReplayIsRejected(t *testing.T) {
 		return joins >= 2
 	})
 }
+
+// Copilot review round 2, PR #107: reconnection must be level-triggered. With
+// the earlier edge-triggered relaunch, a socket dying between the supervisor's
+// last check and its return had its wake-up swallowed as a duplicate, leaving
+// the client disconnected with nobody scheduled to redial. Repeated rapid drops
+// land signals exactly in that window.
+func TestRepeatedRapidDropsAlwaysEndConnected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("mcp", "alice", "r1", ""); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+
+	for range 15 {
+		h.dropAll()
+		time.Sleep(3 * time.Millisecond) // sinyali süpervizörün iş ortasına düşür
+	}
+
+	waitFor(t, "arka arkaya kopuşlardan sonra bağlantının geri gelmesi", func() bool {
+		_, err := c.ListRooms()
+		return err == nil
+	})
+}
+
+// A disconnect signalled while the supervisor is already working must still be
+// honoured once it finishes — the buffered channel is what guarantees that.
+func TestDisconnectSignalIsNotLostWhileSupervisorBusy(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Raise the signal twice before anything is connected: the second must not
+	// be swallowed in a way that leaves the client idle.
+	c.notifyDisconnected()
+	c.notifyDisconnected()
+
+	waitFor(t, "sinyalin işlenmesi", func() bool { return h.acceptedCount() >= 1 })
+
+	// And a signal raised after that connection still reconnects.
+	h.dropAll()
+	waitFor(t, "sonraki sinyalin işlenmesi", func() bool { return h.acceptedCount() >= 2 })
+}

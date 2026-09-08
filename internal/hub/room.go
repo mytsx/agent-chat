@@ -159,7 +159,7 @@ func (r *RoomState) touchAgentLastSeenByIdentityLocked(agentName string) {
 
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
-	return r.join(agentName, role, false)
+	return r.join(agentName, role)
 }
 
 // Takeover reclaims a roster entry the same agent already owns, for a
@@ -179,7 +179,7 @@ func (r *RoomState) Takeover(agentName string) (map[string]types.Agent, bool) {
 	return r.copyAgentsLocked(), true
 }
 
-func (r *RoomState) join(agentName, role string, _ bool) (types.Message, map[string]types.Agent, error) {
+func (r *RoomState) join(agentName, role string) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
 
 	r.cleanupStaleLocked()
