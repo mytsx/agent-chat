@@ -1942,3 +1942,51 @@ func TestPromotionRaceWithIdentityChanges(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// Codex review round 8, PR #113: a connection that joined room A and merely
+// SUBSCRIBES to B is in B's subscriber map too. Clearing its connection-wide
+// observer flag from B's promotion would let it send in A the moment A's
+// allow-list was revoked — without ever rejoining, which is exactly what the
+// lifetime binding prevents.
+func TestPromotionInAnotherRoomDoesNotUnbindAnObserver(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("A", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "A",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// It also subscribes to B without joining it.
+	h.mu.Lock()
+	if h.subs["B"] == nil {
+		h.subs["B"] = make(map[*Client]bool)
+	}
+	h.subs["B"][obs] = true
+	h.mu.Unlock()
+
+	// B names the same identity as ITS manager.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "B",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if !obs.isObserver.Load() {
+		t.Fatal("başka odanın terfisi observer bağını çözdü")
+	}
+
+	// And with A's allow-list revoked, it still cannot send in A.
+	h.setConfiguredObservers("A", nil)
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "A",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Error("salt-okunur bağlantı yeniden katılmadan mesaj gönderebildi")
+	}
+}

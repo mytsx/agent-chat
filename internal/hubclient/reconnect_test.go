@@ -1508,3 +1508,18 @@ func TestExhaustedRestoreFailsWithTheGateStillArmed(t *testing.T) {
 		t.Error("başarısız restore kapıyı açtı; soket düşürülene kadar kapalı kalmalı")
 	}
 }
+
+// Codex review round 8, PR #113: validateHubPort trims a local copy, so a padded
+// AGENT_CHAT_HUB_PORT passed the check and was then interpolated verbatim into
+// an unusable ws:// address the background connector would retry forever.
+func TestDiscoverHubAddrTrimsEnvironmentPort(t *testing.T) {
+	t.Setenv("AGENT_CHAT_HUB_PORT", "  4321\n")
+
+	addr, err := DiscoverHubAddr(t.TempDir())
+	if err != nil {
+		t.Fatalf("DiscoverHubAddr: %v", err)
+	}
+	if addr != "ws://localhost:4321/ws" {
+		t.Errorf("adres = %q, want ws://localhost:4321/ws", addr)
+	}
+}

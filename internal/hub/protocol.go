@@ -354,7 +354,12 @@ func (h *Hub) clearObserverBinding(room, agentName string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.subs[room] {
-		if sameAgentName(c.agentName, agentName) {
+		// JOINED to this room, not merely subscribed to it. A connection that
+		// joined room A and subscribes to B is in this map for B too; clearing
+		// its connection-wide observer flag from B's promotion would let it send
+		// in A the moment A's allow-list was revoked — without ever rejoining,
+		// which is exactly what the lifetime binding prevents.
+		if c.joinedRoom == room && sameAgentName(c.agentName, agentName) {
 			c.isObserver.Store(false)
 		}
 	}
