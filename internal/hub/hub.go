@@ -96,6 +96,9 @@ type Hub struct {
 	// bool: a reconnecting client registers its new connection before the old
 	// one unregisters, and the agent must not flicker to "gone" in between.
 	connectedAgents map[string]int
+	// departGen numbers each disconnect so a superseded grace timer can tell it
+	// no longer owns the window.
+	departGen map[string]uint64
 	// graceWindow is how long a departure waits before it is written down. A
 	// client that reconnects inside it leaves no trace; see releaseAgent.
 	graceWindow time.Duration
@@ -147,6 +150,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
 		connectedAgents:  make(map[string]int),
+		departGen:        make(map[string]uint64),
 		graceWindow:      defaultGraceWindow,
 		events:           events,
 	}
@@ -400,6 +404,8 @@ func (h *Hub) claimLiveness(c *Client, room, agentName string) {
 	c.livenessKey = key
 	h.connMu.Lock()
 	h.connectedAgents[key]++
+	// Retire any pending grace timer: the agent is back.
+	h.departGen[key]++
 	h.connMu.Unlock()
 }
 
@@ -494,9 +500,19 @@ func (h *Hub) scheduleDeparture(room, agentName string) {
 		return // another connection still holds this agent
 	}
 
+	// Each disconnect gets its own generation. A reconnect (claimLiveness) bumps
+	// it, retiring the timer this call is about to arm — otherwise an agent that
+	// flaps would be removed on the FIRST disconnect's old deadline instead of
+	// getting a fresh window from the latest one.
+	key := connKey(room, agentName)
+	h.connMu.Lock()
+	h.departGen[key]++
+	gen := h.departGen[key]
+	h.connMu.Unlock()
+
 	grace := h.graceWindow
 	if grace <= 0 {
-		h.finalizeDeparture(room, agentName)
+		h.finalizeDeparture(room, agentName, gen)
 		return
 	}
 	time.AfterFunc(grace, func() {
@@ -505,20 +521,28 @@ func (h *Hub) scheduleDeparture(room, agentName string) {
 			return // shutting down; the roster is being torn down anyway
 		default:
 		}
-		h.finalizeDeparture(room, agentName)
+		h.finalizeDeparture(room, agentName, gen)
 	})
 }
 
-// finalizeDeparture removes an agent that did not come back.
-func (h *Hub) finalizeDeparture(room, agentName string) {
-	if h.isAgentConnected(room, agentName) {
-		return // reconnected inside the window: nothing happened
+// finalizeDeparture removes an agent that did not come back, unless a newer
+// disconnect has superseded this one.
+func (h *Hub) finalizeDeparture(room, agentName string, gen uint64) {
+	key := connKey(room, agentName)
+	h.connMu.RLock()
+	current := h.departGen[key]
+	h.connMu.RUnlock()
+	if current != gen {
+		return // a later disconnect (or a reconnect) owns the window now
 	}
+
 	roomState := h.getRoom(room)
 	if roomState == nil {
 		return
 	}
-	sysMsg, found := roomState.Leave(agentName)
+	// The liveness check happens INSIDE the room lock: checking here and leaving
+	// afterwards let a reconnect land in between and be removed anyway.
+	sysMsg, found := roomState.LeaveIfDisconnected(agentName)
 	if !found {
 		return
 	}

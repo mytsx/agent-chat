@@ -32,6 +32,9 @@ type fakeHub struct {
 	// rejectJoin makes the hub refuse join_room at the protocol level (success
 	// false, no transport error) — the shape a manager authorization failure has.
 	rejectJoin bool
+	// dropOn severs the connection as soon as a request of this type arrives,
+	// WITHOUT answering — the "hub applied it but the response was lost" shape.
+	dropOn string
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -67,7 +70,12 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 
 		h.mu.Lock()
 		reject := h.rejectJoin && req.Type == "join_room"
+		drop := h.dropOn != "" && req.Type == h.dropOn
 		h.mu.Unlock()
+		if drop {
+			conn.Close()
+			return
+		}
 
 		resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: json.RawMessage(`{"ok":true}`)}
 		if reject {
@@ -341,13 +349,11 @@ func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
 
 	var calls int
 	var mu sync.Mutex
-	c.SetBootstrap(func(cl *HubClient) {
+	c.SetBootstrap(func(cl *HubClient) error {
 		mu.Lock()
 		calls++
 		mu.Unlock()
-		if err := cl.Identify("mcp", "alice", "r1", ""); err != nil {
-			t.Errorf("Identify: %v", err)
-		}
+		return cl.Identify("mcp", "alice", "r1", "")
 	})
 
 	c.StartBackgroundConnect()
@@ -511,4 +517,92 @@ func TestDisconnectSignalIsNotLostWhileSupervisorBusy(t *testing.T) {
 	// And a signal raised after that connection still reconnects.
 	h.dropAll()
 	waitFor(t, "sonraki sinyalin işlenmesi", func() bool { return h.acceptedCount() >= 2 })
+}
+
+// Codex review round 3, PR #107: the leave intent must be cleared BEFORE the
+// RPC. If the hub applies the leave but the response is lost, a still-set
+// intent silently rejoins the agent the caller just took out.
+func TestLeaveIntentClearedEvenWhenResponseIsLost(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// The hub applies the leave and then the socket dies before the response
+	// lands — modelled by dropping every connection as the call goes out.
+	h.mu.Lock()
+	h.dropOn = "leave_room"
+	h.mu.Unlock()
+	_, _ = c.LeaveRoom("r1", "alice")
+
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	time.Sleep(150 * time.Millisecond)
+
+	c.mu.Lock()
+	joined := c.sess.joined
+	c.mu.Unlock()
+	if joined {
+		t.Error("yanıt kaybolunca ayrılma niyeti korunmuş; reconnect agent'ı odaya geri sokardı")
+	}
+}
+
+// Codex review round 3: a failed join for another room must not overwrite an
+// established membership — later operations still target the original room and
+// would be rejected as wrong-room.
+func TestFailedJoinDoesNotOverwriteEstablishedRoom(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("A", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom A: %v", err)
+	}
+
+	// A transient disconnect, then a join for a different room that never
+	// reaches the hub.
+	c.dropConn()
+	if _, err := c.JoinRoom("B", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room := c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "A" {
+		t.Errorf("kayıtlı oda = %q, want A (başarısız join kurulu üyeliği ezmemeli)", room)
+	}
+}
+
+// Found while testing the leave-intent fix: an RPC in flight when the socket
+// died waited out the full 15s request timeout, because nothing woke the
+// pending caller. For an agent that is the same as hanging — the symptom #98
+// exists to remove.
+func TestInFlightRequestFailsFastWhenConnectionDrops(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub swallows this request and severs the connection instead of
+	// answering it.
+	h.mu.Lock()
+	h.dropOn = "list_rooms"
+	h.mu.Unlock()
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := c.ListRooms(); err == nil {
+		t.Fatal("kopan bağlantıda istek başarılı görünmemeli")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("istek %v bekledi; bağlantı koptuğunda hemen dönmeliydi (istek zaman aşımı %v)", elapsed, defaultTimeout)
+	}
 }

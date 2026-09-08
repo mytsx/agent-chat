@@ -84,8 +84,14 @@ type HubClient struct {
 	resolveAddr func() (string, error)
 	// bootstrap establishes the session on the FIRST successful connection.
 	// Later reconnects replay what it recorded rather than running it again.
-	bootstrap func(*HubClient)
-	sess      session
+	bootstrap func(*HubClient) error
+	// bootstrapped records that it has actually run to completion. Gating on
+	// "is there any session state" instead was wrong: a join recorded before the
+	// first connect (the background-connect window) counted as state, so the
+	// bootstrap — the MCP server's only Identify call — was skipped and the
+	// client stayed unidentified for the life of the process.
+	bootstrapped bool
+	sess         session
 	// reconnectCh carries "the connection is gone" to the single long-lived
 	// supervisor. Buffered by one and written non-blockingly, so a signal raised
 	// while the supervisor is mid-work is never lost — unlike an edge-triggered
@@ -165,30 +171,29 @@ func (c *HubClient) SetAddrResolver(fn func() (string, error)) {
 //
 // It exists because a background connect gives the caller no inline moment to
 // perform that setup.
-func (c *HubClient) SetBootstrap(fn func(*HubClient)) {
+func (c *HubClient) SetBootstrap(fn func(*HubClient) error) {
 	c.mu.Lock()
 	c.bootstrap = fn
 	c.mu.Unlock()
 }
 
-// hasSession reports whether anything has been recorded to replay.
-func (c *HubClient) hasSession() bool {
+// runBootstrap performs first-connection setup, once. A failure is returned so
+// the caller can treat it like any other incomplete session and retry on the
+// next connection rather than leaving the client half-established.
+func (c *HubClient) runBootstrap() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.sess.identified || c.sess.joined || len(c.sess.subs) > 0
-}
-
-// runBootstrap performs first-connection setup if nothing has been recorded yet.
-func (c *HubClient) runBootstrap() {
-	if c.hasSession() {
-		return
-	}
-	c.mu.Lock()
-	fn := c.bootstrap
+	fn, done := c.bootstrap, c.bootstrapped
 	c.mu.Unlock()
-	if fn != nil {
-		fn(c)
+	if fn == nil || done {
+		return nil
 	}
+	if err := fn(c); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	c.mu.Lock()
+	c.bootstrapped = true
+	c.mu.Unlock()
+	return nil
 }
 
 // StartBackgroundConnect connects without blocking the caller, retrying until
@@ -367,10 +372,9 @@ func (c *HubClient) afterConnect() error {
 	if err := c.restoreSession(); err != nil {
 		return err
 	}
-	// Nothing recorded means this client has never established a session, so it
-	// still has to.
-	c.runBootstrap()
-	return nil
+	// Independent of restoreSession: a client can have a recorded join (made
+	// before any connection existed) and still never have identified.
+	return c.runBootstrap()
 }
 
 // restoreSession replays identity, membership and subscriptions onto a fresh
@@ -434,6 +438,19 @@ func (c *HubClient) Close() {
 	for id, ch := range c.pending {
 		close(ch)
 		delete(c.pending, id)
+	}
+}
+
+// failPending releases every in-flight request because the connection carrying
+// them is gone. Callers see a prompt "connection lost" instead of waiting out
+// the request timeout for a reply that can never arrive.
+func (c *HubClient) failPending() {
+	c.mu.Lock()
+	pending := c.pending
+	c.pending = make(map[string]chan *types.Response)
+	c.mu.Unlock()
+	for _, ch := range pending {
+		close(ch)
 	}
 }
 
@@ -526,7 +543,9 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("hub client closed while waiting for response")
+			// Closed rather than answered: either the client is shutting down or
+			// the connection carrying this request died.
+			return nil, fmt.Errorf("hub bağlantısı yanıt beklenirken kesildi")
 		}
 		return resp, nil
 	case <-time.After(defaultTimeout):
@@ -554,6 +573,12 @@ func (c *HubClient) readLoop(conn *websocket.Conn) {
 		}
 		closed := c.closed
 		c.mu.Unlock()
+		// Wake everything waiting on a response from a socket that is now gone.
+		// Without this an RPC in flight when the connection dropped sat out the
+		// full 15s timeout — the agent simply hung, which is the very symptom
+		// this work exists to remove.
+		c.failPending()
+
 		// A read error used to end the client's life. Signal the supervisor
 		// instead — unless the teardown was deliberate.
 		if !closed {
@@ -688,19 +713,29 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 	})
 	resp, err := c.Send(types.Request{Type: "join_room", Room: room, Data: data})
 
-	// Remember the intent when the request never reached the hub, not only when
-	// it succeeded. With a background connect the agent can call join_room
-	// before the first dial lands; dropping that intent would leave it outside
-	// the room until the model happened to retry. A hub that REJECTED the join
-	// is different — replaying that would just fail the same way forever.
-	if err != nil || (resp != nil && resp.Success) {
-		c.mu.Lock()
+	succeeded := err == nil && resp != nil && resp.Success
+	// Three outcomes, three rules:
+	//   success            → this is the session
+	//   transport failure  → keep as INITIAL intent only (see below); the hub
+	//                        never saw it, so it is worth replaying
+	//   protocol rejection → record nothing; replaying it would fail the same
+	//                        way on every reconnect, forever
+	unreached := err != nil
+
+	c.mu.Lock()
+	// A failed join is kept only when nothing is established yet: with a
+	// background connect the agent can call join_room before the first dial
+	// lands, and dropping that would leave it outside the room. But letting a
+	// failed join for room B overwrite an established membership in room A would
+	// silently move the client, and its later operations — still aimed at A —
+	// would be rejected as wrong-room.
+	if succeeded || (unreached && !c.sess.joined) {
 		c.sess.joined = true
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
-		c.mu.Unlock()
 	}
+	c.mu.Unlock()
 	return resp, err
 }
 
@@ -766,18 +801,30 @@ func (c *HubClient) ListAgents(room, agentName string) (*types.Response, error) 
 // LeaveRoom leaves a room.
 func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{"agent_name": agentName})
-	resp, err := c.Send(types.Request{Type: "leave_room", Room: room, Data: data})
-	if err != nil || resp == nil || !resp.Success {
-		return resp, err
-	}
 
-	// A deliberate departure must not be undone by the next reconnect.
+	// Clear the replay intent BEFORE sending. If the hub applies the leave but
+	// the response is lost — or a socket failure starts restoration before the
+	// response is processed — a still-set intent would silently rejoin the agent
+	// the caller just took out of the room.
 	c.mu.Lock()
-	if c.sess.joinRoom == room {
+	hadJoin := c.sess.joined && c.sess.joinRoom == room
+	if hadJoin {
 		c.sess.joined = false
 	}
 	c.mu.Unlock()
-	return resp, nil
+
+	resp, err := c.Send(types.Request{Type: "leave_room", Room: room, Data: data})
+
+	// Only an explicit protocol rejection means the agent is still in the room,
+	// so only then is the intent put back. A transport error leaves it cleared:
+	// the hub may well have applied the leave.
+	if hadJoin && err == nil && resp != nil && !resp.Success {
+		c.mu.Lock()
+		c.sess.joined = true
+		c.sess.joinRoom = room
+		c.mu.Unlock()
+	}
+	return resp, err
 }
 
 // ClearRoom clears a room.

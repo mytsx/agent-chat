@@ -169,14 +169,33 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 //
 // Returns false when there is no entry to reclaim, in which case the caller
 // should perform a normal join.
-func (r *RoomState) Takeover(agentName string) (map[string]types.Agent, bool) {
+// claim, if non-nil, runs while the room lock is still held, so registering the
+// new connection cannot be interleaved by a grace timer that already decided the
+// agent was gone.
+func (r *RoomState) Takeover(agentName string, claim func()) (map[string]types.Agent, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.agents[agentName]; !exists {
 		return nil, false
 	}
 	r.touchAgentLastSeenLocked(agentName)
+	if claim != nil {
+		claim()
+	}
 	return r.copyAgentsLocked(), true
+}
+
+// LeaveIfDisconnected removes an agent only if it still has no live connection,
+// deciding and removing under ONE hold of the room lock.
+//
+// Checking connectivity and then leaving as two steps let a boundary-timed
+// reconnect slip between them: the join reclaimed the entry and registered its
+// connection, and the timer then removed an agent that was live — while the
+// client had been told its join succeeded.
+func (r *RoomState) LeaveIfDisconnected(agentName string) (types.Message, bool) {
+	return r.leaveIf(agentName, func() bool {
+		return r.connectedFn == nil || !r.connectedFn(agentName)
+	})
 }
 
 func (r *RoomState) join(agentName, role string) (types.Message, map[string]types.Agent, error) {
@@ -445,9 +464,20 @@ func (r *RoomState) ListAgents(agentName string) map[string]types.Agent {
 
 // Leave removes an agent from the room, returning a system message.
 func (r *RoomState) Leave(agentName string) (types.Message, bool) {
+	return r.leaveIf(agentName, nil)
+}
+
+// leaveIf removes an agent, optionally only when allow (evaluated UNDER the
+// room lock) says so. Deciding and removing under one hold is what stops a
+// boundary-timed reconnect from slipping between the two.
+func (r *RoomState) leaveIf(agentName string, allow func() bool) (types.Message, bool) {
 	r.mu.Lock()
 
 	if _, ok := r.agents[agentName]; !ok {
+		r.mu.Unlock()
+		return types.Message{}, false
+	}
+	if allow != nil && !allow() {
 		r.mu.Unlock()
 		return types.Message{}, false
 	}

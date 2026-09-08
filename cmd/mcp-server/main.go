@@ -128,10 +128,15 @@ func runMCP() {
 	// sees an anonymous socket: connection telemetry cannot tell MCP from
 	// desktop, and the connect event never fires for the CLI agents at all.
 	// Registered as session state so every reconnect replays it.
-	client.SetBootstrap(func(c *hubclient.HubClient) {
+	client.SetBootstrap(func(c *hubclient.HubClient) error {
 		if err := c.Identify("mcp", "", defaultRoom, ""); err != nil {
-			logger.Printf("Identify failed (continuing unidentified): %v", err)
+			// Returned, not swallowed: an unidentified client is invisible in
+			// connection telemetry, so the supervisor should retry on the next
+			// connection rather than leave it that way for the whole session.
+			logger.Printf("Identify failed, yeniden denenecek: %v", err)
+			return err
 		}
+		return nil
 	})
 	client.StartBackgroundConnect()
 

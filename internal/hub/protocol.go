@@ -385,9 +385,12 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// window exists to prevent. Guarded on the entry being DISCONNECTED, so a
 	// genuine name clash with a live agent still fails.
 	if !h.isAgentConnected(room, data.AgentName) {
-		if agents, ok := roomState.Takeover(data.AgentName); ok {
+		// The liveness claim runs while the room lock is still held, so a grace
+		// timer that already decided this agent was gone cannot slip between the
+		// reclaim and the registration.
+		claim := func() { h.claimLiveness(c, room, data.AgentName) }
+		if agents, ok := roomState.Takeover(data.AgentName, claim); ok {
 			h.bindClientToRoom(c, room, data.AgentName, role)
-			h.claimLiveness(c, room, data.AgentName)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),
 				eventlog.String(eventlog.AttrAgentName, data.AgentName),

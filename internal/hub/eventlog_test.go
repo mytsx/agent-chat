@@ -905,3 +905,59 @@ func TestLivenessClaimIsPerConnectionNotPerJoin(t *testing.T) {
 		t.Error("tek soket birden fazla canlılık hakkı bıraktı; isim kalıcı olarak 'bağlı' kalırdı")
 	}
 }
+
+// Codex review round 3, PR #107: a reconnect landing exactly as the grace timer
+// expires must not be removed. Checking liveness and leaving as two steps let
+// the join reclaim the entry in between — the client was told its join
+// succeeded and then vanished from the roster.
+func TestGraceExpiryDoesNotRemoveReclaimedAgent(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 50 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgentForClient(c, "r1", "alice")
+
+	// Reclaim right at the boundary, repeatedly, to land inside the window.
+	for range 20 {
+		replacement := &Client{hub: h, send: make(chan []byte, 8), rooms: make(map[string]bool)}
+		h.handleJoinRoom(replacement, types.Request{
+			ID: "rejoin", Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+		})
+		if resp := readResponse(t, replacement, "join_room"); !resp.Success {
+			t.Fatalf("yeniden katılım reddedildi: %s", resp.Error)
+		}
+		time.Sleep(5 * time.Millisecond)
+		if !h.getOrCreateRoom("r1").HasAgent("alice") {
+			t.Fatal("başarıyla katılmış agent grace timer'ı tarafından silindi")
+		}
+		h.releaseAgentForClient(replacement, "r1", "alice")
+	}
+}
+
+// Codex review round 3: an agent that disconnects, reconnects and disconnects
+// again must get a FRESH window from the latest disconnect — not be removed on
+// the first disconnect's old deadline.
+func TestSecondDisconnectGetsFreshGraceWindow(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 300 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgentForClient(c, "r1", "alice") // 1. kopuş, saat başlar
+	time.Sleep(200 * time.Millisecond)
+
+	replacement := &Client{hub: h, send: make(chan []byte, 8), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	readResponse(t, replacement, "join_room")
+
+	h.releaseAgentForClient(replacement, "r1", "alice") // 2. kopuş
+	// The first timer would fire ~100ms from now; the second deserves 300ms.
+	time.Sleep(180 * time.Millisecond)
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("eski timer erken tetiklenip agent'ı sildi; ikinci kopuş taze pencere almalıydı")
+	}
+}
