@@ -99,6 +99,9 @@ type Hub struct {
 	// departGen numbers each disconnect so a superseded grace timer can tell it
 	// no longer owns the window.
 	departGen map[string]uint64
+	// departUntil is when each pending grace window closes, so stale cleanup can
+	// leave those entries alone.
+	departUntil map[string]time.Time
 	// graceWindow is how long a departure waits before it is written down. A
 	// client that reconnects inside it leaves no trace; see releaseAgent.
 	graceWindow time.Duration
@@ -151,6 +154,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		sessionLastSig:   make(map[string]string),
 		connectedAgents:  make(map[string]int),
 		departGen:        make(map[string]uint64),
+		departUntil:      make(map[string]time.Time),
 		graceWindow:      defaultGraceWindow,
 		events:           events,
 	}
@@ -406,6 +410,7 @@ func (h *Hub) claimLiveness(c *Client, room, agentName string) {
 	h.connectedAgents[key]++
 	// Retire any pending grace timer: the agent is back.
 	h.departGen[key]++
+	delete(h.departUntil, key)
 	h.connMu.Unlock()
 }
 
@@ -467,6 +472,24 @@ func (h *Hub) connectedFnFor(room string) func(string) bool {
 	return func(agentName string) bool { return h.isAgentConnected(room, agentName) }
 }
 
+// isAgentProtected reports whether an agent must survive stale cleanup: it is
+// connected, or its grace window has not closed yet.
+func (h *Hub) isAgentProtected(room, agentName string) bool {
+	key := connKey(room, agentName)
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	if h.connectedAgents[key] > 0 {
+		return true
+	}
+	until, ok := h.departUntil[key]
+	return ok && time.Now().Before(until)
+}
+
+// protectedFnFor builds the per-room stale-cleanup shield.
+func (h *Hub) protectedFnFor(room string) func(string) bool {
+	return func(agentName string) bool { return h.isAgentProtected(room, agentName) }
+}
+
 // releaseAgent gives up one connection's claim on an agent and, if that was the
 // last one, schedules the departure after the grace window.
 //
@@ -505,12 +528,15 @@ func (h *Hub) scheduleDeparture(room, agentName string) {
 	// flaps would be removed on the FIRST disconnect's old deadline instead of
 	// getting a fresh window from the latest one.
 	key := connKey(room, agentName)
+	grace := h.graceWindow
 	h.connMu.Lock()
 	h.departGen[key]++
 	gen := h.departGen[key]
+	if grace > 0 {
+		h.departUntil[key] = time.Now().Add(grace)
+	}
 	h.connMu.Unlock()
 
-	grace := h.graceWindow
 	if grace <= 0 {
 		h.finalizeDeparture(room, agentName, gen)
 		return
@@ -535,6 +561,9 @@ func (h *Hub) finalizeDeparture(room, agentName string, gen uint64) {
 	if current != gen {
 		return // a later disconnect (or a reconnect) owns the window now
 	}
+	h.connMu.Lock()
+	delete(h.departUntil, key)
+	h.connMu.Unlock()
 
 	roomState := h.getRoom(room)
 	if roomState == nil {
@@ -572,6 +601,7 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	r.SetEvictFn(h.evictFnFor(room))
 	r.SetResetFn(h.resetFnFor(room))
 	r.SetConnectedFn(h.connectedFnFor(room))
+	r.SetProtectedFn(h.protectedFnFor(room))
 	h.rooms[room] = r
 	return r
 }

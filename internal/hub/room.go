@@ -55,6 +55,13 @@ type RoomState struct {
 	// the timeout then only clears records whose client never came back. Must not
 	// block and must not take the room lock — it is called with it held.
 	connectedFn func(agentName string) bool
+	// protectedFn reports whether an agent must survive stale cleanup even
+	// though it looks idle: connected, or inside its grace window. Without the
+	// second case a long-quiet agent whose socket blips is deleted by any
+	// concurrent list_agents before its departure timer runs, so the reconnect
+	// becomes a noisy fresh join — the grace window defeated precisely for the
+	// agents it was written for.
+	protectedFn func(agentName string) bool
 	// generation counts how many times this room has been cleared. Stamped on
 	// send and read events UNDER the room lock so the analyzer never has to
 	// infer a message's generation from log ordering — a send that stores just
@@ -92,6 +99,14 @@ func (r *RoomState) SetResetFn(fn func(maxID, generation int)) {
 func (r *RoomState) SetConnectedFn(fn func(agentName string) bool) {
 	r.mu.Lock()
 	r.connectedFn = fn
+	r.mu.Unlock()
+}
+
+// SetProtectedFn installs the predicate that shields an agent from stale
+// cleanup. Falls back to connectedFn when nil.
+func (r *RoomState) SetProtectedFn(fn func(agentName string) bool) {
+	r.mu.Lock()
+	r.protectedFn = fn
 	r.mu.Unlock()
 }
 
@@ -172,13 +187,39 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 // claim, if non-nil, runs while the room lock is still held, so registering the
 // new connection cannot be interleaved by a grace timer that already decided the
 // agent was gone.
-func (r *RoomState) Takeover(agentName string, claim func()) (map[string]types.Agent, bool) {
+//
+// role matters: the manager routing lock is room state and is NOT persisted, so
+// after a hub restart the reloaded roster has the manager present with no lock.
+// A reconnecting manager takes this path rather than join, so re-applying the
+// lock here is the only thing that brings the gateway back — and it cannot
+// self-heal, because while the manager stays connected later joins are rejected
+// as a duplicate name.
+func (r *RoomState) Takeover(agentName, role string, claim func()) (map[string]types.Agent, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.agents[agentName]; !exists {
 		return nil, false
 	}
+	// Re-check disconnection HERE, not at the call site: two replacement sockets
+	// replaying the same name can both see "disconnected" outside this lock, and
+	// checking only for the entry's existence would let both succeed — two live
+	// clients sending and consuming under one identity. The first claims
+	// liveness below, so the second finds the agent connected and falls through
+	// to a normal join, which rejects the duplicate name.
+	if r.connectedFn != nil && r.connectedFn(agentName) {
+		return nil, false
+	}
 	r.touchAgentLastSeenLocked(agentName)
+
+	if strings.EqualFold(strings.TrimSpace(role), "manager") {
+		// Only when the seat is free or already ours: a live manager under a
+		// different name must not be displaced by a reconnect.
+		if active := r.getActiveManagerLocked(); active == "" || sameAgentName(active, agentName) {
+			r.managerAgent = agentName
+			r.managerLastSeen = types.Now()
+		}
+	}
+
 	if claim != nil {
 		claim()
 	}
@@ -817,8 +858,14 @@ func (r *RoomState) cleanupStaleLocked() {
 	for name, info := range r.agents {
 		if now-info.LastSeen >= float64(staleTimeout) {
 			// A live connection is proof of life that no timestamp carries: the
-			// agent may simply have been working, not gone.
-			if r.connectedFn != nil && r.connectedFn(name) {
+			// agent may simply have been working, not gone. An agent inside its
+			// grace window is likewise not ours to delete — its departure is
+			// already scheduled and a reconnect may still reclaim it.
+			protect := r.protectedFn
+			if protect == nil {
+				protect = r.connectedFn
+			}
+			if protect != nil && protect(name) {
 				continue
 			}
 			delete(r.agents, name)

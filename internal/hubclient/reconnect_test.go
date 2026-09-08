@@ -606,3 +606,79 @@ func TestInFlightRequestFailsFastWhenConnectionDrops(t *testing.T) {
 		t.Errorf("istek %v bekledi; bağlantı koptuğunda hemen dönmeliydi (istek zaman aşımı %v)", elapsed, defaultTimeout)
 	}
 }
+
+// Codex review round 4, PR #107: a read loop finishing after a replacement
+// socket was installed must not fail requests written on the new one.
+func TestFailPendingIsScopedToItsOwnSocket(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// A request on the CURRENT socket, then an old epoch's failure.
+	c.mu.Lock()
+	epoch := c.connEpoch
+	c.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.ListRooms()
+		done <- err
+	}()
+
+	// Simulate a stale read loop from a previous socket finishing now.
+	c.failPending(epoch - 1)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("güncel sokete yazılmış istek, eski okuyucunun çıkışıyla düşürüldü: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("istek yanıtlanmadı")
+	}
+}
+
+// Codex review round 4: during a prolonged startup outage a corrected
+// pre-connect join must replace the earlier pending one — but a join the hub
+// actually granted must not be overwritten by a later failed attempt.
+func TestPendingJoinIntentCanBeCorrected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Nothing connected yet: both fail at the transport.
+	if _, err := c.JoinRoom("A", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+	if _, err := c.JoinRoom("B", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room := c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (düzeltilen bekleyen niyet öncekinin yerine geçmeli)", room)
+	}
+
+	// Once established, a later failed attempt must not move it.
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("B", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom B: %v", err)
+	}
+	c.dropConn()
+	if _, err := c.JoinRoom("C", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room = c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (kurulu üyelik ezilmemeli)", room)
+	}
+}

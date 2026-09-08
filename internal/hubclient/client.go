@@ -51,12 +51,24 @@ type session struct {
 	identRoom  string
 	authToken  string
 
-	joined    bool
-	joinRoom  string
-	joinAgent string
-	joinRole  string
+	joined bool
+	// joinEstablished distinguishes a membership the hub actually granted from
+	// one merely intended before any connection existed. Without it, a second
+	// pre-connect join (say the caller corrected the room) was discarded because
+	// the first pending intent already set joined.
+	joinEstablished bool
+	joinRoom        string
+	joinAgent       string
+	joinRole        string
 
 	subs []string
+}
+
+// pendingRequest is an in-flight RPC and the socket generation it was written
+// on.
+type pendingRequest struct {
+	ch    chan *types.Response
+	epoch uint64
 }
 
 // HubClient is a WebSocket client that connects to the Hub server.
@@ -68,12 +80,16 @@ type session struct {
 type HubClient struct {
 	conn    *websocket.Conn
 	mu      sync.Mutex
-	pending map[string]chan *types.Response
-	onEvent func(types.Event)
-	hubAddr string
-	logger  *log.Logger
-	done    chan struct{}
-	closed  bool
+	pending map[string]pendingRequest
+	// connEpoch numbers each socket, so a request can be tied to the connection
+	// that carried it. A read loop finishing after a replacement was installed
+	// must not fail requests written on the new socket.
+	connEpoch uint64
+	onEvent   func(types.Event)
+	hubAddr   string
+	logger    *log.Logger
+	done      chan struct{}
+	closed    bool
 
 	minBackoff time.Duration
 	maxBackoff time.Duration
@@ -103,7 +119,7 @@ type HubClient struct {
 // New creates a new HubClient.
 func New(hubAddr string, logger *log.Logger) *HubClient {
 	c := &HubClient{
-		pending:     make(map[string]chan *types.Response),
+		pending:     make(map[string]pendingRequest),
 		hubAddr:     hubAddr,
 		logger:      logger,
 		done:        make(chan struct{}),
@@ -243,8 +259,10 @@ func (c *HubClient) Connect() error {
 
 	c.mu.Lock()
 	closed := c.closed
+	epoch := c.connEpoch + 1
 	if !closed {
 		c.conn = conn
+		c.connEpoch = epoch
 	}
 	c.mu.Unlock()
 	if closed {
@@ -252,7 +270,7 @@ func (c *HubClient) Connect() error {
 		return fmt.Errorf("hub client closed")
 	}
 
-	go c.readLoop(conn)
+	go c.readLoop(conn, epoch)
 
 	c.logger.Printf("Connected to hub at %s", addr)
 	return nil
@@ -435,8 +453,8 @@ func (c *HubClient) Close() {
 	}
 
 	// Unblock any pending requests
-	for id, ch := range c.pending {
-		close(ch)
+	for id, p := range c.pending {
+		close(p.ch)
 		delete(c.pending, id)
 	}
 }
@@ -444,12 +462,18 @@ func (c *HubClient) Close() {
 // failPending releases every in-flight request because the connection carrying
 // them is gone. Callers see a prompt "connection lost" instead of waiting out
 // the request timeout for a reply that can never arrive.
-func (c *HubClient) failPending() {
+func (c *HubClient) failPending(epoch uint64) {
 	c.mu.Lock()
-	pending := c.pending
-	c.pending = make(map[string]chan *types.Response)
+	var doomed []chan *types.Response
+	for id, p := range c.pending {
+		if p.epoch != epoch {
+			continue // written on a different socket; not this loop's to fail
+		}
+		doomed = append(doomed, p.ch)
+		delete(c.pending, id)
+	}
 	c.mu.Unlock()
-	for _, ch := range pending {
+	for _, ch := range doomed {
 		close(ch)
 	}
 }
@@ -510,7 +534,9 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("hub client closed")
 	}
-	c.pending[req.ID] = ch
+	// Tie the request to the socket it is about to be written on, so only that
+	// socket's death fails it.
+	c.pending[req.ID] = pendingRequest{ch: ch, epoch: c.connEpoch}
 	conn := c.conn
 	c.mu.Unlock()
 
@@ -563,7 +589,7 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 // replacement dial can install a new socket while this loop is still winding
 // down, and touching the shared field would then read from — or clear — the
 // wrong one.
-func (c *HubClient) readLoop(conn *websocket.Conn) {
+func (c *HubClient) readLoop(conn *websocket.Conn, epoch uint64) {
 	defer func() {
 		c.mu.Lock()
 		// Only disown the socket if it is still the current one; a newer dial
@@ -573,11 +599,12 @@ func (c *HubClient) readLoop(conn *websocket.Conn) {
 		}
 		closed := c.closed
 		c.mu.Unlock()
-		// Wake everything waiting on a response from a socket that is now gone.
-		// Without this an RPC in flight when the connection dropped sat out the
-		// full 15s timeout — the agent simply hung, which is the very symptom
-		// this work exists to remove.
-		c.failPending()
+		// Wake everything waiting on a response from THIS socket. Without it an
+		// RPC in flight when the connection dropped sat out the full 15s
+		// timeout — the agent simply hung, which is the very symptom this work
+		// exists to remove. Scoped by epoch so a late-finishing old loop cannot
+		// fail requests already written on the replacement socket.
+		c.failPending(epoch)
 
 		// A read error used to end the client's life. Signal the supervisor
 		// instead — unless the teardown was deliberate.
@@ -625,10 +652,10 @@ func (c *HubClient) readLoop(conn *websocket.Conn) {
 		}
 
 		c.mu.Lock()
-		if ch, ok := c.pending[resp.ID]; ok {
+		if p, ok := c.pending[resp.ID]; ok {
 			delete(c.pending, resp.ID)
 			c.mu.Unlock()
-			ch <- &resp
+			p.ch <- &resp
 		} else {
 			c.mu.Unlock()
 		}
@@ -729,8 +756,9 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 	// failed join for room B overwrite an established membership in room A would
 	// silently move the client, and its later operations — still aimed at A —
 	// would be rejected as wrong-room.
-	if succeeded || (unreached && !c.sess.joined) {
+	if succeeded || (unreached && !c.sess.joinEstablished) {
 		c.sess.joined = true
+		c.sess.joinEstablished = succeeded
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
@@ -810,6 +838,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	hadJoin := c.sess.joined && c.sess.joinRoom == room
 	if hadJoin {
 		c.sess.joined = false
+		c.sess.joinEstablished = false
 	}
 	c.mu.Unlock()
 
@@ -821,6 +850,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	if hadJoin && err == nil && resp != nil && !resp.Success {
 		c.mu.Lock()
 		c.sess.joined = true
+		c.sess.joinEstablished = true
 		c.sess.joinRoom = room
 		c.mu.Unlock()
 	}

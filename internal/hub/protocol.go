@@ -389,7 +389,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		// timer that already decided this agent was gone cannot slip between the
 		// reclaim and the registration.
 		claim := func() { h.claimLiveness(c, room, data.AgentName) }
-		if agents, ok := roomState.Takeover(data.AgentName, claim); ok {
+		if agents, ok := roomState.Takeover(data.AgentName, role, claim); ok {
 			h.bindClientToRoom(c, room, data.AgentName, role)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),
