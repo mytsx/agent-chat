@@ -366,6 +366,7 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	r := NewRoomState()
 	r.SetArchiveFn(h.archiveFnFor(room))
 	r.SetEvictFn(h.evictFnFor(room))
+	r.SetResetFn(h.resetFnFor(room))
 	h.rooms[room] = r
 	return r
 }
@@ -388,6 +389,19 @@ func (h *Hub) evictFnFor(room string) func(string, float64) {
 			eventlog.String(eventlog.AttrConversationID, room),
 			eventlog.String(eventlog.AttrAgentName, agentName),
 			eventlog.Float64(eventlog.AttrIdleSeconds, idleSeconds),
+		)
+	}
+}
+
+// resetFnFor builds the per-room callback that records a clear as a generation
+// boundary. Safe under the room lock for the same reason evictFn is: an event-log
+// append is a non-blocking channel send.
+func (h *Hub) resetFnFor(room string) func(int) {
+	return func(maxID int) {
+		h.events.Log(eventlog.EventRoomReset,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleCleared),
+			eventlog.Int(eventlog.AttrRoomResetMaxID, maxID),
 		)
 	}
 }

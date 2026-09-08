@@ -483,3 +483,57 @@ func TestEventLogRoomResetCarriesClearedMaxID(t *testing.T) {
 		t.Errorf("%s = %v, want %v (arşivlenen son id)", eventlog.AttrRoomResetMaxID, got, wantMax)
 	}
 }
+
+// Codex review round 5, PR #103: ClearArchived releases the room lock before
+// the boundary was logged, so a still-joined client could store a fresh ID-1
+// message in the gap and have it land on the wrong side of the generation
+// boundary — a permanent false unread. The boundary is now emitted from inside
+// ClearArchived, under the lock.
+func TestEventLogRoomResetPrecedesPostClearMessages(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	h.handleJoinRoom(alice, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, alice, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send-1", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "all", "content": "clear öncesi"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	h.handleClearRoom(alice, types.Request{
+		ID: "clear", Type: "clear_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{}),
+	})
+	readResponse(t, alice, "clear_room")
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send-2", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "all", "content": "clear sonrası"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	// The reset must sit between the two sends in the stream, so the post-clear
+	// message (which restarts at a low ID) lands in the new generation.
+	var order []string
+	for _, e := range loggedEvents(t, h, dir) {
+		switch e[eventlog.AttrEventName] {
+		case eventlog.EventMessageSent, eventlog.EventRoomReset:
+			order = append(order, e[eventlog.AttrEventName].(string))
+		}
+	}
+	want := []string{eventlog.EventMessageSent, eventlog.EventRoomReset, eventlog.EventMessageSent}
+	if len(order) != len(want) {
+		t.Fatalf("olay sırası = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("olay sırası = %v, want %v", order, want)
+		}
+	}
+}

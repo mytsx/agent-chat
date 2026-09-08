@@ -43,6 +43,13 @@ type RoomState struct {
 	// the room lock held, which is safe only because the wired callback is a
 	// non-blocking event-log append — never give this one disk I/O.
 	evictFn func(agentName string, idleSeconds float64)
+	// resetFn, if set, is called from inside ClearArchived while the room lock is
+	// held, with the watermark that was wiped. Ordering it under the lock is the
+	// point: once the lock is released the room already accepts new messages that
+	// restart at ID 1, and a boundary logged after that would leave them on the
+	// wrong side of it. Like evictFn this must not block — the wired callback is
+	// a non-blocking event-log append.
+	resetFn func(maxID int)
 }
 
 // SetArchiveFn installs the callback that receives messages leaving the room.
@@ -58,6 +65,14 @@ func (r *RoomState) SetArchiveFn(fn func([]types.Message)) {
 func (r *RoomState) SetEvictFn(fn func(agentName string, idleSeconds float64)) {
 	r.mu.Lock()
 	r.evictFn = fn
+	r.mu.Unlock()
+}
+
+// SetResetFn installs the callback invoked from inside ClearArchived, under the
+// room lock. Passing nil disables it. Safe to call concurrently.
+func (r *RoomState) SetResetFn(fn func(maxID int)) {
+	r.mu.Lock()
+	r.resetFn = fn
 	r.mu.Unlock()
 }
 
@@ -528,6 +543,13 @@ func (r *RoomState) ClearArchived(maxID int) {
 	r.managerAgent = ""
 	r.managerLastSeen = 0
 	r.dirty = true
+
+	// Still holding the lock: the generation boundary is ordered before any
+	// message the cleared room can accept, including the ID-1 message a client
+	// that is still joined may send the instant the lock is released.
+	if r.resetFn != nil {
+		r.resetFn(maxID)
+	}
 }
 
 // GetLastMessageID returns the highest message ID.

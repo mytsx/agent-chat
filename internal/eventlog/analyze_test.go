@@ -1,6 +1,8 @@
 package eventlog
 
 import (
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -800,5 +802,82 @@ func TestAnalyzeCrashRollbackSeparatesMessageIDs(t *testing.T) {
 	got := analyzeDir(t, dir).Unread
 	if len(got) != 1 || got[0].MessageID != 10 {
 		t.Errorf("çökme öncesi kaybolan mesaj, yeniden kullanılan kimliğin okunmasıyla kapatılmış: %+v", got)
+	}
+}
+
+// Codex review round 5, PR #103: a backup being compressed exists twice for a
+// moment. Reading both sides would double-count every record in it.
+func TestReadIgnoresInProgressCompressionDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	rec := `{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.started"}` + "\n"
+	backup := filepath.Join(dir, "events-2026-09-08T08-00-00.000.jsonl")
+	if err := os.WriteFile(backup, []byte(rec), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The .gz lumberjack is midway through writing, holding the same record.
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(rec)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup+".gz", buf.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, _, err := Read(dir, time.Time{})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("kayıt sayısı = %d, want 1 (sıkıştırma sırasında çift sayılmamalı)", len(recs))
+	}
+}
+
+func TestReadSkipsHalfWrittenArchiveButReportsIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, fileName),
+		[]byte(`{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.started"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A .gz truncated mid-write, with no uncompressed sibling left.
+	if err := os.WriteFile(filepath.Join(dir, "events-2026-09-08T08-00-00.000.jsonl.gz"),
+		[]byte{0x1f, 0x8b, 0x08}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, corrupted, err := Read(dir, time.Time{})
+	if err != nil {
+		t.Fatalf("yarım sıkıştırma tüm raporu düşürdü: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("kayıt sayısı = %d, want 1", len(recs))
+	}
+	if corrupted == 0 {
+		t.Error("atlanan yarım arşiv bildirilmedi; rapor eksikliğini gizlerdi")
+	}
+}
+
+// Codex review round 5: a torn tail is normal only for the newest file. In a
+// rotated backup it is real damage — that file was closed before the next opened.
+func TestReadTornTailForgivenOnlyInFinalStreamFile(t *testing.T) {
+	dir := t.TempDir()
+	torn := `{"time":"2026-09-08T08:00:00Z","event.name":"agent_chat.hub.started"}` + "\n{yarim"
+	if err := os.WriteFile(filepath.Join(dir, "events-2026-09-08T08-00-00.000.jsonl"), []byte(torn), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, fileName),
+		[]byte(`{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.stopped"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, corrupted, err := Read(dir, time.Time{})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if corrupted != 1 {
+		t.Errorf("bozuk sayısı = %d, want 1 (yedekteki yarım satır hasar sayılmalı)", corrupted)
 	}
 }

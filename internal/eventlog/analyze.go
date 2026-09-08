@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,8 +75,8 @@ func Read(dir string, since time.Time) ([]Record, int, error) {
 	var corrupted int
 
 	var out []Record
-	for _, p := range paths {
-		recs, corrupt, err := readFile(p, since)
+	for i, p := range paths {
+		recs, corrupt, tornTail, err := readFile(p, since)
 		if err != nil {
 			// A backup listed a moment ago can be compressed or deleted by
 			// lumberjack before we open it while the hub is live. Losing that
@@ -84,9 +85,22 @@ func Read(dir string, since time.Time) ([]Record, int, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
+			// A gzip still being written reads as a truncated archive. Skip it,
+			// but count it: the report must say it is incomplete rather than
+			// quietly omit a backup's worth of events.
+			if strings.HasSuffix(p, ".gz") && isTruncatedArchive(err) {
+				corrupted++
+				continue
+			}
 			return nil, 0, fmt.Errorf("%s: %w", filepath.Base(p), err)
 		}
 		corrupted += corrupt
+		// A torn trailing line is the expected mark of a killed process, so it
+		// is forgiven only at the end of the whole stream. In a rotated backup
+		// it is real damage: that file was closed before the next one opened.
+		if tornTail > 0 && i != len(paths)-1 {
+			corrupted += tornTail
+		}
 		out = append(out, recs...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
@@ -104,24 +118,46 @@ func streamFiles(dir string) ([]string, error) {
 		return nil, err
 	}
 	base := strings.TrimSuffix(fileName, filepath.Ext(fileName)) // "events"
-	var paths []string
+
+	// A backup being compressed exists twice for a moment: lumberjack writes
+	// "x.jsonl.gz" and only then removes "x.jsonl". Key by the logical name and
+	// prefer the uncompressed side — it is complete, whereas the .gz may still be
+	// mid-write. Reading both would double-count every record in it.
+	logical := map[string]string{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		n := e.Name()
-		if n == fileName || (strings.HasPrefix(n, base+"-") && strings.Contains(n, ".jsonl")) {
-			paths = append(paths, filepath.Join(dir, n))
+		if n != fileName && !(strings.HasPrefix(n, base+"-") && strings.Contains(n, ".jsonl")) {
+			continue
 		}
+		name := strings.TrimSuffix(n, ".gz")
+		if prev, ok := logical[name]; ok && !strings.HasSuffix(prev, ".gz") {
+			continue // already holding the uncompressed side
+		}
+		logical[name] = n
 	}
-	sort.Strings(paths)
+
+	paths := make([]string, 0, len(logical))
+	for _, n := range logical {
+		paths = append(paths, filepath.Join(dir, n))
+	}
+	// Oldest first: backups carry a timestamp that sorts lexically, and
+	// "events-" precedes "events." so the live file lands last.
+	sort.Slice(paths, func(i, j int) bool {
+		return strings.TrimSuffix(paths[i], ".gz") < strings.TrimSuffix(paths[j], ".gz")
+	})
 	return paths, nil
 }
 
-func readFile(path string, since time.Time) ([]Record, int, error) {
+// readFile returns the file's records, the number of definitely-corrupt lines,
+// and how many unparseable lines trail the file (which only the caller can judge:
+// a torn tail is normal for the newest file and damage anywhere else).
+func readFile(path string, since time.Time) (recs []Record, corrupted, tornTail int, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer f.Close()
 
@@ -129,17 +165,16 @@ func readFile(path string, since time.Time) ([]Record, int, error) {
 	if strings.HasSuffix(path, ".gz") {
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		defer gz.Close()
 		r = gz
 	}
 
-	var out []Record
-	// pendingBad defers judgement on an unparseable line: a torn LAST line is
-	// the expected result of a killed process, but a bad line with valid records
-	// after it is real corruption the report must not hide.
-	var pendingBad, corrupted int
+	// pendingBad defers judgement on an unparseable line: a bad line with valid
+	// records after it is real corruption, while one that trails the file may be
+	// a torn tail — which only the caller can decide.
+	var pendingBad int
 	sc := bufio.NewScanner(r)
 	// A captured message can be 8 KB, so the default 64 KB line cap is raised
 	// rather than silently truncating events into unparseable halves.
@@ -168,14 +203,24 @@ func readFile(path string, since time.Time) ([]Record, int, error) {
 			continue
 		}
 		name, _ := attrs[AttrEventName].(string)
-		out = append(out, Record{Time: t, Name: name, Attrs: attrs})
+		recs = append(recs, Record{Time: t, Name: name, Attrs: attrs})
 	}
-	// A single unparseable trailing line is tolerated as a torn tail; more than
-	// one means real damage.
+	// At most ONE trailing bad line can be a torn tail; anything beyond that is
+	// damage regardless of which file it is in.
 	if pendingBad > 1 {
 		corrupted += pendingBad - 1
+		pendingBad = 1
 	}
-	return out, corrupted, sc.Err()
+	return recs, corrupted, pendingBad, sc.Err()
+}
+
+// isTruncatedArchive reports whether a gzip read failed the way a file still
+// being written does, as opposed to genuine corruption of a settled file.
+func isTruncatedArchive(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, gzip.ErrHeader) ||
+		errors.Is(err, gzip.ErrChecksum)
 }
 
 // readState is one (room, generation, agent)'s read progress: the exact IDs a
