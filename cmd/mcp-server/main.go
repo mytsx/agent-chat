@@ -14,11 +14,15 @@ import (
 )
 
 func main() {
-	// Check for --hub flag
+	// Mode selection. No flag = stdio MCP server, which is how the CLIs launch
+	// this binary; the other modes are explicit.
 	for _, arg := range os.Args[1:] {
-		if arg == "--hub" {
+		switch arg {
+		case "--hub":
 			runHub()
 			return
+		case "--analyze":
+			os.Exit(runAnalyze(os.Args[1:]))
 		}
 	}
 	runMCP()

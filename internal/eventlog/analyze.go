@@ -1,0 +1,412 @@
+package eventlog
+
+import (
+	"bufio"
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Record is one parsed event. Attrs holds every attribute verbatim, so a report
+// can reach a field this package has no typed accessor for.
+type Record struct {
+	Time  time.Time
+	Name  string
+	Attrs map[string]any
+}
+
+func (r Record) Str(key string) string {
+	s, _ := r.Attrs[key].(string)
+	return s
+}
+
+// Int reads a numeric attribute. JSON decodes numbers as float64, so this is
+// the only correct way to read one back.
+func (r Record) Int(key string) int {
+	f, _ := r.Attrs[key].(float64)
+	return int(f)
+}
+
+func (r Record) Float(key string) float64 {
+	f, _ := r.Attrs[key].(float64)
+	return f
+}
+
+func (r Record) Bool(key string) bool {
+	b, _ := r.Attrs[key].(bool)
+	return b
+}
+
+// Room is the conversation this event belongs to.
+func (r Record) Room() string { return r.Str(AttrConversationID) }
+
+// Read returns every event in dir at or after since, oldest first. Rotated
+// backups (including gzipped ones) are included, so a report is not limited to
+// whatever happens to be in the live file.
+//
+// A missing stream is not an error: nothing logged yet is a normal state.
+func Read(dir string, since time.Time) ([]Record, error) {
+	paths, err := streamFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []Record
+	for _, p := range paths {
+		recs, err := readFile(p, since)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+		out = append(out, recs...)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
+}
+
+// streamFiles lists the live stream plus lumberjack's backups. Backup names are
+// the base name with a timestamp before the extension, optionally .gz.
+func streamFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	base := strings.TrimSuffix(fileName, filepath.Ext(fileName)) // "events"
+	var paths []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if n == fileName || (strings.HasPrefix(n, base+"-") && strings.Contains(n, ".jsonl")) {
+			paths = append(paths, filepath.Join(dir, n))
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func readFile(path string, since time.Time) ([]Record, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		r = gz
+	}
+
+	var out []Record
+	sc := bufio.NewScanner(r)
+	// A captured message can be 8 KB, so the default 64 KB line cap is raised
+	// rather than silently truncating events into unparseable halves.
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var attrs map[string]any
+		// A torn final line (killed mid-write) must not fail the whole report.
+		if err := json.Unmarshal(line, &attrs); err != nil {
+			continue
+		}
+		ts, _ := attrs["time"].(string)
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		if !since.IsZero() && t.Before(since) {
+			continue
+		}
+		name, _ := attrs[AttrEventName].(string)
+		out = append(out, Record{Time: t, Name: name, Attrs: attrs})
+	}
+	return out, sc.Err()
+}
+
+// AgentDrops counts how one agent left a room, split by mechanism. The split is
+// the point: a disconnect-heavy agent and an eviction-heavy agent have
+// different causes (#98).
+type AgentDrops struct {
+	Room       string `json:"room"`
+	Agent      string `json:"agent"`
+	Disconnect int    `json:"disconnect"`
+	Explicit   int    `json:"explicit"`
+	Evicted    int    `json:"evicted"`
+}
+
+// Total is every way this agent left, used for ranking.
+func (d AgentDrops) Total() int { return d.Disconnect + d.Explicit + d.Evicted }
+
+// Misaddressed is a message sent to somebody who was not in the room (#99).
+type Misaddressed struct {
+	Time      time.Time `json:"time"`
+	Room      string    `json:"room"`
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	MessageID int       `json:"message_id"`
+	Content   string    `json:"content,omitempty"`
+}
+
+// Unread is a message whose recipient never read that far.
+type Unread struct {
+	Time      time.Time `json:"time"`
+	Room      string    `json:"room"`
+	From      string    `json:"from"`
+	To        string    `json:"to"`
+	MessageID int       `json:"message_id"`
+	Content   string    `json:"content,omitempty"`
+}
+
+// Outage is a window during which the hub was not running.
+type Outage struct {
+	Start    time.Time     `json:"start"`
+	End      time.Time     `json:"end"`
+	Duration time.Duration `json:"duration"`
+	// Ongoing marks a hub that stopped and never started again within the
+	// analyzed window — the stream simply ends.
+	Ongoing bool `json:"ongoing"`
+}
+
+// Report answers the four questions #101 was opened to answer.
+type Report struct {
+	From   time.Time `json:"from"`
+	To     time.Time `json:"to"`
+	Events int       `json:"events"`
+	// Dropped is what the hub itself reported losing to a full buffer, so a
+	// report never quietly presents an incomplete picture as complete.
+	Dropped uint64 `json:"dropped"`
+
+	Drops        []AgentDrops   `json:"drops"`
+	Misaddressed []Misaddressed `json:"misaddressed"`
+	Unread       []Unread       `json:"unread"`
+	Outages      []Outage       `json:"outages"`
+
+	// Legacy* summarise the old plain-text log: MCP instances that could not
+	// reach the hub at all never had a connection to log an event through, so
+	// this is the only place they appear.
+	LegacyUnreachable int       `json:"legacy_unreachable"`
+	LegacyFirst       time.Time `json:"legacy_first,omitempty"`
+	LegacyLast        time.Time `json:"legacy_last,omitempty"`
+}
+
+// AnalyzeOptions selects what to report on.
+type AnalyzeOptions struct {
+	Dir  string
+	Room string // empty = every room
+	// Since drops events older than this. Zero means everything.
+	Since time.Time
+	// LegacyLog, when set, is the plain-text mcp-server.log to additionally scan.
+	LegacyLog string
+}
+
+// Analyze reads the stream and builds the report.
+func Analyze(opts AnalyzeOptions) (Report, error) {
+	recs, err := Read(opts.Dir, opts.Since)
+	if err != nil {
+		return Report{}, err
+	}
+	if opts.Room != "" {
+		kept := recs[:0]
+		for _, r := range recs {
+			// Hub lifecycle events belong to no room but bound every room's outages.
+			if r.Room() == opts.Room || r.Name == EventHubStarted || r.Name == EventHubStopped {
+				kept = append(kept, r)
+			}
+		}
+		recs = kept
+	}
+
+	rep := Report{Events: len(recs)}
+	if len(recs) > 0 {
+		rep.From, rep.To = recs[0].Time, recs[len(recs)-1].Time
+	}
+
+	drops := map[string]*AgentDrops{}
+	dropFor := func(r Record) *AgentDrops {
+		key := r.Room() + "\x00" + r.Str(AttrAgentName)
+		d, ok := drops[key]
+		if !ok {
+			d = &AgentDrops{Room: r.Room(), Agent: r.Str(AttrAgentName)}
+			drops[key] = d
+		}
+		return d
+	}
+
+	// sent indexes messages by (room, recipient) so unread detection is a single
+	// pass against each recipient's high-water mark.
+	type sentMsg struct {
+		rec Record
+		id  int
+	}
+	sent := map[string][]sentMsg{}
+	highWater := map[string]int{}
+	var stoppedAt time.Time
+
+	for _, r := range recs {
+		switch r.Name {
+		case EventAgentLeft:
+			d := dropFor(r)
+			switch r.Str(AttrLeaveReason) {
+			case LeaveReasonExplicit:
+				d.Explicit++
+			default:
+				d.Disconnect++
+			}
+		case EventAgentEvicted:
+			dropFor(r).Evicted++
+
+		case EventMessageSent:
+			to := r.Str(AttrRecipientName)
+			if !r.Bool(AttrRecipientInRoom) {
+				rep.Misaddressed = append(rep.Misaddressed, Misaddressed{
+					Time: r.Time, Room: r.Room(), From: r.Str(AttrAgentName), To: to,
+					MessageID: r.Int(AttrMessageID), Content: r.Str(AttrInputMessages),
+				})
+			}
+			// Unread counts messages that reached a real recipient who never
+			// read them. A broadcast has no single recipient whose progress
+			// could be compared, and a message to somebody who was not in the
+			// room is a misaddressing (already reported above) with a different
+			// cause — counting it here too would double-report one problem.
+			if to != "" && to != "all" && r.Bool(AttrRecipientInRoom) {
+				key := r.Room() + "\x00" + to
+				sent[key] = append(sent[key], sentMsg{rec: r, id: r.Int(AttrMessageID)})
+			}
+
+		case EventMessagesRead:
+			key := r.Room() + "\x00" + r.Str(AttrAgentName)
+			if id := r.Int(AttrReadMaxID); id > highWater[key] {
+				highWater[key] = id
+			}
+
+		case EventHubStopped:
+			stoppedAt = r.Time
+			if d := r.Attrs[AttrEventsDropped]; d != nil {
+				if f, ok := d.(float64); ok {
+					rep.Dropped += uint64(f)
+				}
+			}
+		case EventHubStarted:
+			if !stoppedAt.IsZero() {
+				rep.Outages = append(rep.Outages, Outage{
+					Start: stoppedAt, End: r.Time, Duration: r.Time.Sub(stoppedAt),
+				})
+				stoppedAt = time.Time{}
+			}
+		}
+	}
+
+	// A stop with no matching start means the hub is still down as far as this
+	// stream knows — the most interesting outage of all, so never dropped.
+	if !stoppedAt.IsZero() {
+		rep.Outages = append(rep.Outages, Outage{Start: stoppedAt, Ongoing: true})
+	}
+
+	for key, msgs := range sent {
+		mark := highWater[key]
+		for _, m := range msgs {
+			if m.id > mark {
+				rep.Unread = append(rep.Unread, Unread{
+					Time: m.rec.Time, Room: m.rec.Room(), From: m.rec.Str(AttrAgentName),
+					To: m.rec.Str(AttrRecipientName), MessageID: m.id,
+					Content: m.rec.Str(AttrInputMessages),
+				})
+			}
+		}
+	}
+	sort.Slice(rep.Unread, func(i, j int) bool { return rep.Unread[i].MessageID < rep.Unread[j].MessageID })
+
+	for _, d := range drops {
+		rep.Drops = append(rep.Drops, *d)
+	}
+	// Worst offender first: the report should lead with the problem.
+	sort.Slice(rep.Drops, func(i, j int) bool {
+		if a, b := rep.Drops[i].Total(), rep.Drops[j].Total(); a != b {
+			return a > b
+		}
+		return rep.Drops[i].Agent < rep.Drops[j].Agent
+	})
+
+	if opts.LegacyLog != "" {
+		if err := scanLegacyLog(opts.LegacyLog, &rep); err != nil {
+			return rep, err
+		}
+	}
+	return rep, nil
+}
+
+// legacyTimeLayout matches the standard log package's LstdFlags output, which
+// is what mcp-server.log has always used.
+const legacyTimeLayout = "2006/01/02 15:04:05"
+
+// legacyUnreachableMarkers identify a hub the MCP instance could not reach at
+// all. Those instances had no connection, so these lines exist nowhere else.
+var legacyUnreachableMarkers = []string{
+	"hub.port not found",
+	"connect: connection refused",
+	"failed to connect to hub after",
+}
+
+// scanLegacyLog counts unreachable-hub lines in the old plain-text log. Best
+// effort by design: it is a bridge until the structured stream has history.
+func scanLegacyLog(path string, rep *Report) error {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		var hit bool
+		for _, m := range legacyUnreachableMarkers {
+			if strings.Contains(line, m) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		rep.LegacyUnreachable++
+
+		// Lines look like: "[MCP] 2026/09/08 09:02:00 main.go:108: ...".
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			t, err := time.ParseInLocation(legacyTimeLayout, fields[i]+" "+fields[i+1], time.Local)
+			if err != nil {
+				continue
+			}
+			if rep.LegacyFirst.IsZero() || t.Before(rep.LegacyFirst) {
+				rep.LegacyFirst = t
+			}
+			if t.After(rep.LegacyLast) {
+				rep.LegacyLast = t
+			}
+			break
+		}
+	}
+	return sc.Err()
+}
