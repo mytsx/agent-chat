@@ -106,33 +106,34 @@ func runMCP() {
 	}
 	logger := log.New(logFile, "[MCP] ", log.LstdFlags|log.Lshortfile)
 
-	// Discover hub address
+	// The hub address is resolved lazily, on every dial: it lives in hub.port,
+	// which the desktop rewrites each time the hub restarts on a fresh
+	// OS-assigned port.
 	hubAddr, err := hubclient.DiscoverHubAddr(dataDir)
 	if err != nil {
-		logger.Printf("Hub discovery failed: %v", err)
-		fmt.Fprintf(os.Stderr, "Hub not available: %v\n", err)
-		os.Exit(1)
+		// NOT fatal, and deliberately so. Exiting here is why the log holds
+		// 12.765 "hub.port not found" lines: every MCP process that started
+		// before the desktop wrote the port file simply died. Worse, an MCP
+		// server that blocks or exits during startup is marked failed by its
+		// host and never retried, so the agent stays out of the room for the
+		// whole session. Serve stdio now; connect when the hub appears.
+		logger.Printf("Hub discovery failed, arka planda beklenecek: %v", err)
 	}
 
-	// Connect to hub
 	client := hubclient.New(hubAddr, logger)
-	if err := client.ConnectWithRetry(5); err != nil {
-		logger.Printf("Hub connect failed: %v", err)
-		fmt.Fprintf(os.Stderr, "Cannot connect to hub: %v\n", err)
-		os.Exit(1)
-	}
+	client.SetAddrResolver(func() (string, error) { return hubclient.DiscoverHubAddr(dataDir) })
 	defer client.Close()
 
-	logger.Printf("Connected to hub at %s", hubAddr)
-
-	// Identify as an MCP client. Without this the hub only ever sees an
-	// anonymous socket: connection telemetry cannot tell MCP from desktop, and
-	// the connect event (emitted on identify) never fires for the CLI agents at
-	// all. Non-fatal — a hub that rejects it must not stop the agent from
-	// working, so the failure is logged and serving continues.
-	if err := client.Identify("mcp", "", defaultRoom, ""); err != nil {
-		logger.Printf("Identify failed (continuing unidentified): %v", err)
-	}
+	// Identify as an MCP client once connected. Without it the hub only ever
+	// sees an anonymous socket: connection telemetry cannot tell MCP from
+	// desktop, and the connect event never fires for the CLI agents at all.
+	// Registered as session state so every reconnect replays it.
+	client.SetBootstrap(func(c *hubclient.HubClient) {
+		if err := c.Identify("mcp", "", defaultRoom, ""); err != nil {
+			logger.Printf("Identify failed (continuing unidentified): %v", err)
+		}
+	})
+	client.StartBackgroundConnect()
 
 	app := mcpserver.NewMCPServerApp(client, defaultRoom, logger)
 	if err := app.Serve(); err != nil {

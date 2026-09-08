@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,13 +22,49 @@ import (
 const (
 	defaultTimeout = 15 * time.Second
 	maxReconnect   = 10 * time.Second
+	// Reconnect pacing. Jittered so a hub restart does not bring every agent
+	// back in lockstep as one wave; capped so a long outage still gets a retry
+	// every half minute rather than backing off into never.
+	defaultMinBackoff = 500 * time.Millisecond
+	defaultMaxBackoff = 30 * time.Second
+	// clientReadWait bounds a half-open socket. The hub pings every ~54s
+	// (pingPeriod = pongWait*9/10, pongWait 60s), so silence past this means the
+	// link is dead even when the OS has not noticed — without it readLoop can
+	// block forever on a socket that will never deliver another byte, and the
+	// agent goes quiet with no error anywhere.
+	clientReadWait = 90 * time.Second
 	// closeWriteTimeout bounds the websocket close-handshake write so Close() can't
 	// block indefinitely on a wedged connection — which would leak goroutines for
 	// callers that run Close asynchronously (monitorHub, shutdown).
 	closeWriteTimeout = 2 * time.Second
 )
 
+// session is what the hub forgets when a socket dies and the client must put
+// back without being asked: who this connection is, which room it joined, and
+// which rooms it subscribed to. The hub removes an agent from the roster the
+// instant its connection drops, so reconnecting alone would leave the agent
+// silently outside the room (#98).
+type session struct {
+	identified bool
+	clientType string
+	identAgent string
+	identRoom  string
+	authToken  string
+
+	joined    bool
+	joinRoom  string
+	joinAgent string
+	joinRole  string
+
+	subs []string
+}
+
 // HubClient is a WebSocket client that connects to the Hub server.
+//
+// A dropped connection is recovered automatically: readLoop hands off to a
+// supervisor that redials with jittered backoff until Close, then replays the
+// session above. Before that, one read error took the client out permanently —
+// conn went nil and every later Send failed for the life of the process.
 type HubClient struct {
 	conn    *websocket.Conn
 	mu      sync.Mutex
@@ -36,15 +74,30 @@ type HubClient struct {
 	logger  *log.Logger
 	done    chan struct{}
 	closed  bool
+
+	minBackoff time.Duration
+	maxBackoff time.Duration
+	// resolveAddr re-resolves the hub address before each dial. The hub listens
+	// on an OS-assigned port (Run(0)) and rewrites hub.port on every start, so a
+	// restarted hub is at a DIFFERENT address — a supervisor that redialled the
+	// remembered one would retry a dead port forever and never notice.
+	resolveAddr func() (string, error)
+	// bootstrap establishes the session on the FIRST successful connection.
+	// Later reconnects replay what it recorded rather than running it again.
+	bootstrap   func(*HubClient)
+	sess        session
+	supervising bool
 }
 
 // New creates a new HubClient.
 func New(hubAddr string, logger *log.Logger) *HubClient {
 	return &HubClient{
-		pending: make(map[string]chan *types.Response),
-		hubAddr: hubAddr,
-		logger:  logger,
-		done:    make(chan struct{}),
+		pending:    make(map[string]chan *types.Response),
+		hubAddr:    hubAddr,
+		logger:     logger,
+		done:       make(chan struct{}),
+		minBackoff: defaultMinBackoff,
+		maxBackoff: defaultMaxBackoff,
 	}
 }
 
@@ -85,20 +138,219 @@ func validateHubPort(source, port string) error {
 	return nil
 }
 
+// SetAddrResolver installs a function consulted before every dial, so the
+// client follows the hub across restarts instead of pinning the address it was
+// constructed with. Nil (the default) keeps using that address.
+func (c *HubClient) SetAddrResolver(fn func() (string, error)) {
+	c.mu.Lock()
+	c.resolveAddr = fn
+	c.mu.Unlock()
+}
+
+// SetBootstrap installs a callback run on the first successful connection, to
+// establish the session (identify, join, subscribe). It is NOT run again on
+// reconnect: by then the calls it made are recorded as session state and
+// replayed verbatim, so running it twice would just repeat them.
+//
+// It exists because a background connect gives the caller no inline moment to
+// perform that setup.
+func (c *HubClient) SetBootstrap(fn func(*HubClient)) {
+	c.mu.Lock()
+	c.bootstrap = fn
+	c.mu.Unlock()
+}
+
+// hasSession reports whether anything has been recorded to replay.
+func (c *HubClient) hasSession() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sess.identified || c.sess.joined || len(c.sess.subs) > 0
+}
+
+// runBootstrap performs first-connection setup if nothing has been recorded yet.
+func (c *HubClient) runBootstrap() {
+	if c.hasSession() {
+		return
+	}
+	c.mu.Lock()
+	fn := c.bootstrap
+	c.mu.Unlock()
+	if fn != nil {
+		fn(c)
+	}
+}
+
+// StartBackgroundConnect connects without blocking the caller, retrying until
+// it succeeds or the client is closed.
+//
+// Startup must never wait on the hub: an MCP server that does not answer its
+// host's initialize handshake in time is marked failed and never retried, and
+// the desktop may not have written hub.port yet. Serve first, connect when the
+// hub shows up.
+func (c *HubClient) StartBackgroundConnect() {
+	go func() {
+		if err := c.Connect(); err != nil {
+			c.superviseReconnect() // keeps trying, then bootstraps
+			return
+		}
+		c.runBootstrap()
+	}()
+}
+
 // Connect establishes the WebSocket connection to the hub.
 func (c *HubClient) Connect() error {
-	conn, _, err := websocket.DefaultDialer.Dial(c.hubAddr, nil)
+	c.mu.Lock()
+	addr, resolve := c.hubAddr, c.resolveAddr
+	c.mu.Unlock()
+	if resolve != nil {
+		resolved, err := resolve()
+		if err != nil {
+			return fmt.Errorf("hub adresi çözülemedi: %w", err)
+		}
+		addr = resolved
+		c.mu.Lock()
+		c.hubAddr = addr
+		c.mu.Unlock()
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(addr, nil)
 	if err != nil {
 		return fmt.Errorf("hub connect: %w", err)
 	}
 
+	// Treat prolonged silence as a dead link. The hub pings on a schedule, so a
+	// healthy connection always refreshes this deadline well before it expires.
+	_ = conn.SetReadDeadline(time.Now().Add(clientReadWait))
+	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(clientReadWait))
+		// Keep gorilla's default behaviour of answering the ping.
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(closeWriteTimeout))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		return err
+	})
+
 	c.mu.Lock()
-	c.conn = conn
+	closed := c.closed
+	if !closed {
+		c.conn = conn
+	}
 	c.mu.Unlock()
+	if closed {
+		conn.Close()
+		return fmt.Errorf("hub client closed")
+	}
 
 	go c.readLoop()
 
-	c.logger.Printf("Connected to hub at %s", c.hubAddr)
+	c.logger.Printf("Connected to hub at %s", addr)
+	return nil
+}
+
+// nextBackoff returns the delay to wait before the next redial: exponential
+// from minBackoff, capped at maxBackoff, with +/-50% jitter so agents that all
+// lost the same hub do not come back as one synchronized wave.
+func (c *HubClient) nextBackoff(prev time.Duration) time.Duration {
+	base := prev * 2
+	if base < c.minBackoff {
+		base = c.minBackoff
+	}
+	if base > c.maxBackoff {
+		base = c.maxBackoff
+	}
+	jittered := time.Duration(float64(base) * (0.5 + rand.Float64()))
+	if jittered > c.maxBackoff {
+		jittered = c.maxBackoff
+	}
+	if jittered <= 0 {
+		jittered = time.Millisecond
+	}
+	return jittered
+}
+
+// superviseReconnect redials until it succeeds or the client is closed, then
+// restores the session. Runs at most once at a time.
+func (c *HubClient) superviseReconnect() {
+	c.mu.Lock()
+	if c.closed || c.supervising {
+		c.mu.Unlock()
+		return
+	}
+	c.supervising = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.supervising = false
+		c.mu.Unlock()
+	}()
+
+	var backoff time.Duration
+	for {
+		backoff = c.nextBackoff(backoff)
+		select {
+		case <-time.After(backoff):
+		case <-c.done:
+			return
+		}
+
+		if err := c.Connect(); err != nil {
+			c.logger.Printf("Hub reconnect failed, retrying: %v", err)
+			continue
+		}
+		if err := c.restoreSession(); err != nil {
+			// The socket is up but the hub would not have us back. Drop it and
+			// let the loop try again rather than pretending we are joined.
+			c.logger.Printf("Hub session restore failed, retrying: %v", err)
+			c.dropConn()
+			continue
+		}
+		// Nothing recorded yet means this is the first connection the client
+		// ever made (the hub was down at startup), so the session still has to
+		// be established.
+		c.runBootstrap()
+		c.logger.Printf("Hub connection restored")
+		return
+	}
+}
+
+// dropConn tears down the current socket without closing the client, so the
+// supervisor can try again from a clean state.
+func (c *HubClient) dropConn() {
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn != nil {
+		conn.Close()
+	}
+}
+
+// restoreSession replays identity, membership and subscriptions onto a fresh
+// connection. Order matters: the hub binds an agent name at identify/join and
+// rejects mismatches afterwards.
+func (c *HubClient) restoreSession() error {
+	c.mu.Lock()
+	s := c.sess
+	subs := append([]string(nil), c.sess.subs...)
+	c.mu.Unlock()
+
+	if s.identified {
+		if err := c.Identify(s.clientType, s.identAgent, s.identRoom, s.authToken); err != nil {
+			return fmt.Errorf("identify: %w", err)
+		}
+	}
+	if s.joined {
+		if _, err := c.JoinRoom(s.joinRoom, s.joinAgent, s.joinRole); err != nil {
+			return fmt.Errorf("join_room: %w", err)
+		}
+	}
+	if len(subs) > 0 {
+		if err := c.Subscribe(subs); err != nil {
+			return fmt.Errorf("subscribe: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -193,7 +445,9 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 
 	if conn == nil {
 		c.forgetPending(req.ID)
-		return nil, fmt.Errorf("not connected to hub")
+		// The supervisor is redialling in the background, so this is a
+		// transient state rather than the terminal one it used to be.
+		return nil, fmt.Errorf("not connected to hub (yeniden bağlanılıyor)")
 	}
 
 	data, err := json.Marshal(req)
@@ -234,7 +488,13 @@ func (c *HubClient) readLoop() {
 	defer func() {
 		c.mu.Lock()
 		c.conn = nil
+		closed := c.closed
 		c.mu.Unlock()
+		// A read error used to end the client's life. Hand off to the supervisor
+		// instead — unless the teardown was deliberate.
+		if !closed {
+			go c.superviseReconnect()
+		}
 	}()
 
 	for {
@@ -296,14 +556,46 @@ func (c *HubClient) Identify(clientType, agentName, room, authToken string) erro
 		"room":        room,
 		"auth_token":  authToken,
 	})
-	return c.sendExpectSuccess("identify", types.Request{Type: "identify", Data: data})
+	if err := c.sendExpectSuccess("identify", types.Request{Type: "identify", Data: data}); err != nil {
+		return err
+	}
+	c.rememberIdentify(clientType, agentName, room, authToken)
+	return nil
+}
+
+// rememberIdentify and its siblings record what a reconnect has to put back.
+// Only successful calls are remembered: replaying a request the hub rejected
+// would just fail the same way on every retry.
+func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sess.identified = true
+	c.sess.clientType = clientType
+	c.sess.identAgent = agentName
+	c.sess.identRoom = room
+	c.sess.authToken = authToken
 }
 
 // Subscribe subscribes to room events.
 func (c *HubClient) Subscribe(rooms []string) error {
 	data, _ := json.Marshal(map[string][]string{"rooms": rooms})
-	_, err := c.Send(types.Request{Type: "subscribe", Data: data})
-	return err
+	if _, err := c.Send(types.Request{Type: "subscribe", Data: data}); err != nil {
+		return err
+	}
+	c.rememberSubscriptions(rooms)
+	return nil
+}
+
+// rememberSubscriptions accumulates rooms across calls: the desktop subscribes
+// incrementally as teams open, and a reconnect has to restore all of them.
+func (c *HubClient) rememberSubscriptions(rooms []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, room := range rooms {
+		if !slices.Contains(c.sess.subs, room) {
+			c.sess.subs = append(c.sess.subs, room)
+		}
+	}
 }
 
 // SetManager configures the allowed manager agent for a room.
@@ -330,7 +622,18 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 		"agent_name": agentName,
 		"role":       role,
 	})
-	return c.Send(types.Request{Type: "join_room", Room: room, Data: data})
+	resp, err := c.Send(types.Request{Type: "join_room", Room: room, Data: data})
+	if err != nil || resp == nil || !resp.Success {
+		return resp, err
+	}
+
+	c.mu.Lock()
+	c.sess.joined = true
+	c.sess.joinRoom = room
+	c.sess.joinAgent = agentName
+	c.sess.joinRole = role
+	c.mu.Unlock()
+	return resp, nil
 }
 
 // SendMessage sends a message to a room.
@@ -395,7 +698,18 @@ func (c *HubClient) ListAgents(room, agentName string) (*types.Response, error) 
 // LeaveRoom leaves a room.
 func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{"agent_name": agentName})
-	return c.Send(types.Request{Type: "leave_room", Room: room, Data: data})
+	resp, err := c.Send(types.Request{Type: "leave_room", Room: room, Data: data})
+	if err != nil || resp == nil || !resp.Success {
+		return resp, err
+	}
+
+	// A deliberate departure must not be undone by the next reconnect.
+	c.mu.Lock()
+	if c.sess.joinRoom == room {
+		c.sess.joined = false
+	}
+	c.mu.Unlock()
+	return resp, nil
 }
 
 // ClearRoom clears a room.
