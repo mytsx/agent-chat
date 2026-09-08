@@ -89,13 +89,17 @@ func runMCP() {
 		dataDir = home + "/.agent-chat"
 	}
 
+	// NOT defaulted to "default". Inventing a room here is what silently put
+	// agents somewhere their team was not: the hub would answer from that room
+	// and the agent would simply never see anyone (1.479 times in the shipped
+	// log). Left empty, the hub resolves an omitted room against the room this
+	// connection actually joined.
 	defaultRoom := os.Getenv("AGENT_CHAT_ROOM")
-	if defaultRoom == "" {
-		defaultRoom = "default"
-	}
-	if err := validation.ValidateName(defaultRoom); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid AGENT_CHAT_ROOM: %v\n", err)
-		os.Exit(1)
+	if defaultRoom != "" {
+		if err := validation.ValidateName(defaultRoom); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid AGENT_CHAT_ROOM: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Setup logger (file-based, since stdio is used for JSON-RPC)

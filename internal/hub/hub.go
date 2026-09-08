@@ -686,11 +686,23 @@ func (h *Hub) archiveFnFor(room string) func([]types.Message) {
 }
 
 // resolveRoom returns the room name, using defaultRoom if empty.
-func (h *Hub) resolveRoom(room string) string {
-	if room == "" {
-		return h.defaultRoom
+// resolveRoomFor resolves an omitted room against the CONNECTION rather than a
+// process-wide default.
+//
+// The default is what silently put agents in the wrong room: the MCP server
+// froze AGENT_CHAT_ROOM at startup and fell back to "default" when it was
+// missing (1.479 times in the shipped log), so an agent could join its team and
+// still have later calls answered from somewhere else. A connection that joined
+// a room has already said which room it means; only an unjoined client (the
+// desktop) needs the default.
+func (h *Hub) resolveRoomFor(c *Client, room string) string {
+	if room != "" {
+		return room
 	}
-	return room
+	if c != nil && c.joinedRoom != "" {
+		return c.joinedRoom
+	}
+	return h.defaultRoom
 }
 
 func (h *Hub) setConfiguredManager(room, managerAgent string) {
