@@ -1539,3 +1539,48 @@ func TestDiscoverHubAddrRejectsWhitespaceOnlyEnvOverride(t *testing.T) {
 		t.Fatalf("DiscoverHubAddr() error = %v, want ErrInvalidHubPortConfig (hub.port'a düşmemeli)", err)
 	}
 }
+
+// Codex review round 11, PR #113: a gated mutation used to record its intent
+// AFTER releasing the mutex, so restoreOnto could take it in that gap, see the
+// old revision, open the gate and stop the supervisor. The revision now advances
+// as part of the refusal itself, in the same critical section.
+//
+// The ORDERING is by inspection — the bump moved inside the gate's own lock —
+// because the gated path touches no network and offers nothing to interleave
+// with deterministically. What this pins is the split the fix introduced: a
+// refused mutation advances the revision, and a refused ordinary read does not
+// (every gated read would otherwise cost the restore a pass).
+func TestGatedMutationAdvancesTheRevisionButAReadDoesNot(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+	c.setRestoring(true)
+
+	c.mu.Lock()
+	before := c.sess.rev
+	c.mu.Unlock()
+
+	// No connection is needed: the gate refuses before anything is written.
+	if _, err := c.JoinRoom("r1", "alice", ""); !errors.Is(err, errRestoreGate) {
+		t.Fatalf("JoinRoom() = %v, want gated", err)
+	}
+
+	c.mu.Lock()
+	after := c.sess.rev
+	c.mu.Unlock()
+	if after == before {
+		t.Error("kapı reddederken sürüm ilerlemedi; restore niyeti görmeden kapıyı açabilir")
+	}
+
+	// An ordinary read must NOT advance it: every gated read would otherwise
+	// cost the restore a pass.
+	c.mu.Lock()
+	before = c.sess.rev
+	c.mu.Unlock()
+	if _, err := c.ListRooms(); !errors.Is(err, errRestoreGate) {
+		t.Fatalf("ListRooms() = %v, want gated", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.rev != before {
+		t.Error("sıradan okuma sürümü ilerletti; her okuma restore'a bir tur maliyeti çıkarır")
+	}
+}

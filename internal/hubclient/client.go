@@ -842,6 +842,19 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 // socket that has not identified or rejoined yet answers ordinary requests with
 // a protocol rejection rather than the result the caller expects.
 func (c *HubClient) send(req types.Request, bypassGate bool) (*types.Response, error) {
+	return c.sendOpt(req, bypassGate, false)
+}
+
+// sendMutation is send for a call that will RECORD session intent if it is
+// refused. The gate advances sess.rev as part of refusing it, in the same
+// critical section — recording afterwards is too late: restoreOnto can take the
+// mutex in that gap, see the old revision, open the gate and stop the
+// supervisor, leaving the intent unapplied until the next disconnect.
+func (c *HubClient) sendMutation(req types.Request, bypassGate bool) (*types.Response, error) {
+	return c.sendOpt(req, bypassGate, true)
+}
+
+func (c *HubClient) sendOpt(req types.Request, bypassGate, recordsIntent bool) (*types.Response, error) {
 	if req.ID == "" {
 		req.ID = uuid.New().String()
 	}
@@ -854,6 +867,10 @@ func (c *HubClient) send(req types.Request, bypassGate bool) (*types.Response, e
 		return nil, fmt.Errorf("hub client closed")
 	}
 	if c.restoring && !bypassGate {
+		if recordsIntent {
+			// Advanced HERE, under the same hold as the decision.
+			c.sess.rev++
+		}
 		c.mu.Unlock()
 		// Same shape as the not-connected answer: transient, and the supervisor
 		// is already working on it. Typed, because a caller that must reconcile
@@ -1043,7 +1060,7 @@ func (c *HubClient) Subscribe(rooms []string) error {
 
 func (c *HubClient) subscribe(rooms []string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string][]string{"rooms": rooms})
-	resp, err := c.send(types.Request{Type: "subscribe", Data: data}, bypassGate)
+	resp, err := c.sendMutation(types.Request{Type: "subscribe", Data: data}, bypassGate)
 
 	// Same rule as JoinRoom: a request the hub never saw is worth replaying, a
 	// request it rejected is not. Without this, a Subscribe issued while the
@@ -1079,7 +1096,7 @@ func (c *HubClient) SetManager(room, managerAgent string) error {
 func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error {
 	myRev := c.reserveConfig("manager:"+room, !bypassGate)
 	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
-	resp, err := c.send(types.Request{Type: "set_manager", Room: room, Data: data}, bypassGate)
+	resp, err := c.sendMutation(types.Request{Type: "set_manager", Room: room, Data: data}, bypassGate)
 
 	// Same rule as Subscribe, and for the same reason: the hub forgets this
 	// configuration when the socket dies, and the desktop only re-sends it when
@@ -1142,7 +1159,7 @@ func (c *HubClient) SetObservers(room string, observers []string) error {
 func (c *HubClient) setObservers(room string, observers []string, bypassGate bool) error {
 	myRev := c.reserveConfig("observers:"+room, !bypassGate)
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
-	resp, err := c.send(types.Request{Type: "set_observers", Room: room, Data: data}, bypassGate)
+	resp, err := c.sendMutation(types.Request{Type: "set_observers", Room: room, Data: data}, bypassGate)
 	if !bypassGate && (err != nil || (resp != nil && resp.Success)) {
 		c.rememberObservers(room, observers, myRev)
 	}
@@ -1209,7 +1226,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 	startJoinRev := c.sess.joinRev
 	c.mu.Unlock()
 
-	resp, err := c.send(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
+	resp, err := c.sendMutation(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
 
 	succeeded := err == nil && resp != nil && resp.Success
 	// Three outcomes, three rules:
@@ -1352,7 +1369,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	myJoinRev := c.sess.joinRev
 	c.mu.Unlock()
 
-	resp, err := c.send(types.Request{Type: "leave_room", Room: room, Data: data}, false)
+	resp, err := c.sendMutation(types.Request{Type: "leave_room", Room: room, Data: data}, false)
 
 	// A leave the GATE turned away never reached the hub, and the replay running
 	// at that moment may already have put the agent back in the room. The intent

@@ -477,11 +477,19 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 			return
 		}
 		if ok {
-			h.bindClientToRoom(c, room, data.AgentName, role)
+			// The EFFECTIVE role, not the requested one: a configured manager
+			// replaying its cached lesser role is seated as manager by Takeover,
+			// and logging "worker" there would make role-based reconnect
+			// telemetry disagree with how the room actually routes.
+			effectiveRole := role
+			if a, ok := agents[data.AgentName]; ok {
+				effectiveRole = a.Role
+			}
+			h.bindClientToRoom(c, room, data.AgentName, effectiveRole)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),
 				eventlog.String(eventlog.AttrAgentName, data.AgentName),
-				eventlog.String(eventlog.AttrAgentRole, role),
+				eventlog.String(eventlog.AttrAgentRole, effectiveRole),
 				eventlog.String(eventlog.AttrRequestID, req.ID),
 			)
 			c.sendSuccess(req.ID, req.Type, map[string]any{
@@ -619,7 +627,13 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	// still protected: the desktop allow-list (configured) OR the live roster role
 	// (joined as observer, even if just de-configured). Broadcasts (to="all") are
 	// fine — the observer just watches them — so only a direct recipient is checked.
-	if data.To != "all" && (h.isConfiguredObserver(room, data.To) || roomState.IsObserver(data.To)) {
+	// Manager precedence applies to the RECIPIENT too. In the promotion window
+	// the target already holds the manager seat while the old allow-list still
+	// names it; rejecting here would drop a worker's direct message before
+	// routing ever saw it.
+	toIsConfiguredManager := sameAgentName(h.getConfiguredManager(room), data.To)
+	if data.To != "all" && !toIsConfiguredManager &&
+		(h.isConfiguredObserver(room, data.To) || roomState.IsObserver(data.To)) {
 		c.sendError(req.ID, req.Type, "observer'a doğrudan mesaj gönderilemez; observer yalnızca odayı izler ve kullanıcıyla konuşur")
 		return
 	}

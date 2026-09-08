@@ -1345,3 +1345,40 @@ func TestTakeoverAppliesRoleDowngrade(t *testing.T) {
 		t.Errorf("roster rolü = %q, want boş — roster ile kilit birlikte hareket etmeli", got)
 	}
 }
+
+// Codex review round 11, PR #113: a configured manager replaying its cached
+// lesser role is seated as manager by Takeover. Logging the REQUESTED role there
+// made role-based reconnect telemetry disagree with how the room actually routes.
+func TestRejoinEventLogsTheEffectiveRole(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci")
+
+	join := func(id string) {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+		})
+		if resp := readResponse(t, c, "join_room"); !resp.Success {
+			t.Fatalf("join başarısız: %s", resp.Error)
+		}
+	}
+	join("j1")
+	join("j2") // ikincisi devralma yolundan geçer: rejoined olayı burada
+
+	var found bool
+	for _, ev := range loggedEvents(t, h, dir) {
+		if ev[eventlog.AttrEventName] != eventlog.EventAgentRejoined {
+			continue
+		}
+		found = true
+		if got := ev[eventlog.AttrAgentRole]; got != "manager" {
+			t.Errorf("rejoined olayındaki rol = %v, want manager (odanın gerçekten yönlendirdiği rol)", got)
+		}
+	}
+	if !found {
+		t.Fatal("rejoined olayı bulunamadı")
+	}
+}

@@ -2133,3 +2133,70 @@ func TestHandoffDemotesAManagerWhoseLockAlreadyTimedOut(t *testing.T) {
 		t.Errorf("yeni manager rolü = %q, want manager", got)
 	}
 }
+
+// Codex review round 11, PR #113: manager precedence has to cover the RECIPIENT
+// check too. In the promotion window the target already holds the seat while the
+// old allow-list still names it, so a worker's direct message was dropped before
+// routing ever saw it.
+func TestDirectMessageToPromotedManagerIsNotRejected(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	// Only the first of the desktop's two calls has landed.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	h.handleSendMessage(worker, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "isci", "to": "gozcu", "content": "soru"}),
+	})
+	if resp := readResponse(t, worker, "send_message"); !resp.Success {
+		t.Fatalf("terfi edilmiş manager'a doğrudan mesaj reddedildi: %s", resp.Error)
+	}
+}
+
+// A direct message to a plain observer is still refused.
+func TestDirectMessageToPlainObserverIsRejected(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.handleSendMessage(worker, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "isci", "to": "gozcu", "content": "soru"}),
+	})
+	if resp := readResponse(t, worker, "send_message"); resp.Success {
+		t.Error("observer'a doğrudan mesaj kabul edildi")
+	}
+}
