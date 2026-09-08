@@ -14,8 +14,17 @@ import (
 	"desktop/internal/types"
 )
 
-func newArchiveHub(dataDir string) *Hub {
-	return New(dataDir, "default", log.New(io.Discard, "", 0))
+// newArchiveHub builds a hub over dataDir and ties its event writer to the test.
+//
+// A hub owns an async event writer that only Shutdown closes; a test that
+// abandons the hub leaves it running, and its next write recreates events.jsonl
+// underneath t.TempDir()'s cleanup — which then fails with "directory not
+// empty". Production is unaffected (Shutdown closes it).
+func newArchiveHub(t *testing.T, dataDir string) *Hub {
+	t.Helper()
+	h := New(dataDir, "default", log.New(io.Discard, "", 0))
+	t.Cleanup(func() { _ = h.events.Close() })
+	return h
 }
 
 // TestSendMessageTruncateInvokesArchiveFn verifies that when the room exceeds
@@ -69,7 +78,7 @@ func TestHandleClearRoom_AbortsOnArchiveFailure(t *testing.T) {
 	if err := os.WriteFile(badDataDir, []byte("x"), 0600); err != nil {
 		t.Fatalf("seed bad data dir: %v", err)
 	}
-	h := newArchiveHub(badDataDir)
+	h := newArchiveHub(t, badDataDir)
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("proj")
@@ -241,7 +250,7 @@ func TestClearArchivedKeepsNewerMessages(t *testing.T) {
 // message and that repeated calls accumulate (append-only).
 func TestAppendArchiveWritesJSONL(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	first := []types.Message{
 		{ID: 1, From: "a", To: "all", Content: "one", Type: "broadcast"},
@@ -280,7 +289,7 @@ func TestAppendArchiveWritesJSONL(t *testing.T) {
 // refused and writes nothing.
 func TestAppendArchiveRejectsInvalidRoom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	h.appendArchive("../evil", []types.Message{{ID: 1, Content: "x"}})
 
@@ -297,7 +306,7 @@ func TestAppendArchiveRejectsInvalidRoom(t *testing.T) {
 // data dir are silent no-ops (no file, no panic).
 func TestAppendArchiveEmptyInputsNoop(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	h.appendArchive("room1", nil)
 	if _, err := os.Stat(filepath.Join(dir, "hub-state", "archive", "room1.jsonl")); !os.IsNotExist(err) {
@@ -305,7 +314,7 @@ func TestAppendArchiveEmptyInputsNoop(t *testing.T) {
 	}
 
 	// No data dir configured: must not write relative to CWD.
-	hNoDir := newArchiveHub("")
+	hNoDir := newArchiveHub(t, "")
 	hNoDir.appendArchive("room1", []types.Message{{ID: 1, Content: "x"}})
 }
 
@@ -313,7 +322,7 @@ func TestAppendArchiveEmptyInputsNoop(t *testing.T) {
 // reach disk once the writer goroutine drains, and shutdown drains the backlog.
 func TestEnqueueArchiveWritesViaWriter(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	go h.runArchiveWriter()
 
@@ -343,7 +352,7 @@ func TestEnqueueArchiveWritesViaWriter(t *testing.T) {
 // it the async writer can still be draining the just-dropped batch.
 func TestFlushArchiveWaitsForWrites(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	// This test starts the writer manually (no Run), so mark it started — otherwise
 	// flushArchive short-circuits as a no-writer hub.
 	h.mu.Lock()
@@ -370,7 +379,7 @@ func TestFlushArchiveWaitsForWrites(t *testing.T) {
 // TestEnqueueArchiveEmptyDataDirSkips verifies enqueue is a no-op without a
 // data dir (so unit hubs built with New("", ...) never touch the filesystem).
 func TestEnqueueArchiveEmptyDataDirSkips(t *testing.T) {
-	h := newArchiveHub("")
+	h := newArchiveHub(t, "")
 	go h.runArchiveWriter()
 	h.enqueueArchive("room1", []types.Message{{ID: 1, Content: "x"}})
 	close(h.done)
@@ -386,7 +395,7 @@ func TestEnqueueArchiveEmptyDataDirSkips(t *testing.T) {
 // through getOrCreateRoom archives its truncated messages to disk.
 func TestRoomTruncateArchivesViaHubWiring(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	go h.runArchiveWriter()
 
 	room := h.getOrCreateRoom("proj")
@@ -421,7 +430,7 @@ func TestRoomTruncateArchivesViaHubWiring(t *testing.T) {
 // current messages to the archive file before responding.
 func TestHandleArchiveRoom_DesktopFlushesCurrentMessages(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("proj")
@@ -471,7 +480,7 @@ func TestHandleArchiveRoom_DesktopFlushesCurrentMessages(t *testing.T) {
 // archives the wiped messages through the full hub path before clearing.
 func TestClearRoomViaDesktopArchivesToDisk(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 	go h.runArchiveWriter()
 
@@ -523,7 +532,7 @@ func TestEnqueueArchiveAfterDoneWritesSynchronously(t *testing.T) {
 	const iterations = 30
 	for i := 0; i < iterations; i++ {
 		dir := t.TempDir()
-		h := newArchiveHub(dir)
+		h := newArchiveHub(t, dir)
 		close(h.done) // simulate shutdown; no writer running
 
 		h.enqueueArchive("room1", []types.Message{{ID: 1, From: "a", To: "all", Content: "x"}})
@@ -539,7 +548,7 @@ func TestEnqueueArchiveAfterDoneWritesSynchronously(t *testing.T) {
 // has closed request handling, beginRequest refuses new handlers (so no new
 // truncate/clear archive write can start), while it admits them beforehand.
 func TestBeginRequestGatedAfterShutdown(t *testing.T) {
-	h := newArchiveHub(t.TempDir())
+	h := newArchiveHub(t, t.TempDir())
 
 	if !h.beginRequest() {
 		t.Fatal("beginRequest should admit handlers before shutdown")
@@ -559,7 +568,7 @@ func TestBeginRequestGatedAfterShutdown(t *testing.T) {
 // jobs buffered in archiveCh are flushed to disk by a full Shutdown sequence.
 func TestShutdownDrainsBufferedArchive(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.mu.Lock()
 	h.archiveStarted = true
 	h.mu.Unlock()
@@ -584,7 +593,7 @@ func TestShutdownDrainsBufferedArchive(t *testing.T) {
 // lines. Guards the serialization invariant; also a -race exercise.
 func TestAppendArchiveConcurrentNoLoss(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	const goroutines = 8
 	const perG = 50
@@ -620,7 +629,7 @@ func TestAppendArchiveConcurrentNoLoss(t *testing.T) {
 // room writes nothing and does not materialize a phantom empty room.
 func TestHandleArchiveRoom_UnknownRoomNoPhantom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 
 	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
@@ -656,7 +665,7 @@ func TestHandleArchiveRoom_ReportsWriteFailure(t *testing.T) {
 	if err := os.WriteFile(badDataDir, []byte("x"), 0600); err != nil {
 		t.Fatalf("seed bad data dir: %v", err)
 	}
-	h := newArchiveHub(badDataDir)
+	h := newArchiveHub(t, badDataDir)
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("proj")

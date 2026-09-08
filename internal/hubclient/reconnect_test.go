@@ -1,0 +1,751 @@
+package hubclient
+
+import (
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"desktop/internal/types"
+
+	"github.com/gorilla/websocket"
+)
+
+// fakeHub is a minimal stand-in for the real hub: it accepts connections,
+// records the requests each one made, and can drop a connection on demand so a
+// test can observe what the client does about it.
+type fakeHub struct {
+	server   *httptest.Server
+	upgrader websocket.Upgrader
+
+	mu sync.Mutex
+	// requests holds every request type received, in order, across ALL
+	// connections — which is how a test sees whether state was replayed.
+	requests []types.Request
+	conns    []*websocket.Conn
+	accepted int
+	// rejectJoin makes the hub refuse join_room at the protocol level (success
+	// false, no transport error) — the shape a manager authorization failure has.
+	rejectJoin bool
+	// dropOn severs the connection as soon as a request of this type arrives,
+	// WITHOUT answering — the "hub applied it but the response was lost" shape.
+	dropOn string
+}
+
+func newFakeHub(t *testing.T) *fakeHub {
+	t.Helper()
+	h := &fakeHub{}
+	h.server = httptest.NewServer(http.HandlerFunc(h.handle))
+	t.Cleanup(h.server.Close)
+	return h
+}
+
+func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	h.conns = append(h.conns, conn)
+	h.accepted++
+	h.mu.Unlock()
+
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var req types.Request
+		if json.Unmarshal(data, &req) != nil {
+			continue
+		}
+		h.mu.Lock()
+		h.requests = append(h.requests, req)
+		h.mu.Unlock()
+
+		h.mu.Lock()
+		reject := h.rejectJoin && req.Type == "join_room"
+		drop := h.dropOn != "" && req.Type == h.dropOn
+		h.mu.Unlock()
+		if drop {
+			conn.Close()
+			return
+		}
+
+		resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: json.RawMessage(`{"ok":true}`)}
+		if reject {
+			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "manager rolü atanmadı"}
+		}
+		payload, _ := json.Marshal(resp)
+		if conn.WriteMessage(websocket.TextMessage, payload) != nil {
+			return
+		}
+	}
+}
+
+// url is the ws:// address clients dial.
+func (h *fakeHub) url() string {
+	return "ws" + strings.TrimPrefix(h.server.URL, "http") + "/ws"
+}
+
+// dropAll severs every live connection without a close handshake — the abnormal
+// closure that dominates the real logs.
+func (h *fakeHub) dropAll() {
+	h.mu.Lock()
+	conns := append([]*websocket.Conn(nil), h.conns...)
+	h.conns = nil
+	h.mu.Unlock()
+	for _, c := range conns {
+		c.Close()
+	}
+}
+
+func (h *fakeHub) acceptedCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.accepted
+}
+
+// requestTypes returns the types received so far, oldest first.
+func (h *fakeHub) requestTypes() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.requests))
+	for _, r := range h.requests {
+		out = append(out, r.Type)
+	}
+	return out
+}
+
+func newTestClient(t *testing.T, h *fakeHub) *HubClient {
+	t.Helper()
+	c := New(h.url(), log.New(io.Discard, "", 0))
+	// Keep the test fast: the production backoff starts at half a second.
+	c.minBackoff = 5 * time.Millisecond
+	c.maxBackoff = 20 * time.Millisecond
+	t.Cleanup(c.Close)
+	return c
+}
+
+// waitFor polls until cond holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("zaman aşımı: %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The core of #98: a dropped connection was permanent. readLoop exited, conn
+// went nil, and every later Send failed forever — the agent was out of the room
+// until its whole MCP process restarted.
+func TestClientReconnectsAfterDrop(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	waitFor(t, "ilk bağlantı", func() bool { return h.acceptedCount() == 1 })
+
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+
+	// And the client is usable again, not just connected.
+	if _, err := c.ListRooms(); err != nil {
+		t.Errorf("yeniden bağlandıktan sonra istek başarısız: %v", err)
+	}
+}
+
+// Reconnecting is only half the fix: the hub drops an agent from the roster the
+// moment its socket dies, so the client must re-establish its identity, its
+// room membership and its subscriptions without anyone asking.
+func TestClientReplaysSessionStateOnReconnect(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("mcp", "alice", "r1", ""); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", "manager"); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	if err := c.Subscribe([]string{"r1", "r2"}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "durumun yeniden kurulması", func() bool {
+		var identify, join, subscribe bool
+		for _, typ := range h.requestTypes()[before:] {
+			switch typ {
+			case "identify":
+				identify = true
+			case "join_room":
+				join = true
+			case "subscribe":
+				subscribe = true
+			}
+		}
+		return identify && join && subscribe
+	})
+}
+
+// A client that left the room deliberately must not be dragged back in by a
+// later reconnect.
+func TestClientDoesNotRejoinAfterLeave(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+	if _, err := c.LeaveRoom("r1", "alice"); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	// Give any (incorrect) rejoin time to appear.
+	time.Sleep(100 * time.Millisecond)
+
+	for _, typ := range h.requestTypes()[before:] {
+		if typ == "join_room" {
+			t.Fatal("bilinçli ayrılıştan sonra odaya geri sokuldu")
+		}
+	}
+}
+
+// Close must stop the supervisor: a client torn down on purpose has no business
+// dialling the hub again.
+func TestCloseStopsReconnecting(t *testing.T) {
+	h := newFakeHub(t)
+	c := New(h.url(), log.New(io.Discard, "", 0))
+	c.minBackoff = 5 * time.Millisecond
+	c.maxBackoff = 20 * time.Millisecond
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	waitFor(t, "ilk bağlantı", func() bool { return h.acceptedCount() == 1 })
+
+	c.Close()
+	h.dropAll()
+	time.Sleep(150 * time.Millisecond)
+
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kapatıldıktan sonra %d bağlantı denendi, want 1 (hiç)", got)
+	}
+}
+
+// Backoff must not be a fixed ladder: identical delays make every agent
+// reconnect in lockstep after a hub restart and hammer it as one wave.
+func TestBackoffIsBoundedAndJittered(t *testing.T) {
+	c := New("ws://example.invalid/ws", log.New(io.Discard, "", 0))
+	c.minBackoff = 100 * time.Millisecond
+	c.maxBackoff = 800 * time.Millisecond
+
+	seen := map[time.Duration]bool{}
+	d := time.Duration(0)
+	for range 20 {
+		d = c.nextBackoff(d)
+		seen[d] = true
+		if d > c.maxBackoff {
+			t.Fatalf("backoff %v üst sınırı (%v) aştı", d, c.maxBackoff)
+		}
+		if d <= 0 {
+			t.Fatalf("backoff %v, pozitif olmalı", d)
+		}
+	}
+	if len(seen) < 5 {
+		t.Errorf("farklı gecikme sayısı = %d; jitter yok gibi görünüyor", len(seen))
+	}
+}
+
+// The hub listens on an OS-assigned port (Run(0)) and rewrites hub.port on
+// every start, so a restarted hub is at a DIFFERENT address. A supervisor that
+// redials the remembered one would retry a dead port forever — the crash
+// recovery would look like it worked and never actually reconnect.
+func TestClientRedialsResolvedAddressAfterHubMoves(t *testing.T) {
+	oldHub := newFakeHub(t)
+	newHub := newFakeHub(t)
+
+	addr := oldHub.url()
+	var addrMu sync.Mutex
+	c := New(addr, log.New(io.Discard, "", 0))
+	c.minBackoff = 5 * time.Millisecond
+	c.maxBackoff = 20 * time.Millisecond
+	c.SetAddrResolver(func() (string, error) {
+		addrMu.Lock()
+		defer addrMu.Unlock()
+		return addr, nil
+	})
+	t.Cleanup(c.Close)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	waitFor(t, "ilk bağlantı", func() bool { return oldHub.acceptedCount() == 1 })
+
+	// The hub restarts somewhere else, exactly as Run(0) produces.
+	addrMu.Lock()
+	addr = newHub.url()
+	addrMu.Unlock()
+	oldHub.server.Close()
+	oldHub.dropAll()
+
+	waitFor(t, "yeni adrese bağlanma", func() bool { return newHub.acceptedCount() >= 1 })
+}
+
+// A client that could not reach the hub at startup must keep trying rather than
+// giving up: the desktop may not have written hub.port yet.
+func TestClientRecoversWhenHubAppearsLater(t *testing.T) {
+	h := newFakeHub(t)
+	// Point the client at nothing until the hub "appears".
+	var addrMu sync.Mutex
+	addr := "ws://127.0.0.1:1/ws"
+
+	c := New(addr, log.New(io.Discard, "", 0))
+	c.minBackoff = 5 * time.Millisecond
+	c.maxBackoff = 20 * time.Millisecond
+	c.SetAddrResolver(func() (string, error) {
+		addrMu.Lock()
+		defer addrMu.Unlock()
+		return addr, nil
+	})
+	t.Cleanup(c.Close)
+
+	c.StartBackgroundConnect()
+
+	addrMu.Lock()
+	addr = h.url()
+	addrMu.Unlock()
+
+	waitFor(t, "hub sonradan açılınca bağlanma", func() bool { return h.acceptedCount() >= 1 })
+}
+
+// The bootstrap hook exists because a background connect gives the caller no
+// inline moment to identify/join. It must run once the hub appears — and only
+// once, since reconnects replay what it recorded.
+func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	var calls int
+	var mu sync.Mutex
+	c.SetBootstrap(func(cl *HubClient) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return cl.Identify("mcp", "alice", "r1", "")
+	})
+
+	c.StartBackgroundConnect()
+	waitFor(t, "bootstrap", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls == 1
+	})
+
+	// A reconnect replays the identify; it must not run bootstrap again.
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("bootstrap %d kez çalıştı, want 1", calls)
+	}
+}
+
+// Codex review, PR #107: with a background connect the agent can call join_room
+// before the first dial lands. Dropping that intent would leave it outside the
+// room until the model happened to retry on its own.
+func TestJoinBeforeConnectIsReplayedOnceHubAppears(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// No connection has been made at all yet, so this fails at the transport —
+	// exactly the window a background connect opens for the agent. Ordering the
+	// join before the dial (rather than racing the two) keeps the test about the
+	// behaviour instead of about scheduling.
+	if _, err := c.JoinRoom("r1", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.StartBackgroundConnect()
+
+	waitFor(t, "bağlantı kurulunca join'in replay edilmesi", func() bool {
+		for _, typ := range h.requestTypes() {
+			if typ == "join_room" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// A join the hub REJECTED must not be replayed: it would fail the same way on
+// every reconnect forever.
+func TestRejectedJoinIsNotReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	h.rejectJoin = true
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	resp, err := c.JoinRoom("r1", "alice", "manager")
+	if err != nil {
+		t.Fatalf("JoinRoom transport error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("kurulum hatası: sahte hub join'i reddetmeliydi")
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	time.Sleep(100 * time.Millisecond)
+
+	for _, typ := range h.requestTypes()[before:] {
+		if typ == "join_room" {
+			t.Fatal("hub'ın reddettiği join replay edildi; her turda aynı şekilde başarısız olurdu")
+		}
+	}
+}
+
+// Copilot review, PR #107: the fake hub always answered Success, so no test
+// drove restoreSession to failure — which is how the "rejected replay counts as
+// restored" bug survived. Here the hub refuses the REPLAYED join, so the
+// supervisor must keep retrying instead of declaring victory.
+func TestSupervisorRetriesWhenReplayIsRejected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", "manager"); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// From now on the hub refuses joins, as it would while the desktop has not
+	// restored a manager's authorization yet.
+	h.mu.Lock()
+	h.rejectJoin = true
+	h.mu.Unlock()
+
+	h.dropAll()
+	// The supervisor must not settle: each attempt is refused, so it keeps
+	// dialling rather than leaving the client connected-but-unjoined.
+	waitFor(t, "reddedilen replay sonrası yeniden deneme", func() bool { return h.acceptedCount() >= 3 })
+
+	// Once the hub relents, the session is restored for real.
+	h.mu.Lock()
+	h.rejectJoin = false
+	h.mu.Unlock()
+
+	waitFor(t, "izin verilince katılım", func() bool {
+		var joins int
+		for _, typ := range h.requestTypes() {
+			if typ == "join_room" {
+				joins++
+			}
+		}
+		return joins >= 2
+	})
+}
+
+// Copilot review round 2, PR #107: reconnection must be level-triggered. With
+// the earlier edge-triggered relaunch, a socket dying between the supervisor's
+// last check and its return had its wake-up swallowed as a duplicate, leaving
+// the client disconnected with nobody scheduled to redial. Repeated rapid drops
+// land signals exactly in that window.
+func TestRepeatedRapidDropsAlwaysEndConnected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("mcp", "alice", "r1", ""); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+
+	for range 15 {
+		h.dropAll()
+		time.Sleep(3 * time.Millisecond) // sinyali süpervizörün iş ortasına düşür
+	}
+
+	waitFor(t, "arka arkaya kopuşlardan sonra bağlantının geri gelmesi", func() bool {
+		_, err := c.ListRooms()
+		return err == nil
+	})
+}
+
+// A disconnect signalled while the supervisor is already working must still be
+// honoured once it finishes — the buffered channel is what guarantees that.
+func TestDisconnectSignalIsNotLostWhileSupervisorBusy(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Raise the signal twice before anything is connected: the second must not
+	// be swallowed in a way that leaves the client idle.
+	c.notifyDisconnected()
+	c.notifyDisconnected()
+
+	waitFor(t, "sinyalin işlenmesi", func() bool { return h.acceptedCount() >= 1 })
+
+	// And a signal raised after that connection still reconnects.
+	h.dropAll()
+	waitFor(t, "sonraki sinyalin işlenmesi", func() bool { return h.acceptedCount() >= 2 })
+}
+
+// Codex review round 3, PR #107: the leave intent must be cleared BEFORE the
+// RPC. If the hub applies the leave but the response is lost, a still-set
+// intent silently rejoins the agent the caller just took out.
+func TestLeaveIntentClearedEvenWhenResponseIsLost(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// The hub applies the leave and then the socket dies before the response
+	// lands — modelled by dropping every connection as the call goes out.
+	h.mu.Lock()
+	h.dropOn = "leave_room"
+	h.mu.Unlock()
+	_, _ = c.LeaveRoom("r1", "alice")
+
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	time.Sleep(150 * time.Millisecond)
+
+	c.mu.Lock()
+	joined := c.sess.joined
+	c.mu.Unlock()
+	if joined {
+		t.Error("yanıt kaybolunca ayrılma niyeti korunmuş; reconnect agent'ı odaya geri sokardı")
+	}
+}
+
+// Codex review round 3: a failed join for another room must not overwrite an
+// established membership — later operations still target the original room and
+// would be rejected as wrong-room.
+func TestFailedJoinDoesNotOverwriteEstablishedRoom(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("A", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom A: %v", err)
+	}
+
+	// A transient disconnect, then a join for a different room that never
+	// reaches the hub.
+	c.dropConn()
+	if _, err := c.JoinRoom("B", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room := c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "A" {
+		t.Errorf("kayıtlı oda = %q, want A (başarısız join kurulu üyeliği ezmemeli)", room)
+	}
+}
+
+// Found while testing the leave-intent fix: an RPC in flight when the socket
+// died waited out the full 15s request timeout, because nothing woke the
+// pending caller. For an agent that is the same as hanging — the symptom #98
+// exists to remove.
+func TestInFlightRequestFailsFastWhenConnectionDrops(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub swallows this request and severs the connection instead of
+	// answering it.
+	h.mu.Lock()
+	h.dropOn = "list_rooms"
+	h.mu.Unlock()
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := c.ListRooms(); err == nil {
+		t.Fatal("kopan bağlantıda istek başarılı görünmemeli")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("istek %v bekledi; bağlantı koptuğunda hemen dönmeliydi (istek zaman aşımı %v)", elapsed, defaultTimeout)
+	}
+}
+
+// Codex review round 4, PR #107: a read loop finishing after a replacement
+// socket was installed must not fail requests written on the new one.
+func TestFailPendingIsScopedToItsOwnSocket(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// A request on the CURRENT socket, then an old epoch's failure.
+	c.mu.Lock()
+	epoch := c.connEpoch
+	c.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.ListRooms()
+		done <- err
+	}()
+
+	// Simulate a stale read loop from a previous socket finishing now.
+	c.failPending(epoch - 1)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("güncel sokete yazılmış istek, eski okuyucunun çıkışıyla düşürüldü: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("istek yanıtlanmadı")
+	}
+}
+
+// Codex review round 4: during a prolonged startup outage a corrected
+// pre-connect join must replace the earlier pending one — but a join the hub
+// actually granted must not be overwritten by a later failed attempt.
+func TestPendingJoinIntentCanBeCorrected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Nothing connected yet: both fail at the transport.
+	if _, err := c.JoinRoom("A", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+	if _, err := c.JoinRoom("B", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room := c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (düzeltilen bekleyen niyet öncekinin yerine geçmeli)", room)
+	}
+
+	// Once established, a later failed attempt must not move it.
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("B", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom B: %v", err)
+	}
+	c.dropConn()
+	if _, err := c.JoinRoom("C", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	c.mu.Lock()
+	room = c.sess.joinRoom
+	c.mu.Unlock()
+	if room != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (kurulu üyelik ezilmemeli)", room)
+	}
+}
+
+// Codex review round 5, PR #107: a Subscribe issued while the supervisor is
+// between sockets was lost. CreateTeam only logs that error, so the desktop
+// stayed connected but received no events for the new team until a restart.
+func TestSubscribeIntentSurvivesTransportFailure(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Nothing connected yet: the subscribe fails at the transport.
+	if err := c.Subscribe([]string{"r1", "r2"}); err == nil {
+		t.Fatal("bağlantı yokken subscribe başarılı görünmemeli")
+	}
+
+	c.StartBackgroundConnect()
+
+	waitFor(t, "bağlantı kurulunca subscribe'ın replay edilmesi", func() bool {
+		for _, typ := range h.requestTypes() {
+			if typ == "subscribe" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// Codex review round 6, PR #107: a join already in flight — notably one the
+// supervisor is replaying — must not resurrect an intent the caller cleared
+// while it ran, or the next disconnect silently rejoins the agent.
+func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// Model the replay's window: capture the pre-leave generation, let the leave
+	// land, then complete the join.
+	if _, err := c.LeaveRoom("r1", "alice"); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom (replay): %v", err)
+	}
+
+	// The replayed join was a fresh call, so it legitimately re-establishes
+	// membership; what must NOT happen is a stale in-flight join reviving it.
+	// Simulate that directly: a join whose generation predates the leave.
+	c.mu.Lock()
+	c.sess.joined = false
+	c.sess.joinEstablished = false
+	stale := c.sess.gen
+	c.sess.gen++ // araya giren bir leave
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(stale, "r1", "alice", "", true)
+
+	c.mu.Lock()
+	joined := c.sess.joined
+	c.mu.Unlock()
+	if joined {
+		t.Error("bayat bir join, araya giren leave'in temizlediği niyeti geri diriltti")
+	}
+}

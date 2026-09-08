@@ -19,7 +19,7 @@ import (
 // round-trips back into a PersistedRoom.
 func TestSaveSession_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "hello", false, "", SendOptions{}); err != nil {
@@ -69,7 +69,7 @@ func TestSaveSession_RoundTrip(t *testing.T) {
 // writes no file.
 func TestSaveSession_SkipsEmptyRoom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.getOrCreateRoom("empty") // created but never messaged
 
 	path, count, skipped, err := h.saveSession("empty")
@@ -91,7 +91,7 @@ func TestSaveSession_SkipsEmptyRoom(t *testing.T) {
 // created writes nothing and does not materialize a phantom room.
 func TestSaveSession_UnknownRoomNoPhantom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	path, count, skipped, err := h.saveSession("ghost")
 	if err != nil {
@@ -113,7 +113,7 @@ func TestSaveSession_UnknownRoomNoPhantom(t *testing.T) {
 // keyed by its name must never escape the sessions directory.
 func TestSaveSession_RejectsTraversalRoom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 
 	room := h.getOrCreateRoom("../evil")
 	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
@@ -138,7 +138,7 @@ func TestSaveSession_RejectsTraversalRoom(t *testing.T) {
 // changes count as changes: join/leave append a system message, bumping the ID.)
 func TestSaveSession_SkipsUnchangedRoom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -169,7 +169,7 @@ func TestSaveSession_SkipsUnchangedRoom(t *testing.T) {
 // independently-preserved snapshots.
 func TestSaveSession_DistinctImmutableFilesPerSave(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "first", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed 1: %v", err)
@@ -214,7 +214,7 @@ func TestSaveSession_DistinctImmutableFilesPerSave(t *testing.T) {
 // current working directory.
 func TestSaveSession_EmptyDataDirNoop(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll("hub-state") }) // belt-and-suspenders if it leaks
-	h := newArchiveHub("")
+	h := newArchiveHub(t, "")
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -236,7 +236,7 @@ func TestSaveSession_EmptyDataDirNoop(t *testing.T) {
 // save leaves only the final {epoch}.json, never a half-written .tmp.
 func TestSaveSession_NoStrayTempFile(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -268,7 +268,7 @@ func TestSaveSession_NoStrayTempFile(t *testing.T) {
 // reporting the message count.
 func TestHandleSaveSession_DesktopWritesSnapshot(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("proj")
@@ -328,7 +328,7 @@ func TestHandleSaveSession_DesktopWritesSnapshot(t *testing.T) {
 // default), so saving the default room is not skipped or rejected.
 func TestHandleSaveSession_EmptyRoomResolvesToDefault(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir) // default room is "default"
+	h := newArchiveHub(t, dir) // default room is "default"
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("default")
@@ -370,7 +370,7 @@ func TestHandleSaveSession_EmptyRoomResolvesToDefault(t *testing.T) {
 // materialize a phantom room.
 func TestHandleSaveSession_UnknownRoomNoPhantom(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 
 	desktop := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
@@ -411,7 +411,7 @@ func TestHandleSaveSession_UnknownRoomNoPhantom(t *testing.T) {
 // race, no panic. A -race exercise for the sessionMu serialization invariant.
 func TestSaveSession_ConcurrentNoCorruption(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 
 	const goroutines = 8
@@ -447,7 +447,7 @@ func TestSaveSession_ConcurrentNoCorruption(t *testing.T) {
 // that coincidental match doesn't wrongly skip the new session's snapshot.
 func TestSaveSession_ClearRoomResetsUnchangedTracking(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.desktopAuthToken = "secret"
 
 	room := h.getOrCreateRoom("proj")
@@ -493,7 +493,7 @@ func TestSaveSession_ClearRoomResetsUnchangedTracking(t *testing.T) {
 // room resolves under the sessions base, while any segment that would escape it
 // is refused — defense-in-depth beyond ValidateName for the path-injection sink.
 func TestSessionsDir_ConfinedToBase(t *testing.T) {
-	h := newArchiveHub("/data")
+	h := newArchiveHub(t, "/data")
 
 	dir, err := h.sessionsDir("proj")
 	if err != nil {
@@ -551,7 +551,7 @@ func TestSeedSessionTracking_FromSnapshotSkipsUnchanged(t *testing.T) {
 	writePersistedRoom(t, dir, "proj", pr)
 	writeSessionSnapshot(t, dir, "proj", "1000000000", pr) // a clean prior shutdown's snapshot
 
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.loadPersistedState()
 	h.seedSessionTracking()
 
@@ -582,7 +582,7 @@ func TestSeedSessionTracking_SkipsCorruptNewestSnapshot(t *testing.T) {
 		t.Fatalf("write corrupt snapshot: %v", err)
 	}
 
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.loadPersistedState()
 	h.seedSessionTracking()
 
@@ -623,7 +623,7 @@ func TestSeedSessionTracking_ClearedRoomNotSeeded(t *testing.T) {
 		Agents: map[string]types.Agent{"b": {Role: "dev"}},
 	})
 
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.loadPersistedState()
 	h.seedSessionTracking()
 
@@ -645,7 +645,7 @@ func TestSeedSessionTracking_ClearedRoomNotSeeded(t *testing.T) {
 // writes a fresh snapshot honouring the messages + roster contract.
 func TestSaveSession_RosterChangeWithoutMessageWrites(t *testing.T) {
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -694,7 +694,7 @@ func TestSeedSessionTracking_NoSnapshotWritesAfterCrash(t *testing.T) {
 	}
 	writePersistedRoom(t, dir, "proj", pr) // persisted, but NO session snapshot exists
 
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	h.loadPersistedState()
 	h.seedSessionTracking() // finds no sessions/proj → must not seed
 
@@ -728,7 +728,7 @@ func TestSaveSession_StatErrorSurfacesNotSpin(t *testing.T) {
 		t.Skip("running as root: directory permission bits are not enforced")
 	}
 	dir := t.TempDir()
-	h := newArchiveHub(dir)
+	h := newArchiveHub(t, dir)
 	room := h.getOrCreateRoom("proj")
 	if _, err := room.SendMessage("a", "all", "x", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)

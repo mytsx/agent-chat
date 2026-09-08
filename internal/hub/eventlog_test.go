@@ -267,6 +267,9 @@ func TestEventLogDistinguishesLeaveReasons(t *testing.T) {
 	t.Run("stale eviction", func(t *testing.T) {
 		h, c, dir := newEventHub(t)
 		joinAgent(t, h, c, "r1", "alice")
+		// Liveness now comes from the connection, so an eviction can only
+		// happen once that connection is gone.
+		h.agentDisconnected("r1", "alice")
 
 		roomState := h.getOrCreateRoom("r1")
 		roomState.mu.Lock()
@@ -706,5 +709,616 @@ func TestEventLogDisconnectCarriesCloseCause(t *testing.T) {
 			t.Fatal("disconnect olayı yazılmadı")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// #98 M3: liveness was derived from a timestamp that only RPC calls refreshed,
+// so an agent that spent five minutes working — connected the whole time, its
+// socket answering the hub's pings — was evicted from the roster as "stale".
+func TestConnectedAgentIsNotEvictedAsStale(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice") // join, bağlantıyı canlı olarak kaydeder
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1 // uzun süredir tool çağırmadı
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	roomState.ListAgents("") // stale temizliğini tetikler
+
+	if !roomState.HasAgent("alice") {
+		t.Error("bağlantısı açık agent stale sayılıp roster'dan silindi")
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentEvicted); len(got) != 0 {
+		t.Errorf("bağlı agent için eviction olayı yazıldı: %+v", got)
+	}
+}
+
+// An agent with no connection still ages out: the timeout is what clears
+// records left behind by a client that never came back.
+func TestDisconnectedAgentStillEvicted(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+	h.agentDisconnected("r1", "alice") // soket gitti; kaydı tutan kimse kalmadı
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	roomState.ListAgents("")
+
+	if roomState.HasAgent("alice") {
+		t.Error("bağlantısı olmayan agent stale temizliğinden kurtuldu")
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentEvicted); len(got) != 1 {
+		t.Errorf("eviction olayı sayısı = %d, want 1", len(got))
+	}
+}
+
+// A reconnecting client registers its new connection before the old one
+// unregisters, so liveness is a count rather than a flag — otherwise the agent
+// would briefly look gone and could be evicted mid-handover.
+func TestLivenessSurvivesReconnectHandover(t *testing.T) {
+	h, _, _ := newEventHub(t)
+
+	h.agentConnected("r1", "alice") // eski bağlantı
+	h.agentConnected("r1", "alice") // yeni bağlantı önce kaydolur
+	h.agentDisconnected("r1", "alice")
+
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("devir sırasında agent bir an 'bağlı değil' göründü")
+	}
+
+	h.agentDisconnected("r1", "alice")
+	if h.isAgentConnected("r1", "alice") {
+		t.Error("son bağlantı da kapandığı hâlde agent bağlı sayılıyor")
+	}
+}
+
+// A brief blip used to write "X ayrıldı" and then "X katıldı" into the room —
+// system messages the other agents READ, so a reconnect looked like a departure
+// and a new arrival. With a grace window a client that comes right back leaves
+// no trace.
+func TestQuickReconnectLeavesNoDepartureNoise(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.graceWindow = 200 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	msgsBefore := len(h.getOrCreateRoom("r1").GetMessages())
+
+	// The socket dies and the client is back before the window closes — through
+	// the REAL join path. Calling h.agentConnected directly would bypass
+	// RoomState.Join and hide a rejoin the hub actually refuses (Copilot review,
+	// PR #107).
+	h.releaseAgentForClient(c, "r1", "alice")
+	replacement := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, replacement, "join_room"); !resp.Success {
+		t.Fatalf("pencere içinde yeniden katılım reddedildi: %s", resp.Error)
+	}
+
+	time.Sleep(400 * time.Millisecond)
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("pencere içinde dönen agent yine de odadan düşürüldü")
+	}
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != msgsBefore {
+		t.Errorf("mesaj sayısı %d → %d; kısa kopuş transcript'e gürültü yazdı", msgsBefore, got)
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentLeft); len(got) != 0 {
+		t.Errorf("dönen agent için ayrılma olayı yazıldı: %+v", got)
+	}
+}
+
+// An agent that does NOT come back must still be removed once the window
+// closes — the window defers the departure, it does not cancel it.
+func TestAgentGoneAfterGraceWindow(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.graceWindow = 100 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgentForClient(c, "r1", "alice")
+	time.Sleep(300 * time.Millisecond)
+
+	if h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("pencere kapandığı hâlde agent roster'da kaldı")
+	}
+	got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentLeft)
+	if len(got) != 1 {
+		t.Fatalf("ayrılma olayı sayısı = %d, want 1", len(got))
+	}
+	if got[0][eventlog.AttrLeaveReason] != eventlog.LeaveReasonDisconnect {
+		t.Errorf("%s = %v, want %q", eventlog.AttrLeaveReason, got[0][eventlog.AttrLeaveReason], eventlog.LeaveReasonDisconnect)
+	}
+}
+
+// Codex review, PR #107: the grace window and the client's session replay were
+// on a collision course. The window keeps the roster entry alive for five
+// seconds; RoomState.Join rejects a name that is already present. So the very
+// reconnect the window exists to smooth over was refused — leaving the agent
+// connected but permanently outside the room.
+func TestRejoinDuringGraceWindowIsTakeover(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+	msgsAfterJoin := len(h.getOrCreateRoom("r1").GetMessages())
+
+	// Socket dies; the roster entry is deliberately retained for the window.
+	h.releaseAgentForClient(c, "r1", "alice")
+
+	// The replacement connection replays its join immediately.
+	replacement := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	resp := readResponse(t, replacement, "join_room")
+	if !resp.Success {
+		t.Fatalf("pencere içindeki yeniden katılım reddedildi: %s", resp.Error)
+	}
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("devralma sonrası agent roster'da yok")
+	}
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("devralan bağlantı canlılık kaydı bırakmadı")
+	}
+	// A takeover is not an arrival: it must not announce itself to the room.
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != msgsAfterJoin {
+		t.Errorf("mesaj sayısı %d → %d; devralma odaya katılım mesajı yazdı", msgsAfterJoin, got)
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentJoined); len(got) != 1 {
+		t.Errorf("agent.joined olayı %d kez yazıldı, want 1 (devralma yeni katılım değil)", len(got))
+	}
+}
+
+// Codex review, PR #107: the liveness counter counted successful joins, not
+// sockets. clear_room wipes the roster without releasing connection claims, so
+// a still-connected agent that joined again raised its own count to two — and a
+// single later release could never bring it back to zero. That name would then
+// look permanently connected: neither departure cleanup nor stale eviction
+// could ever remove it.
+func TestLivenessClaimIsPerConnectionNotPerJoin(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	// clear_room empties the roster; the socket is untouched and rejoins.
+	h.getOrCreateRoom("r1").ClearArchived(0)
+	h.handleJoinRoom(c, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("clear sonrası yeniden katılım başarısız: %s", resp.Error)
+	}
+
+	// One socket, one claim — however many times it joined.
+	h.releaseAgentForClient(c, "r1", "alice")
+	if h.isAgentConnected("r1", "alice") {
+		t.Error("tek soket birden fazla canlılık hakkı bıraktı; isim kalıcı olarak 'bağlı' kalırdı")
+	}
+}
+
+// Codex review round 3, PR #107: a reconnect landing exactly as the grace timer
+// expires must not be removed. Checking liveness and leaving as two steps let
+// the join reclaim the entry in between — the client was told its join
+// succeeded and then vanished from the roster.
+func TestGraceExpiryDoesNotRemoveReclaimedAgent(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 50 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgentForClient(c, "r1", "alice")
+
+	// Reclaim right at the boundary, repeatedly, to land inside the window.
+	for range 20 {
+		replacement := &Client{hub: h, send: make(chan []byte, 8), rooms: make(map[string]bool)}
+		h.handleJoinRoom(replacement, types.Request{
+			ID: "rejoin", Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+		})
+		if resp := readResponse(t, replacement, "join_room"); !resp.Success {
+			t.Fatalf("yeniden katılım reddedildi: %s", resp.Error)
+		}
+		time.Sleep(5 * time.Millisecond)
+		if !h.getOrCreateRoom("r1").HasAgent("alice") {
+			t.Fatal("başarıyla katılmış agent grace timer'ı tarafından silindi")
+		}
+		h.releaseAgentForClient(replacement, "r1", "alice")
+	}
+}
+
+// Codex review round 3: an agent that disconnects, reconnects and disconnects
+// again must get a FRESH window from the latest disconnect — not be removed on
+// the first disconnect's old deadline.
+func TestSecondDisconnectGetsFreshGraceWindow(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 300 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgentForClient(c, "r1", "alice") // 1. kopuş, saat başlar
+	time.Sleep(200 * time.Millisecond)
+
+	replacement := &Client{hub: h, send: make(chan []byte, 8), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	readResponse(t, replacement, "join_room")
+
+	h.releaseAgentForClient(replacement, "r1", "alice") // 2. kopuş
+	// The first timer would fire ~100ms from now; the second deserves 300ms.
+	time.Sleep(180 * time.Millisecond)
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("eski timer erken tetiklenip agent'ı sildi; ikinci kopuş taze pencere almalıydı")
+	}
+}
+
+// Copilot review round 4, PR #107: after a hub restart the roster is reloaded
+// from persisted state but managerAgent is NOT persisted. A reconnecting
+// manager therefore takes the takeover branch, which only refreshed LastSeen —
+// leaving the manager in the roster with no routing lock. The gateway silently
+// stopped intercepting, and it could not self-heal: while the manager stayed
+// connected, later joins were rejected as a duplicate name.
+func TestManagerTakeoverRestoresRoutingLock(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+
+	// Simulate the post-restart state: the agent is in the reloaded roster, but
+	// nothing holds the manager lock and no connection is registered.
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	roomState.agents["yonetici"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	roomState.mu.Unlock()
+	if got := roomState.GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: manager kilidi = %q, want boş", got)
+	}
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager yeniden katılımı reddedildi: %s", resp.Error)
+	}
+
+	if got := roomState.GetActiveManager(); got != "yonetici" {
+		t.Errorf("devralmadan sonra manager kilidi = %q, want yonetici — gateway sessizce devre dışı kalırdı", got)
+	}
+
+	// And the gateway actually intercepts again.
+	alice := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	joinAgent(t, h, alice, "r1", "alice")
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "bob", "content": "merhaba"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	msgs := roomState.GetMessages()
+	last := msgs[len(msgs)-1]
+	if last.To != "yonetici" {
+		t.Errorf("mesaj %q'ya gitti, want yonetici (manager gateway araya girmeli)", last.To)
+	}
+}
+
+// The takeover must not let a reconnect steal the manager seat from a different,
+// still-live manager.
+func TestManagerTakeoverDoesNotDisplaceLiveManager(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	// Another name sits in the roster with no connection (post-restart shape),
+	// and reconnects claiming the manager role.
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	roomState.agents["sahte"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	roomState.mu.Unlock()
+
+	if _, ok := roomState.Takeover("sahte", "manager", nil, nil); !ok {
+		t.Fatal("kurulum hatası: devralma gerçekleşmedi")
+	}
+	if got := roomState.GetActiveManager(); got != "yonetici" {
+		t.Errorf("manager kilidi = %q, want yonetici (canlı manager devrilmemeli)", got)
+	}
+}
+
+// Codex review round 4, PR #107: two replacement sockets replaying the same
+// name can both see "disconnected" outside the room lock. Checking only that
+// the roster entry exists let BOTH take over — two live clients sending and
+// consuming under one identity.
+func TestTakeoverIsExclusive(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+	h.releaseAgentForClient(c, "r1", "alice")
+
+	first := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+	second := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+
+	join := func(cl *Client, id string) bool {
+		h.handleJoinRoom(cl, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+		})
+		return readResponse(t, cl, "join_room").Success
+	}
+
+	if !join(first, "a") {
+		t.Fatal("ilk devralma başarısız")
+	}
+	if join(second, "b") {
+		t.Error("ikinci istemci de aynı kimlikle odaya girdi; devralma münhasır olmalı")
+	}
+}
+
+// Codex review round 4: a long-quiet agent whose socket blips must keep its
+// roster entry until the grace window closes. Otherwise any concurrent
+// list_agents deletes it first and the reconnect becomes a noisy fresh join —
+// the window defeated exactly for the agents it was written for.
+func TestStaleCleanupRespectsGraceWindow(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 2 * time.Second
+	joinAgent(t, h, c, "r1", "alice")
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1 // uzun süredir sessiz
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	h.releaseAgentForClient(c, "r1", "alice") // soket kısa süreliğine gitti
+
+	roomState.ListAgents("") // eşzamanlı list_agents stale temizliğini tetikler
+
+	if !roomState.HasAgent("alice") {
+		t.Error("grace penceresi içindeki kayıt stale temizliğiyle silindi; yeniden bağlanma gürültülü join olurdu")
+	}
+}
+
+// Codex review round 5, PR #107: the normal startup path makes the agent retry
+// a join it cannot know already succeeded — join_room before the background
+// dial returns a transport error, the supervisor replays it, and the agent
+// tries again. Falling through to Join told it its own name was taken.
+func TestRepeatJoinByOwningSocketIsIdempotent(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "again", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	resp := readResponse(t, c, "join_room")
+	if !resp.Success {
+		t.Fatalf("kendi sahibi olduğu odaya tekrar katılım reddedildi: %s", resp.Error)
+	}
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("yinelenen katılım canlılık kaydını düşürdü")
+	}
+}
+
+// Codex review round 5: the fresh-join path claimed liveness after releasing the
+// room lock, so two sockets racing an unused name could both end up live under
+// one identity — the first adds the entry and pauses, the second takes it over.
+func TestConcurrentFreshJoinsDoNotShareIdentity(t *testing.T) {
+	h, _, _ := newEventHub(t)
+
+	first := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+	second := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+
+	join := func(cl *Client, id string) bool {
+		h.handleJoinRoom(cl, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+		})
+		return readResponse(t, cl, "join_room").Success
+	}
+
+	if !join(first, "a") {
+		t.Fatal("ilk katılım başarısız")
+	}
+	if join(second, "b") {
+		t.Error("ikinci soket aynı ismi aldı; taze join de kilit altında talep etmeli")
+	}
+}
+
+// Codex review round 5: a superseded timer must not retire the window a newer
+// disconnect just earned.
+func TestSupersededTimerDoesNotStealNewGraceWindow(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	key := connKey("r1", "alice")
+
+	h.agentConnected("r1", "alice")
+	h.agentDisconnected("r1", "alice")
+	h.connMu.Lock()
+	h.departGen[key]++
+	stale := h.departGen[key]
+	h.departUntil[key] = time.Now().Add(time.Second)
+	h.connMu.Unlock()
+
+	// A newer disconnect supersedes it.
+	h.connMu.Lock()
+	h.departGen[key]++
+	h.departUntil[key] = time.Now().Add(5 * time.Second)
+	h.connMu.Unlock()
+
+	if h.claimDeparture(key, stale) {
+		t.Error("eski timer pencereyi sahiplendi")
+	}
+	h.connMu.RLock()
+	_, stillSet := h.departUntil[key]
+	h.connMu.RUnlock()
+	if !stillSet {
+		t.Error("eski timer yeni kopuşun penceresini sildi")
+	}
+}
+
+// Symmetry audit after round 5: the idempotent-rejoin shortcut keys on the
+// CONNECTION's belief that it is joined. clear_room empties the roster without
+// touching connections, so that belief can outlive the entry — and the shortcut
+// would report success while leaving the agent out of the room for good.
+func TestRepeatJoinAfterClearActuallyRejoins(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.getOrCreateRoom("r1").ClearArchived(0) // roster boşaldı, bağlantı duruyor
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "again", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("clear sonrası yeniden katılım reddedildi: %s", resp.Error)
+	}
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("idempotent kısayol başarı dönüp agent'ı roster'a geri koymadı")
+	}
+}
+
+// Codex review round 6, PR #107: clear_room empties the roster without touching
+// sockets, so a name can be free in the roster while a live socket still
+// answers to it. The fresh-join path checked only the roster and handed a
+// SECOND client the same identity.
+func TestFreshJoinRejectedWhileAnotherSocketHoldsName(t *testing.T) {
+	h, owner, _ := newEventHub(t)
+	joinAgent(t, h, owner, "r1", "alice")
+
+	h.getOrCreateRoom("r1").ClearArchived(0) // roster boş, owner'ın soketi duruyor
+
+	intruder := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+	h.handleJoinRoom(intruder, types.Request{
+		ID: "steal", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, intruder, "join_room"); resp.Success {
+		t.Error("başka bir soket canlıyken aynı isim ikinci istemciye verildi")
+	}
+
+	// The owner itself must still be able to rejoin after the clear.
+	h.handleJoinRoom(owner, types.Request{
+		ID: "self", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, owner, "join_room"); !resp.Success {
+		t.Errorf("sahibi kendi ismine geri dönemedi: %s", resp.Error)
+	}
+}
+
+// Codex review round 6: a repeat join that upgrades the role must actually take
+// the routing lock, not report a success that changes nothing.
+func TestRepeatJoinAppliesRoleUpgrade(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	joinAgent(t, h, c, "r1", "alice") // önce rolsüz katılır
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: manager kilidi = %q, want boş", got)
+	}
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "upgrade", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("rol yükseltmesi reddedildi: %s", resp.Error)
+	}
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "alice" {
+		t.Errorf("manager kilidi = %q, want alice — kısayol başarı dönüp rolü uygulamamış", got)
+	}
+}
+
+// Codex review round 6: releasing the claim and arming the grace window must be
+// one locked step. In the gap the agent counts as neither connected nor
+// departing, so a concurrent list_agents deletes a long-quiet agent outright.
+func TestReleaseAndGraceArePresentedAtomically(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 2 * time.Second
+	joinAgent(t, h, c, "r1", "alice")
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	// Hammer stale cleanup from another goroutine while the release happens.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				roomState.ListAgents("")
+			}
+		}
+	}()
+
+	h.releaseAgentForClient(c, "r1", "alice")
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	<-done
+
+	if !roomState.HasAgent("alice") {
+		t.Error("bırakma ile pencere kurulumu arasındaki boşlukta agent silindi")
+	}
+}
+
+// Codex review round 7, PR #107: the role follow-up was only half done. A
+// downgrade left managerAgent set — the room kept routing through an agent that
+// had already told the hub it was no longer the manager, and the client had
+// recorded the lesser role for its next replay.
+func TestTakeoverAppliesRoleDowngrade(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+	roomState := h.getOrCreateRoom("r1")
+	if got := roomState.GetActiveManager(); got != "alice" {
+		t.Fatalf("kurulum hatası: manager = %q", got)
+	}
+
+	// Same socket rejoins as a plain worker.
+	h.handleJoinRoom(c, types.Request{
+		ID: "downgrade", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("rol düşürme reddedildi: %s", resp.Error)
+	}
+
+	if got := roomState.GetActiveManager(); got != "" {
+		t.Errorf("manager kilidi = %q, want boş — düşürülen agent üzerinden routing sürüyor", got)
+	}
+	if got := roomState.GetAgents()["alice"].Role; got != "" {
+		t.Errorf("roster rolü = %q, want boş — roster ile kilit birlikte hareket etmeli", got)
 	}
 }

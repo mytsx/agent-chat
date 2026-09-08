@@ -298,6 +298,27 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	c.sendOK(req.ID, req.Type)
 }
 
+// bindClientToRoom attaches a connection to a room: identity, subscription and
+// the connection-bound observer role. Shared by a first join and a reconnect
+// takeover so the two cannot drift.
+func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.rooms[room] = true
+	c.agentName = agentName
+	c.joinedRoom = room
+	// Bind the observer role to the connection (#17): a gated observer join makes
+	// this connection permanently read-only, independent of later allow-list/roster
+	// changes.
+	if role == roleObserver {
+		c.isObserver = true
+	}
+	if h.subs[room] == nil {
+		h.subs[room] = make(map[*Client]bool)
+	}
+	h.subs[room][c] = true
+}
+
 func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	var data struct {
 		AgentName string `json:"agent_name"`
@@ -356,7 +377,50 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
 
 	roomState := h.getOrCreateRoom(room)
-	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
+
+	// The liveness claim runs while the room lock is still held — on BOTH the
+	// takeover and the fresh-join path. Claiming after the lock is released
+	// leaves a window in which another socket sees the entry as unclaimed.
+	claim := func() { h.claimLiveness(c, room, data.AgentName) }
+	heldByOther := func() bool { return h.isAgentHeldByOther(c, room, data.AgentName) }
+
+	// Reclaiming an existing roster entry — whether because the grace window is
+	// still holding it after a drop, or because this very socket is repeating a
+	// join it already owns (the startup path: join_room before the background
+	// dial errors, the supervisor replays it, the agent retries on the error it
+	// saw). Either way nobody new arrived, so the room hears nothing.
+	//
+	// Takeover applies the role, which matters: a repeat that upgrades to
+	// "manager" must actually take the routing lock rather than report a success
+	// that changes nothing.
+	//
+	// Barred when ANOTHER live socket answers to the name — a genuine clash.
+	if !h.isAgentHeldByOther(c, room, data.AgentName) {
+		if agents, ok := roomState.Takeover(data.AgentName, role, heldByOther, claim); ok {
+			h.bindClientToRoom(c, room, data.AgentName, role)
+			h.events.Log(eventlog.EventAgentRejoined,
+				eventlog.String(eventlog.AttrConversationID, room),
+				eventlog.String(eventlog.AttrAgentName, data.AgentName),
+				eventlog.String(eventlog.AttrAgentRole, role),
+				eventlog.String(eventlog.AttrRequestID, req.ID),
+			)
+			c.sendSuccess(req.ID, req.Type, map[string]any{
+				"text":   fmt.Sprintf("\U0001f501 '%s' odaya yeniden bağlandı.", data.AgentName),
+				"agents": agents,
+			})
+			return
+		}
+	}
+
+	// clear_room empties the roster without touching sockets, so the name can be
+	// free here while a live socket still answers to it. Without this the fresh
+	// path would hand a second client the same identity.
+	if h.isAgentHeldByOther(c, room, data.AgentName) {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("agent adı '%s' bu odada zaten kullanımda", data.AgentName))
+		return
+	}
+
+	sysMsg, agents, err := roomState.JoinWithClaim(data.AgentName, data.Role, claim)
 	if err != nil {
 		h.events.Log(eventlog.EventError,
 			eventlog.String(eventlog.AttrConversationID, room),
@@ -368,6 +432,10 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		return
 	}
 
+	// This connection now vouches for the agent's liveness, so a quiet stretch
+	// no longer looks like a departure (#98).
+	h.claimLiveness(c, room, data.AgentName)
+
 	h.events.Log(eventlog.EventAgentJoined,
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrAgentName, data.AgentName),
@@ -375,22 +443,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 	)
 
-	// Also subscribe the client to this room
-	h.mu.Lock()
-	c.rooms[room] = true
-	c.agentName = data.AgentName
-	c.joinedRoom = room
-	// Bind the observer role to the connection (#17): a gated observer join makes
-	// this connection permanently read-only, independent of later allow-list/roster
-	// changes.
-	if role == roleObserver {
-		c.isObserver = true
-	}
-	if h.subs[room] == nil {
-		h.subs[room] = make(map[*Client]bool)
-	}
-	h.subs[room][c] = true
-	h.mu.Unlock()
+	h.bindClientToRoom(c, room, data.AgentName, role)
 
 	// Build response text
 	var otherAgents []string
@@ -837,6 +890,8 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		c.sendText(req.ID, req.Type, fmt.Sprintf("\u26a0\ufe0f '%s' zaten odada değil.", data.AgentName))
 		return
 	}
+
+	h.releaseClientLiveness(c)
 
 	h.events.Log(eventlog.EventAgentLeft,
 		eventlog.String(eventlog.AttrConversationID, room),

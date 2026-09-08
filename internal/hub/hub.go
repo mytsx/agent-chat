@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"desktop/internal/eventlog"
 	"desktop/internal/types"
@@ -86,6 +87,25 @@ type Hub struct {
 	requestsClosed   bool
 	inflightRequests sync.WaitGroup
 
+	// connMu guards connectedAgents and is deliberately NOT h.mu: liveness is
+	// read from inside cleanupStaleLocked, which runs under the ROOM lock, and
+	// persistRoom already takes h.mu then the room lock. Reusing h.mu here would
+	// invert that order and can deadlock.
+	connMu sync.RWMutex
+	// connectedAgents counts live connections per room+agent. A count, not a
+	// bool: a reconnecting client registers its new connection before the old
+	// one unregisters, and the agent must not flicker to "gone" in between.
+	connectedAgents map[string]int
+	// departGen numbers each disconnect so a superseded grace timer can tell it
+	// no longer owns the window.
+	departGen map[string]uint64
+	// departUntil is when each pending grace window closes, so stale cleanup can
+	// leave those entries alone.
+	departUntil map[string]time.Time
+	// graceWindow is how long a departure waits before it is written down. A
+	// client that reconnects inside it leaves no trace; see releaseAgentForClient.
+	graceWindow time.Duration
+
 	listener net.Listener
 
 	// events is the structured event stream (#101): the measurement layer for
@@ -132,6 +152,10 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
+		connectedAgents:  make(map[string]int),
+		departGen:        make(map[string]uint64),
+		departUntil:      make(map[string]time.Time),
+		graceWindow:      defaultGraceWindow,
 		events:           events,
 	}
 }
@@ -340,21 +364,7 @@ func (h *Hub) runClientManager() {
 
 			// If this client had joined as an agent, remove it immediately
 			// so name re-use and manager lock cleanup do not wait for stale timeout.
-			if joinedRoom != "" && agentName != "" {
-				roomState := h.getOrCreateRoom(joinedRoom)
-				if sysMsg, found := roomState.Leave(agentName); found {
-					agents := roomState.GetAgents()
-					h.broadcastEvent(joinedRoom, "message_new", map[string]any{"message": sysMsg})
-					h.broadcastEvent(joinedRoom, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
-					// Reason "disconnect" is what separates #98's first drop
-					// mechanism (connection lost, no rejoin) from an explicit leave.
-					h.events.Log(eventlog.EventAgentLeft,
-						eventlog.String(eventlog.AttrConversationID, joinedRoom),
-						eventlog.String(eventlog.AttrAgentName, agentName),
-						eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
-					)
-				}
-			}
+			h.releaseAgentForClient(client, joinedRoom, agentName)
 
 			h.events.Log(eventlog.EventClientDisconnected,
 				eventlog.String(eventlog.AttrAgentName, agentName),
@@ -367,6 +377,245 @@ func (h *Hub) runClientManager() {
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}
 	}
+}
+
+// defaultGraceWindow defers a departure long enough for a reconnect to land.
+//
+// The room's system messages are read BY the other agents, so writing
+// "X ayrıldı" and then "X katıldı" for every blip is not just log noise: it
+// tells the team someone left and a new one arrived. The client's reconnect
+// backoff starts well under a second, so a few seconds covers a real blip while
+// still clearing a genuinely departed agent promptly.
+const defaultGraceWindow = 5 * time.Second
+
+// connKey identifies one agent's presence in one room.
+func connKey(room, agentName string) string { return room + "\x00" + agentName }
+
+// claimLiveness records that this connection vouches for an agent, at most once
+// per connection. A second join on the same socket is a no-op rather than a
+// second claim that nothing will ever release.
+func (h *Hub) claimLiveness(c *Client, room, agentName string) {
+	if c == nil || room == "" || agentName == "" {
+		return
+	}
+	key := connKey(room, agentName)
+	if c.livenessKey == key {
+		return // already claimed by this connection
+	}
+	if c.livenessKey != "" {
+		h.releaseLivenessKey(c.livenessKey)
+	}
+	c.livenessKey = key
+	h.connMu.Lock()
+	h.connectedAgents[key]++
+	// Retire any pending grace timer: the agent is back.
+	h.departGen[key]++
+	delete(h.departUntil, key)
+	h.connMu.Unlock()
+}
+
+// agentConnected registers a live connection by name. Production code claims
+// through claimLiveness, which is per-connection; this raw form exists for tests
+// that exercise the counter's semantics directly.
+func (h *Hub) agentConnected(room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	h.connMu.Lock()
+	h.connectedAgents[connKey(room, agentName)]++
+	h.connMu.Unlock()
+}
+
+// releaseLivenessKey drops one claim on an already-built key.
+func (h *Hub) releaseLivenessKey(key string) {
+	h.connMu.Lock()
+	if n := h.connectedAgents[key] - 1; n > 0 {
+		h.connectedAgents[key] = n
+	} else {
+		delete(h.connectedAgents, key)
+	}
+	h.connMu.Unlock()
+}
+
+// agentDisconnected releases one claim by name, removing the entry at zero.
+// Production releases through releaseAgentForClient, which is per-connection and
+// arms the grace window in the same locked step; this raw form exists for tests
+// that drive the counter directly.
+func (h *Hub) agentDisconnected(room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	h.releaseLivenessKey(connKey(room, agentName))
+}
+
+// releaseClientLiveness drops whatever claim this connection holds, if any.
+func (h *Hub) releaseClientLiveness(c *Client) {
+	if c == nil || c.livenessKey == "" {
+		return
+	}
+	h.releaseLivenessKey(c.livenessKey)
+	c.livenessKey = ""
+}
+
+// isAgentConnected reports whether any live socket holds this agent in this
+// room. Safe to call under the room lock — see connMu.
+func (h *Hub) isAgentConnected(room, agentName string) bool {
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	return h.connectedAgents[connKey(room, agentName)] > 0
+}
+
+// connectedFnFor builds the per-room liveness predicate.
+//
+// Liveness must come from the connection, not from a timestamp only RPC calls
+// refresh: an agent can work for well past staleTimeout without calling a tool
+// while its socket answers every hub ping. Evicting it then is #98's third
+// mechanism.
+func (h *Hub) connectedFnFor(room string) func(string) bool {
+	return func(agentName string) bool { return h.isAgentConnected(room, agentName) }
+}
+
+// claimDeparture verifies this timer still owns the window and retires it, in
+// ONE locked operation.
+//
+// Reading the generation, releasing the lock and then deleting the deadline let
+// a reconnect-plus-second-disconnect install a newer window in between: the old
+// timer deleted the NEW deadline and removed the agent at its own stale one,
+// denying the second disconnect the grace it had just earned.
+func (h *Hub) claimDeparture(key string, gen uint64) bool {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	if h.departGen[key] != gen || h.connectedAgents[key] > 0 {
+		return false
+	}
+	delete(h.departUntil, key)
+	return true
+}
+
+// isAgentHeldByOther reports whether some OTHER connection currently vouches
+// for this agent. clear_room empties the roster without touching sockets, so a
+// name can be free in the roster while a live socket still answers to it.
+func (h *Hub) isAgentHeldByOther(c *Client, room, agentName string) bool {
+	key := connKey(room, agentName)
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	if h.connectedAgents[key] == 0 {
+		return false
+	}
+	return c == nil || c.livenessKey != key
+}
+
+// isAgentProtected reports whether an agent must survive stale cleanup: it is
+// connected, or its grace window has not closed yet.
+func (h *Hub) isAgentProtected(room, agentName string) bool {
+	key := connKey(room, agentName)
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	if h.connectedAgents[key] > 0 {
+		return true
+	}
+	until, ok := h.departUntil[key]
+	return ok && time.Now().Before(until)
+}
+
+// protectedFnFor builds the per-room stale-cleanup shield.
+func (h *Hub) protectedFnFor(room string) func(string) bool {
+	return func(agentName string) bool { return h.isAgentProtected(room, agentName) }
+}
+
+// releaseAgentForClient gives up this connection's claim on an agent and, if it
+// was the last one, schedules the departure after the grace window.
+//
+// The departure is deferred rather than immediate because a reconnect that lands
+// inside the window should be invisible: previously every blip wrote a leave and
+// a join into the room, which the other agents read as a teammate leaving and a
+// stranger arriving.
+func (h *Hub) releaseAgentForClient(c *Client, room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	// Releasing the claim and installing the grace window must be ONE locked
+	// step: in the gap between them the agent counts as neither connected nor
+	// departing, and a concurrent list_agents on a long-quiet agent deletes the
+	// roster entry outright — turning the reconnect into a noisy fresh join.
+	gen, armed := h.releaseAndArmGrace(c, room, agentName)
+	if !armed {
+		return // another connection still holds the agent
+	}
+	h.startDepartureTimer(room, agentName, gen)
+}
+
+// releaseAndArmGrace drops this connection's claim and, if it was the last one,
+// arms the grace window — atomically. Returns the window's generation and
+// whether it was armed.
+func (h *Hub) releaseAndArmGrace(c *Client, room, agentName string) (uint64, bool) {
+	key := connKey(room, agentName)
+
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+
+	if c != nil && c.livenessKey == key {
+		if n := h.connectedAgents[key] - 1; n > 0 {
+			h.connectedAgents[key] = n
+		} else {
+			delete(h.connectedAgents, key)
+		}
+		c.livenessKey = ""
+	}
+	if h.connectedAgents[key] > 0 {
+		return 0, false
+	}
+
+	h.departGen[key]++
+	if h.graceWindow > 0 {
+		h.departUntil[key] = time.Now().Add(h.graceWindow)
+	}
+	return h.departGen[key], true
+}
+
+// startDepartureTimer schedules the removal for an already-armed window.
+func (h *Hub) startDepartureTimer(room, agentName string, gen uint64) {
+	if h.graceWindow <= 0 {
+		h.finalizeDeparture(room, agentName, gen)
+		return
+	}
+	time.AfterFunc(h.graceWindow, func() {
+		select {
+		case <-h.done:
+			return // shutting down; the roster is being torn down anyway
+		default:
+		}
+		h.finalizeDeparture(room, agentName, gen)
+	})
+}
+
+// finalizeDeparture removes an agent that did not come back, unless a newer
+// disconnect has superseded this one.
+func (h *Hub) finalizeDeparture(room, agentName string, gen uint64) {
+	if !h.claimDeparture(connKey(room, agentName), gen) {
+		return // a later disconnect (or a reconnect) owns the window now
+	}
+
+	roomState := h.getRoom(room)
+	if roomState == nil {
+		return
+	}
+	// The liveness check happens INSIDE the room lock: checking here and leaving
+	// afterwards let a reconnect land in between and be removed anyway.
+	sysMsg, found := roomState.LeaveIfDisconnected(agentName)
+	if !found {
+		return
+	}
+	agents := roomState.GetAgents()
+	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})
+	h.broadcastEvent(room, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
+	// Reason "disconnect" is what separates #98's connection-loss mechanism
+	// from an explicit leave.
+	h.events.Log(eventlog.EventAgentLeft,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, agentName),
+		eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
+	)
 }
 
 // getOrCreateRoom returns the room state, creating it if it doesn't exist.
@@ -382,6 +631,8 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	r.SetArchiveFn(h.archiveFnFor(room))
 	r.SetEvictFn(h.evictFnFor(room))
 	r.SetResetFn(h.resetFnFor(room))
+	r.SetConnectedFn(h.connectedFnFor(room))
+	r.SetProtectedFn(h.protectedFnFor(room))
 	h.rooms[room] = r
 	return r
 }
