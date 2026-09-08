@@ -122,6 +122,19 @@ detected instead of hanging `readLoop` forever.
 - Hub discovers port via `~/.agent-chat/hub.port` file or `AGENT_CHAT_HUB_PORT` env override
 - Persistence: atomic write (temp file + rename) to `hub-state/{room}.json`
 
+### Addressing (#99)
+
+- **Recipient must be present.** `send_message` to an agent that is not in the
+  room is rejected, and the error lists who is. Not enforced while a manager is
+  active: there every message goes to the manager first, so `to` is only a hint
+  and rejecting it would break the manager's routing job.
+- **Reads page forward.** `ReadMessages` returns the OLDEST matching messages
+  from `since_id`, not the newest tail. Returning the tail lost messages
+  silently: the agent advanced its cursor to the highest ID it saw, so anything
+  between the cursor and that tail could never be asked for again.
+- `unread_only` is a misleading name kept for compatibility — it means "hide my
+  own messages", not read-state tracking. `since_id` is the real cursor.
+
 ### Manager + Orchestrator Routing
 
 Hub is the routing authority:
@@ -201,7 +214,9 @@ The desktop app writes MCP server config to CLI config files at startup and per-
 - `~/.gemini/settings.json` → same structure
 - `~/.copilot/mcp-config.json` → same structure
 
-MCP config includes `AGENT_CHAT_DATA_DIR` env var pointing to `~/.agent-chat/` so MCP instances can discover the hub port. `AGENT_CHAT_ROOM` env var sets the default room name.
+MCP config includes `AGENT_CHAT_DATA_DIR` env var pointing to `~/.agent-chat/` so MCP instances can discover the hub port. `AGENT_CHAT_ROOM` names the terminal's room.
+
+**No invented default room (#99).** An unset `AGENT_CHAT_ROOM` is left empty rather than becoming `"default"`, and the hub resolves an omitted room against the room that *connection joined* (`Hub.resolveRoomFor`), falling back to its own default only for unjoined clients like the desktop. The old behaviour answered from a room the agent's team was not in — silently, 1.479 times in the shipped log.
 
 **Critical:** Claude Code has per-project MCP overrides in `~/.claude.json` under `projects[path].mcpServers`. The `cleanProjectMCPOverrides()` function removes stale per-project `agent-chat` entries that would shadow the global config.
 

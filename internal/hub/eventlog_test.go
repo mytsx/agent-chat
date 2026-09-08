@@ -111,9 +111,22 @@ func TestEventLogRecordsJoin(t *testing.T) {
 
 // The recipient-presence flag is what makes #99 measurable: a message addressed
 // to someone who is not in the room must be visible as such in the log.
+// Since #99 a direct send to an absent agent is REJECTED outright in a room
+// with no manager, so the only way a misaddressed message still gets stored is
+// through the manager gateway — where the recipient is advisory. That is the
+// case this test now covers.
 func TestEventLogRecordsRecipientPresence(t *testing.T) {
 	h, alice, dir := newEventHub(t)
 	bob := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
 	joinAgent(t, h, alice, "r1", "alice")
 	joinAgent(t, h, bob, "r1", "bob")
 

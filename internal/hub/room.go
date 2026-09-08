@@ -486,8 +486,12 @@ func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnl
 	}
 
 	totalCount := len(filtered)
+	// Page FORWARD from the cursor, oldest first. Returning the newest tail
+	// instead loses messages silently: the agent advances since_id to the
+	// highest id it saw, so everything between its cursor and that tail is
+	// skipped and can never be asked for again.
 	if limit > 0 && len(filtered) > limit {
-		filtered = filtered[len(filtered)-limit:]
+		filtered = filtered[:limit]
 	}
 
 	return filtered, totalCount, r.generation
@@ -616,6 +620,19 @@ func (r *RoomState) HasAgent(agentName string) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.agents[agentName]
 	return ok
+}
+
+// AgentNames returns the room's agent names, sorted, for error messages that
+// have to tell a sender who is actually present.
+func (r *RoomState) AgentNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.agents))
+	for name := range r.agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // IsObserver reports whether the named agent is currently in the room roster with

@@ -228,7 +228,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 		}
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	h.setConfiguredManager(room, managerAgent)
 
 	roomState := h.getOrCreateRoom(room)
@@ -262,7 +262,7 @@ func (h *Hub) handleSetObservers(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	h.setConfiguredObservers(room, data.Observers)
 
 	text := fmt.Sprintf("'%s' odası için %d observer atandı.", room, len(data.Observers))
@@ -328,7 +328,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	// Reject room names that can't be safely used as a filename: the hub keys
 	// both snapshot persistence (hub-state/{room}.json) and archives
@@ -483,7 +483,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odada mesaj gönderebilirsiniz: %s") {
 		return
@@ -539,6 +539,20 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	}
 
 	activeManager := roomState.GetActiveManagerAndTouch(data.From)
+
+	// A direct message to somebody who is not in the room used to be stored and
+	// then go nowhere — the sender got a success and never learned why nobody
+	// answered. Tell it, and tell it who IS here so a typo is obvious.
+	//
+	// Not enforced while a manager gateway is active: there the recipient is
+	// advisory, the message goes to the manager either way, and rejecting it
+	// would break the manager's job of routing to agents that have not joined yet.
+	if data.To != "all" && activeManager == "" && !roomState.HasAgent(data.To) {
+		c.sendError(req.ID, req.Type, fmt.Sprintf(
+			"'%s' bu odada değil; mesaj gönderilmedi. Odadaki agent'lar: %s",
+			data.To, strings.Join(roomState.AgentNames(), ", ")))
+		return
+	}
 
 	to := data.To
 	opts := SendOptions{}
@@ -617,7 +631,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	data.UnreadOnly = true
 	json.Unmarshal(req.Data, &data)
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireJoinedRoom(req, room, "önce join_room çağırmalısınız", "yalnızca katıldığınız odadan mesaj okuyabilirsiniz: %s") {
 		return
@@ -709,7 +723,7 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	roomState := h.getRoom(room)
 
 	if !h.authorizeReadAllMessages(c, req, room, roomState) {
@@ -834,7 +848,7 @@ func (h *Hub) handleListAgents(c *Client, req types.Request) {
 	}
 	json.Unmarshal(req.Data, &data)
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	roomState := h.getOrCreateRoom(room)
 	if c.agentName != "" {
 		roomState.TouchManagerHeartbeat(c.agentName)
@@ -870,7 +884,7 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 	}
 	json.Unmarshal(req.Data, &data)
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireValidName(req, data.AgentName) {
 		return
@@ -910,7 +924,7 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 }
 
 func (h *Hub) handleClearRoom(c *Client, req types.Request) {
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	// Only authorized desktop app or active manager can clear a room.
 	if !c.isDesktopAuthorized() {
@@ -972,7 +986,7 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 // messages; that is acceptable and never loses history. A room that was never
 // created archives nothing rather than materializing a phantom empty room.
 func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop odayı arşivleyebilir") {
 		return
@@ -1009,7 +1023,7 @@ func (h *Hub) handleArchiveRoom(c *Client, req types.Request) {
 // unchanged room is skipped (saved=false) rather than written. A room that was
 // never created saves nothing rather than materializing a phantom empty room.
 func (h *Hub) handleSaveSession(c *Client, req types.Request) {
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop session kaydedebilir") {
 		return
@@ -1052,7 +1066,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	// room feeds getOrCreateRoom → persistRoom (hub-state/{room}.json), so reject a
 	// traversal name here the same way clear_room/archive_room/delete_room do, rather
 	// than materializing an unvalidated room in memory that would be written to disk.
@@ -1091,7 +1105,7 @@ func (h *Hub) handleLogMessage(c *Client, req types.Request) {
 // prior context cheaply instead of the whole history) or by the authorized
 // desktop.
 func (h *Hub) handleReadSummary(c *Client, req types.Request) {
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 
 	if !c.requireJoinedRoomOrDesktop(req, room, "önce join_room veya yetkili desktop identify çağırmalısınız", "yalnızca katıldığınız odanın özetini okuyabilirsiniz: %s") {
 		return
@@ -1130,7 +1144,7 @@ func (h *Hub) handleGetLastMessageID(c *Client, req types.Request) {
 	}
 	json.Unmarshal(req.Data, &data)
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	// room feeds getOrCreateRoom → persistRoom (hub-state/{room}.json); validate it as a
 	// filename so a desktop-authorized caller can't materialize a traversal-named room.
 	if !c.requireValidName(req, room) {
@@ -1166,7 +1180,7 @@ func (h *Hub) handleGetAgents(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	c.sendSuccess(req.ID, req.Type, map[string]any{"agents": h.roomAgentsSnapshot(room)})
 }
 
@@ -1176,7 +1190,7 @@ func (h *Hub) handleGetMessagesRaw(c *Client, req types.Request) {
 		return
 	}
 
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	c.sendSuccess(req.ID, req.Type, map[string]any{"messages": h.roomMessagesSnapshot(room)})
 }
 
@@ -1243,7 +1257,7 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 	if !c.requireDesktopAuthorized(req, "yalnızca yetkili desktop istemcisi oda silebilir") {
 		return
 	}
-	room := h.resolveRoom(req.Room)
+	room := h.resolveRoomFor(c, req.Room)
 	// room feeds os.Remove below; validate it as a filename the same way every other
 	// file-touching handler does (archive.go, session.go, transcript.go) — rejects
 	// path traversal ("..", "/") so a crafted name can't delete files outside hub-state.

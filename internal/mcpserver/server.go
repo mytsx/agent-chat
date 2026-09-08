@@ -18,7 +18,10 @@ type MCPServerApp struct {
 }
 
 const (
-	roomArgDescription           = "Room name (empty = default room)"
+	// An omitted room now means "the room this connection joined", not a
+	// process-wide default — inventing one is what put agents in a room their
+	// team was not in (#99).
+	roomArgDescription           = "Room name (empty = the room you joined)"
 	agentNameDescription         = "Your agent name"
 	optionalAgentNameDescription = "Your agent name (optional, for updating last_seen)"
 )
@@ -124,7 +127,7 @@ func (app *MCPServerApp) registerTools() {
 Args:
     agent_name: Unique name for this agent (e.g., "backend", "frontend", "mobile")
     role: Optional role description (e.g., "Backend API Developer")
-    room: Room name (empty = default room from AGENT_CHAT_ROOM env or "default")
+    room: Room name (empty = the room configured for this terminal)
 
 Returns:
     Confirmation message with list of other agents in the room
@@ -140,7 +143,7 @@ Notes:
 			mcp.Description("Optional role description (e.g., \"Backend API Developer\")"),
 		),
 		mcp.WithString("room",
-			mcp.Description("Room name (empty = default room from AGENT_CHAT_ROOM env or \"default\")"),
+			mcp.Description("Room name (empty = the room configured for this terminal)"),
 		),
 	)...)
 
@@ -153,13 +156,17 @@ Args:
     to_agent: Target agent name or "all" for broadcast (default: "all")
     expects_reply: Set False for acknowledgments/thanks to prevent infinite loops (default: True)
     priority: "urgent", "normal", or "low" (default: "normal")
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     Confirmation that message was sent
 
 Notes:
     - from_agent must match the name you joined with via join_room
+    - to_agent must be an agent that is CURRENTLY in the room. Sending to a name
+      that is not there is rejected and the error lists who is; use list_agents
+      if you are unsure. (Exception: when a manager is active every message goes
+      to the manager first, so to_agent is only a hint there.)
     - If a manager is active in the room, non-manager messages are first routed to manager`,
 		fromAgentArg(),
 		mcp.WithString("content",
@@ -167,7 +174,7 @@ Notes:
 			mcp.Description("Message content"),
 		),
 		mcp.WithString("to_agent",
-			mcp.Description("Target agent name or \"all\" for broadcast (default: \"all\")"),
+			mcp.Description("Target agent name (must be in the room now) or \"all\" for broadcast (default: \"all\")"),
 		),
 		mcp.WithBoolean("expects_reply",
 			mcp.Description("Set False for acknowledgments/thanks to prevent infinite loops (default: True)"),
@@ -183,10 +190,12 @@ Notes:
 
 Args:
     agent_name: Your agent name (to filter relevant messages)
-    since_id: Only get messages after this ID (default: 0 for all)
-    unread_only: If True, only show messages not from yourself (default: True)
+    since_id: Only get messages after this ID (default: 0 for all). Messages are
+        returned OLDEST FIRST from this cursor, so advancing since_id to the
+        highest ID you received never skips anything in between.
+    unread_only: If True, hide messages you sent yourself (default: True)
     limit: Maximum number of messages to return (default: 10, 0 for unlimited)
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     List of messages formatted for reading`,
@@ -207,7 +216,7 @@ Returns:
 
 Args:
     agent_name: Your agent name (optional, for updating last_seen)
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     List of active agents with their roles`,
@@ -220,7 +229,7 @@ Returns:
 
 Args:
     agent_name: Your agent name
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     Confirmation message`,
@@ -233,7 +242,7 @@ Returns:
 		mcp.WithDescription(`Clear all messages and agents from the room. Use with caution!
 
 Args:
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     Confirmation message`),
@@ -246,7 +255,7 @@ Returns:
 Args:
     since_id: Only get messages after this ID (default: 0 for all)
     limit: Maximum number of messages to return (default: 15, 0 for unlimited)
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     List of all messages formatted for reading`,
@@ -263,7 +272,7 @@ Prefer this over read_all_messages on join: it gives the prior-session context
 history. Read recent messages only for detail beyond the summary.
 
 Args:
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     The latest saved summary, or a notice if none exists yet`,
@@ -275,7 +284,7 @@ Returns:
 
 Args:
     agent_name: Your agent name (optional, for updating last_seen)
-    room: Room name (empty = default room)
+    room: Room name (empty = the room you joined)
 
 Returns:
     The ID of the last message, or 0 if no messages`,
