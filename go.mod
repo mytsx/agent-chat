@@ -9,6 +9,7 @@ require (
 	github.com/mark3labs/mcp-go v0.55.1
 	github.com/wailsapp/wails/v2 v2.13.0
 	golang.org/x/text v0.39.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
