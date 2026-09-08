@@ -6,7 +6,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mark3labs/mcp-go v1.0.0
 	github.com/wailsapp/wails/v2 v2.15.0
 	golang.org/x/text v0.41.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
