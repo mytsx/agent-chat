@@ -11,23 +11,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/yerli/Developer/agent-chat/.claude/hooks/gemini-review-on-push.sh"
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/watch-bot-review.sh\" gemini",
-            "asyncRewake": true,
-            "timeout": 1100,
-            "rewakeSummary": "Gemini review sonucu",
-            "statusMessage": "Gemini review'u bekleniyor"
-          },
-          {
-            "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/watch-bot-review.sh\" codex",
             "asyncRewake": true,
             "timeout": 1300,
             "rewakeSummary": "Codex review sonucu",
             "statusMessage": "Codex review'u bekleniyor"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/watch-bot-review.sh\" copilot",
+            "asyncRewake": true,
+            "timeout": 1200,
+            "rewakeSummary": "Copilot review sonucu",
+            "statusMessage": "Copilot review'u bekleniyor"
           }
         ]
       }
