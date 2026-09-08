@@ -521,7 +521,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// Loss is loss regardless of the window: a run that dropped events
 			// before the cutoff still produced an incomplete stream.
 			if isHubLifecycle(r.Name) || r.Name == EventEventsDropped {
-				applyHubLifecycle(r, &stoppedAt, &hubRunning, &runDropped, &rep, &epoch)
+				applyHubLifecycle(r, &stoppedAt, &hubRunning, &runDropped, &rep, &epoch, &lastStopPersisted)
 			}
 			lastEventAt = r.Time
 			continue
@@ -691,6 +691,9 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 				stoppedAt = r.Time
 			}
 			hubRunning = false
+			// Only a matching hub.stopped may claim the state was persisted;
+			// see applyHubLifecycle.
+			lastStopPersisted = false
 
 		case EventHubStopped:
 			// Keep the earlier unavailable boundary if we have one; this record
@@ -740,8 +743,13 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		lastEventAt = r.Time
 	}
 
-	// Bank the final (or only) run's in-window losses.
-	rep.Dropped += runDropped - min(runBaseline, runDropped)
+	// Bank the final (or only) run's in-window losses — but only if the window
+	// ever opened. With a --since past the newest record no baseline was set, so
+	// this reported every pre-cutoff loss and warned that an entirely empty
+	// report was incomplete.
+	if baselineSet {
+		rep.Dropped += runDropped - min(runBaseline, runDropped)
+	}
 
 	// A stop with no matching start means the hub is still down as far as this
 	// stream knows — the most interesting outage of all, so never dropped.
@@ -873,7 +881,7 @@ func isHubLifecycle(name string) bool {
 // applyHubLifecycle advances outage-reconstruction state for a record outside
 // the --since window. It records no finding, but loss counts are still banked:
 // events dropped by a hub that ran before the cutoff were still lost.
-func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDropped *uint64, rep *Report, epoch *int) {
+func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDropped *uint64, rep *Report, epoch *int, lastStopPersisted *bool) {
 	switch r.Name {
 	case EventEventsDropped:
 		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
@@ -884,11 +892,18 @@ func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDrop
 			*stoppedAt = r.Time
 		}
 		*hubRunning = false
+		// A shutdown has begun and nothing has confirmed it persisted. Leaving
+		// the previous run's evidence standing let a shutdown that died before
+		// hub.stopped inherit an older "persisted", so the next start opened no
+		// generation — although a half-finished shutdown can roll back to an
+		// older snapshot and reuse message IDs exactly as a crash does.
+		*lastStopPersisted = false
 	case EventHubStopped:
 		if stoppedAt.IsZero() {
 			*stoppedAt = r.Time
 		}
 		*hubRunning = false
+		*lastStopPersisted, _ = r.Attrs[AttrPersistOK].(bool)
 		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
 			*runDropped = uint64(f)
 		}
@@ -912,7 +927,7 @@ const legacyTimeLayout = "2006/01/02 15:04:05"
 // legacyUnreachableMarkers identify a hub the MCP instance could not reach at
 // all. Those instances had no connection, so these lines exist nowhere else.
 var legacyUnreachableMarkers = []string{
-	"hub.port not found",
+	legacyDiscoveryMarker,
 	"connect: connection refused",
 	legacyGaveUpMarker,
 }
@@ -920,6 +935,19 @@ var legacyUnreachableMarkers = []string{
 // legacyGaveUpMarker is written once per MCP process that exhausted its retries,
 // so counting it gives affected CLIENTS rather than attempts.
 const legacyGaveUpMarker = "failed to connect to hub after"
+
+// legacyDiscoveryMarker is a hub the process could not even locate. Before #98
+// that was fatal — DiscoverHubAddr failing called os.Exit(1) — so each such line
+// is one MCP process that died without ever reaching the hub, not one attempt.
+// Counting only legacyGaveUpMarker undercounted affected clients by ~30x in the
+// shipped log (12.765 discovery lines against 431 give-up lines).
+const legacyDiscoveryMarker = "hub.port not found"
+
+// legacyBackgroundWaitMarker distinguishes the SAME discovery failure after #98,
+// where startup no longer exits and the supervisor keeps dialling. Those lines
+// are not a client giving up and must not be counted as one — the log holds both
+// eras.
+const legacyBackgroundWaitMarker = "arka planda beklenecek"
 
 // scanLegacyLog counts unreachable-hub lines in the old plain-text log and
 // attributes each to the outage window it falls in, so the report can say how
@@ -968,7 +996,9 @@ func scanLegacyLog(path string, since time.Time, rep *Report) error {
 		}
 
 		rep.LegacyUnreachable++
-		gaveUp := strings.Contains(line, legacyGaveUpMarker)
+		gaveUp := strings.Contains(line, legacyGaveUpMarker) ||
+			(strings.Contains(line, legacyDiscoveryMarker) &&
+				!strings.Contains(line, legacyBackgroundWaitMarker))
 		if gaveUp {
 			rep.LegacyClientsFailed++
 		}
