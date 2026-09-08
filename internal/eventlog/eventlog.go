@@ -117,6 +117,14 @@ type Logger struct {
 	// LogSync (used for the final hub.stopped record) can both reach the handler.
 	writeMu sync.Mutex
 
+	// closeMu guards the queue against Close. A producer holds it for reading
+	// while it checks closed and sends; Close takes it for writing before it
+	// closes the channel, so no send can ever land on a closed one. Without this
+	// the hub's shutdown races its client-manager goroutine — which logs
+	// disconnects — and panics on the way out.
+	closeMu sync.RWMutex
+	closed  bool
+
 	dropped        atomic.Uint64
 	captureContent bool
 	now            func() time.Time
@@ -188,6 +196,11 @@ func (l *Logger) Log(name string, attrs ...Attr) {
 	if l.isNop() {
 		return
 	}
+	l.closeMu.RLock()
+	defer l.closeMu.RUnlock()
+	if l.closed {
+		return
+	}
 	e := entry{t: l.now(), name: name, attrs: attrs}
 	select {
 	case l.ch <- e:
@@ -222,11 +235,20 @@ func (l *Logger) Flush() {
 		return
 	}
 	barrier := make(chan struct{})
+
+	l.closeMu.RLock()
+	if l.closed {
+		l.closeMu.RUnlock()
+		return // queue already drained by Close
+	}
 	select {
 	case l.ch <- entry{flush: barrier}:
 	case <-l.done:
+		l.closeMu.RUnlock()
 		return
 	}
+	l.closeMu.RUnlock()
+
 	select {
 	case <-barrier:
 	case <-l.done:
@@ -240,6 +262,12 @@ func (l *Logger) Close() error {
 	}
 	var err error
 	l.closeOnce.Do(func() {
+		// Shut the door before closing the channel: any producer is either
+		// already past its send or will see closed and give up.
+		l.closeMu.Lock()
+		l.closed = true
+		l.closeMu.Unlock()
+
 		close(l.ch)
 		<-l.done // writer drains what is queued, then exits
 		err = l.sink.Close()

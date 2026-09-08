@@ -242,21 +242,31 @@ func TestRotation(t *testing.T) {
 	}
 	l.Flush()
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var backups int
-	for _, e := range entries {
-		if e.Name() != fileName {
-			backups++
+	countBackups := func() int {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
 		}
+		var n int
+		for _, e := range entries {
+			if e.Name() != fileName {
+				n++
+			}
+		}
+		return n
 	}
-	if backups == 0 {
-		t.Fatalf("rotasyon olmadı; dizin: %v", entries)
+
+	if countBackups() == 0 {
+		t.Fatal("rotasyon olmadı")
 	}
-	if backups > 2 {
-		t.Errorf("yedek sayısı = %d, MaxBackups=2 sınırı aşıldı", backups)
+	// lumberjack prunes old backups in a goroutine it starts per rotation, so the
+	// cap is eventually true rather than immediately — poll instead of racing it.
+	deadline := time.Now().Add(2 * time.Second)
+	for countBackups() > 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := countBackups(); n > 2 {
+		t.Errorf("yedek sayısı = %d, MaxBackups=2 sınırı aşıldı", n)
 	}
 }
 
@@ -328,5 +338,42 @@ func TestFilePermissionsAreOwnerOnly(t *testing.T) {
 	// Konuşma içeriği barındırıyor: başkası okuyamamalı.
 	if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("izin = %o, want 600", perm)
+	}
+}
+
+// Close closes the queue, so a Log racing it must not send on a closed channel.
+// The hub's shutdown can race its client-manager goroutine, which logs
+// disconnects — a panic there would take down the hub on every exit.
+func TestLogRacingCloseDoesNotPanic(t *testing.T) {
+	l, _ := newTestLogger(t)
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				l.Log(EventMessageSent)
+				l.Flush()
+			}
+		}()
+	}
+	go func() { _ = l.Close() }()
+	wg.Wait() // panik ederse test burada çöker
+}
+
+func TestLogAfterCloseIsIgnored(t *testing.T) {
+	l, dir := newTestLogger(t)
+	l.Log(EventAgentJoined)
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	l.Log(EventMessageSent) // panik etmemeli
+	l.Flush()               // panik etmemeli, bloke olmamalı
+
+	events := readEvents(t, dir)
+	if len(events) != 1 || events[0][AttrEventName] != EventAgentJoined {
+		t.Errorf("kapanıştan sonraki olay yazılmış: %v", events)
 	}
 }
