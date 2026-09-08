@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -70,6 +71,12 @@ type session struct {
 	joinRoom  string
 	joinAgent string
 	joinRole  string
+	// managers and observers are the desktop's per-room configuration. The hub
+	// holds it in memory only, and the desktop re-sends it just when the hub
+	// PROCESS restarts — so a socket-level reconnect has to put it back or the
+	// room silently loses its manager gateway.
+	managers  map[string]string
+	observers map[string][]string
 	// pendingLeave is a departure the gate refused; restoration performs it.
 	pendingLeave *pendingLeave
 	// joinRev counts membership changes only (join intent recorded, leave). The
@@ -561,6 +568,23 @@ func (c *HubClient) afterConnect() error {
 	return c.flushPendingLeave()
 }
 
+// queueLeaveIfCurrent queues a departure the gate refused, unless the membership
+// moved on while that call was in flight.
+//
+// A join recorded in that window cannot be cancelled by recordJoinIfCurrent — it
+// ran BEFORE this queueing — so queueing unconditionally would flush a stale
+// departure right after the replay had put the agent in, while sess.joined still
+// said it was there.
+func (c *HubClient) queueLeaveIfCurrent(room, agentName string, atJoinRev uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRev != atJoinRev {
+		return
+	}
+	c.sess.pendingLeave = &pendingLeave{room: room, agent: agentName}
+	c.sess.rev++
+}
+
 // flushPendingLeave performs a departure the gate refused, after the session is
 // back up — the replay may have rejoined the agent the caller had just taken
 // out, and only an actual leave_room reconciles that.
@@ -624,6 +648,24 @@ func (c *HubClient) restoreSession() error {
 	if len(subs) > 0 {
 		if err := c.subscribe(subs, true); err != nil {
 			return fmt.Errorf("subscribe: %w", err)
+		}
+	}
+
+	// Configuration last: it is keyed by room and independent of membership,
+	// but it must not run before identify — the hub authorizes these on the
+	// desktop's identity.
+	c.mu.Lock()
+	managers := maps.Clone(c.sess.managers)
+	observers := maps.Clone(c.sess.observers)
+	c.mu.Unlock()
+	for room, agent := range managers {
+		if err := c.setManager(room, agent, true); err != nil {
+			return fmt.Errorf("set_manager: %w", err)
+		}
+	}
+	for room, list := range observers {
+		if err := c.setObservers(room, list, true); err != nil {
+			return fmt.Errorf("set_observers: %w", err)
 		}
 	}
 	return nil
@@ -966,15 +1008,69 @@ func (c *HubClient) rememberSubscriptions(rooms []string, external bool) {
 
 // SetManager configures the allowed manager agent for a room.
 func (c *HubClient) SetManager(room, managerAgent string) error {
+	return c.setManager(room, managerAgent, false)
+}
+
+func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
-	return c.sendExpectSuccess("set_manager", types.Request{Type: "set_manager", Room: room, Data: data})
+	resp, err := c.send(types.Request{Type: "set_manager", Room: room, Data: data}, bypassGate)
+
+	// Same rule as Subscribe, and for the same reason: the hub forgets this
+	// configuration when the socket dies, and the desktop only re-sends it when
+	// the hub PROCESS restarts. A request the hub never saw — a transport
+	// failure, or one the restore gate turned away — is therefore worth
+	// replaying; one it rejected is not. Without this a manager set during a
+	// reconnect was reported as applied while the hub kept the old routing
+	// configuration for the rest of the session.
+	if err != nil || (resp != nil && resp.Success) {
+		c.rememberManager(room, managerAgent, !bypassGate)
+	}
+	if err != nil {
+		return err
+	}
+	return ensureSuccess("set_manager", resp)
+}
+
+func (c *HubClient) rememberManager(room, managerAgent string, external bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.managers == nil {
+		c.sess.managers = map[string]string{}
+	}
+	c.sess.managers[room] = managerAgent
+	if external {
+		c.sess.rev++
+	}
 }
 
 // SetObservers configures the desktop-authorized observer set for a room (#17).
 // The hub rejects join_room with role "observer" for any agent not in this set.
 func (c *HubClient) SetObservers(room string, observers []string) error {
+	return c.setObservers(room, observers, false)
+}
+
+func (c *HubClient) setObservers(room string, observers []string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
-	return c.sendExpectSuccess("set_observers", types.Request{Type: "set_observers", Room: room, Data: data})
+	resp, err := c.send(types.Request{Type: "set_observers", Room: room, Data: data}, bypassGate)
+	if err != nil || (resp != nil && resp.Success) {
+		c.rememberObservers(room, observers, !bypassGate)
+	}
+	if err != nil {
+		return err
+	}
+	return ensureSuccess("set_observers", resp)
+}
+
+func (c *HubClient) rememberObservers(room string, observers []string, external bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.observers == nil {
+		c.sess.observers = map[string][]string{}
+	}
+	c.sess.observers[room] = append([]string(nil), observers...)
+	if external {
+		c.sess.rev++
+	}
 }
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
@@ -1137,6 +1233,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	// was not set when we looked.
 	c.sess.gen++
 	c.sess.joinRev++
+	myJoinRev := c.sess.joinRev
 	c.mu.Unlock()
 
 	resp, err := c.send(types.Request{Type: "leave_room", Room: room, Data: data}, false)
@@ -1146,10 +1243,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	// is cleared, so nothing would rejoin — but nothing would take the agent out
 	// either. Queue it: restoration performs it once the session is up.
 	if errors.Is(err, errRestoreGate) {
-		c.mu.Lock()
-		c.sess.pendingLeave = &pendingLeave{room: room, agent: agentName}
-		c.sess.rev++
-		c.mu.Unlock()
+		c.queueLeaveIfCurrent(room, agentName, myJoinRev)
 	}
 
 	// Only an explicit protocol rejection means the agent is still in the room,

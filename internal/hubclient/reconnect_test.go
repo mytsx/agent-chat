@@ -1166,3 +1166,102 @@ func TestGateStaysArmedWhenRestoreFails(t *testing.T) {
 		t.Errorf("ListRooms() = %v, want gated", err)
 	}
 }
+
+// Codex review round 4, PR #113: a leave that pauses before its send can be
+// overtaken by a newer join. Queueing it unconditionally afterwards would flush
+// a stale departure right after the replay put the agent in.
+func TestQueuedLeaveLosesToANewerJoin(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	atJoinRev := c.sess.joinRev
+	c.sess.joinRev++ // araya giren yeni bir üyelik kaydı
+	c.mu.Unlock()
+
+	c.queueLeaveIfCurrent("r1", "alice", atJoinRev)
+
+	c.mu.Lock()
+	queued := c.sess.pendingLeave
+	c.mu.Unlock()
+	if queued != nil {
+		t.Fatal("bayat leave kuyruğa alındı; replay agent'ı odaya koyduktan sonra çıkarırdı")
+	}
+
+	// Nothing newer: it must still queue.
+	c.mu.Lock()
+	current := c.sess.joinRev
+	c.mu.Unlock()
+	c.queueLeaveIfCurrent("r1", "alice", current)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave == nil {
+		t.Error("güncel leave kuyruğa alınmadı")
+	}
+}
+
+// Codex review round 4, PR #113: the hub holds the desktop's per-room
+// configuration in memory only, and the desktop re-sends it just when the hub
+// PROCESS restarts. A socket-level reconnect must put it back, or a room
+// silently loses its manager gateway for the rest of the session.
+func TestDesktopConfigurationIsReplayedOnReconnect(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("desktop", "", "", "tok"); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if err := c.SetManager("r1", "yonetici"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.SetObservers("r1", []string{"gozcu"}); err != nil {
+		t.Fatalf("SetObservers: %v", err)
+	}
+
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	waitFor(t, "yapılandırmanın replay edilmesi", func() bool {
+		var manager, observers int
+		for _, ty := range h.requestTypes() {
+			switch ty {
+			case "set_manager":
+				manager++
+			case "set_observers":
+				observers++
+			}
+		}
+		return manager >= 2 && observers >= 2
+	})
+}
+
+// And a configuration the gate turned away is worth replaying for the same
+// reason: the hub never saw it, while the desktop reported it as applied.
+func TestConfigurationRefusedByGateIsReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		return cl.Identify("desktop", "", "", "tok")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if err := c.SetManager("r1", "yonetici"); err == nil {
+		t.Fatal("SetManager() during restore = nil, want gated")
+	}
+	close(release)
+
+	waitFor(t, "kapının reddettiği yapılandırmanın replay edilmesi", func() bool {
+		return slices.Contains(h.requestTypes(), "set_manager")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1", got)
+	}
+}

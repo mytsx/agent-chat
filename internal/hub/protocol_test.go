@@ -1605,3 +1605,78 @@ func TestConfiguredManagerJoiningAsObserverDoesNotTakeSeat(t *testing.T) {
 		t.Errorf("rol = %q, want observer", got)
 	}
 }
+
+// Codex review round 4, PR #113: promoting a LIVE observer to manager left its
+// connection-bound read-only flag in place — only a fresh join clears it, and
+// its client replays "observer" anyway. The room would route every message
+// through a manager whose send_message the hub kept rejecting.
+func TestPromotedObserverCanSendAfterSetManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	if resp := readResponse(t, obs, "join_room"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	if !obs.isObserver {
+		t.Fatal("kurulum hatası: bağlantı observer işaretlenmedi")
+	}
+
+	// The desktop promotes it. set_manager arrives BEFORE the allow-list is
+	// cleared, exactly as SetTeamManager sends them.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	if resp := readResponse(t, desktop, "set_manager"); !resp.Success {
+		t.Fatalf("set_manager başarısız: %s", resp.Error)
+	}
+
+	if obs.isObserver {
+		t.Error("terfi sonrası bağlantı hâlâ salt-okunur; manager cevap veremez")
+	}
+
+	// The desktop's second step: the allow-list drops the promoted agent.
+	h.setConfiguredObservers("r1", nil)
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "merhaba"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); !resp.Success {
+		t.Fatalf("terfi edilmiş manager mesaj gönderemedi: %s", resp.Error)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "gozcu" {
+		t.Errorf("manager kilidi = %q, want gozcu", got)
+	}
+}
+
+// The sibling path: after the promotion the allow-list no longer holds the
+// agent, but its client still replays role "observer" on every reconnect.
+// Rejecting that would fail the restore forever — the agent would never get
+// back into the room at all.
+func TestPromotedObserverRejoinIsNotLockedOutByTheObserverGate(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "gozcu") // terfi etti; observer izni kaldırıldı
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	resp := readResponse(t, c, "join_room")
+	if !resp.Success {
+		t.Fatalf("terfi edilmiş agent'ın replay join'i reddedildi: %s", resp.Error)
+	}
+	if c.isObserver {
+		t.Error("düşürülen rol yine de observer olarak bağlandı")
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["gozcu"].Role; got == "observer" {
+		t.Error("roster rolü observer kaldı")
+	}
+}

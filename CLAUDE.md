@@ -137,7 +137,18 @@ in the roster leaves nothing to act on, and after a hub restart neither lock
 field is persisted, so a replayed worker role lands before the desktop
 re-configures the room. For the same reason `Takeover` neither downgrades an
 agent the desktop still names as manager (`RoomState.configuredManager`) nor
-leaves a free seat unclaimed by one. The
+leaves a free seat unclaimed by one — except for an observer join, which is
+never converted into a manager one.
+
+Promoting a **live observer** also clears its connection-bound read-only flag
+(`Hub.clearObserverBinding`), and a promoted agent whose client still replays
+`role="observer"` is admitted with the lesser role instead of being rejected:
+otherwise the room routes through a manager the hub keeps silencing, or the
+agent's restore fails forever.
+
+The desktop's per-room configuration (`set_manager`, `set_observers`) lives in
+hub memory only and is re-sent by the app just when the hub PROCESS restarts, so
+`HubClient` records it as session state and replays it on every reconnect. The
 connection-bound observer flag is likewise authoritative in both directions, so a
 revoked observer is not stuck read-only for the life of its socket.
 

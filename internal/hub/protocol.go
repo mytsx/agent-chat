@@ -234,6 +234,13 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	roomState := h.getOrCreateRoom(room)
 	roomState.HandoffManager(managerAgent)
 
+	// A live observer promoted to manager keeps its CONNECTION-bound read-only
+	// flag, which only a fresh join clears — and its client replays "observer"
+	// anyway, so it would never clear itself. The room would route every message
+	// through a manager whose send_message the hub kept rejecting. The desktop
+	// has just named this agent the manager, so the binding follows.
+	h.clearObserverBinding(room, managerAgent)
+
 	var text string
 	if managerAgent == "" {
 		text = fmt.Sprintf("'%s' odası için manager ataması temizlendi.", room)
@@ -323,6 +330,21 @@ func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
 	h.subs[room][c] = true
 }
 
+// clearObserverBinding drops the read-only flag from every live connection in
+// room that answers to agentName. Guarded by h.mu, the same lock that sets it.
+func (h *Hub) clearObserverBinding(room, agentName string) {
+	if strings.TrimSpace(agentName) == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.subs[room] {
+		if sameAgentName(c.agentName, agentName) {
+			c.isObserver = false
+		}
+	}
+}
+
 func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	var data struct {
 		AgentName string `json:"agent_name"`
@@ -374,8 +396,20 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// transcript access, so a client must not be able to self-assert it. Only an agent
 	// the desktop registered as an observer for this room may join with that role.
 	if role == "observer" && !h.isConfiguredObserver(room, data.AgentName) {
-		c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
-		return
+		// One exception, and it is the promotion path: the desktop names this
+		// agent the room's MANAGER, so its authorization was not removed, it was
+		// replaced. Its client still replays "observer" on every reconnect, and
+		// rejecting that would fail the restore forever — the agent would never
+		// get back into the room at all. Fall back to the lesser role: that
+		// grants nothing the gate was protecting (observer is read-all access),
+		// and the takeover below seats it as the manager it is configured to be.
+		if !sameAgentName(h.getConfiguredManager(room), data.AgentName) {
+			c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
+			return
+		}
+		h.logger.Printf("join_room: observer yetkisi kalkmış ama agent=%q oda %q için manager olarak yapılandırılmış; rol düşürülüyor", data.AgentName, room)
+		role = ""
+		data.Role = ""
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
