@@ -41,11 +41,12 @@ PAYLOAD=$(cat)
 c=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 case "$c" in *"git push"*) ;; *) exit 0;; esac
 
-# A push that FAILED is not a review round. Recording its SHA anyway would make
-# the successful retry of the same commit exit at the duplicate check below, so
-# nobody would ever surface that round's review.
-ec=$(printf '%s' "$PAYLOAD" | jq -r '.tool_response.exit_code // .tool_response.exitCode // "0"' 2>/dev/null || echo "0")
-[ "$ec" = "0" ] || exit 0
+# NOT gated on the command's exit status. The matcher fires on any compound
+# command CONTAINING a push, and the status belongs to the whole command:
+# `git push && make test` reports failure although a review round started, and
+# `git push || echo failed` reports success although none did. The round is
+# instead evidenced by the PR head itself (below) — if the push did not land,
+# the head is unchanged and this run is a no-op.
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 b=$(git branch --show-current 2>/dev/null)
@@ -77,20 +78,35 @@ for _ in 1 2 3 4 5 6; do
 done
 [ -n "$SHA" ] || exit 0
 
-# Çift-bildirim koruması: bot+PR başına son izlenen head SHA saklanır — aynı
-# commit'i iki kez iten bir tur (retry, --force-with-lease) iki bildirim üretmesin.
+# Round bookkeeping, two files with different lifetimes:
+#   .last — the head SHA of the last COMPLETED round. Written only after this
+#           run has produced its notification, so a watcher that is cancelled or
+#           killed at its process timeout does not permanently record a SHA
+#           whose review nobody ever surfaced; the next push of that commit then
+#           still starts a watcher.
+#   .lock — this run, while it polls. It keeps a second watcher off the same
+#           round without outliving the process that holds it.
 MARK="${MARK_DIR:-/tmp}/claude-${BOT}-watch-${REPO//\//-}-pr$n.last"
+LOCK="$MARK.lock"
 mkdir -p "$(dirname "$MARK")" 2>/dev/null
 if [ "$(cat "$MARK" 2>/dev/null)" = "$SHA" ]; then
   exit 0
 fi
-# Beklemeden ÖNCE işaretle: aynı SHA için ikinci bir izleyici başlamasın.
-echo "$SHA" > "$MARK"
+if [ "$(cat "$LOCK" 2>/dev/null)" = "$SHA" ]; then
+  exit 0
+fi
+echo "$SHA" > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 
-# Zaman penceresi: push anından geriye 2 dk pay. Bot'un review'u push'tan sonra
-# gelir; pay, saat kaymasına ve hook'un birkaç saniyelik gecikmesine karşıdır.
-T=$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-  || date -u -d '120 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+# Zaman penceresi. Bu hook, komutun TAMAMI bittikten sonra çalışıyor
+# (PostToolUse), yani `git push && <uzun görev>` biçiminde bir komutta bot
+# review'unu biz daha başlamadan göndermiş olabilir. Bu yüzden pay dar değil:
+# 30 dk geriye bakılıyor. Asıl anahtar zaten commit — pencere, yalnızca soğuk
+# başlangıçta (işaret dosyası yokken) keyfi eski bir review'un bu turun sonucu
+# sanılmasını engelliyor.
+LOOKBACK="${WATCH_LOOKBACK_SECONDS:-1800}"
+T=$(date -u -v-"${LOOKBACK}"S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -d "$LOOKBACK seconds ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Reviews are matched by the COMMIT they reviewed, not by "newer than $T": in a
@@ -145,6 +161,7 @@ while [ "$i" -lt "$TRIES" ]; do
                          and .original_commit_id == $sha))]
        | unique_by(.id) | map({path, line: (.line // .original_line), body})')
 
+  echo "$SHA" > "$MARK"
   echo "PR #$n ($REPO) — $BOT review'u geldi (push: $SHA, pencere: $T sonrası):"
   echo
   echo "## Review gövdesi"
@@ -159,7 +176,8 @@ while [ "$i" -lt "$TRIES" ]; do
   exit 2
 done
 
-# Zaman aşımı: bot bu tura yanıt vermedi.
+# Zaman aşımı: bot bu tura yanıt vermedi. Tur tamamlandı sayılır.
+echo "$SHA" > "$MARK"
 WAITED_MIN=$(( TRIES * INTERVAL / 60 ))
 echo "PR #$n ($REPO) — $BOT, $SHA push'una ~${WAITED_MIN} dk içinde review GÖNDERMEDİ."
 if [ "$BOT" = "codex" ]; then
