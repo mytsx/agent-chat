@@ -36,8 +36,16 @@ REPO="${GH_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/
 TRIES="${WATCH_TRIES:-$DEFAULT_TRIES}"
 INTERVAL="${WATCH_INTERVAL:-20}"
 
-c=$(jq -r '.tool_input.command // ""')
+# Read the payload ONCE: it arrives on stdin, so a second jq would see nothing.
+PAYLOAD=$(cat)
+c=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.command // ""' 2>/dev/null || echo "")
 case "$c" in *"git push"*) ;; *) exit 0;; esac
+
+# A push that FAILED is not a review round. Recording its SHA anyway would make
+# the successful retry of the same commit exit at the duplicate check below, so
+# nobody would ever surface that round's review.
+ec=$(printf '%s' "$PAYLOAD" | jq -r '.tool_response.exit_code // .tool_response.exitCode // "0"' 2>/dev/null || echo "0")
+[ "$ec" = "0" ] || exit 0
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 b=$(git branch --show-current 2>/dev/null)
@@ -70,9 +78,18 @@ T=$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u -d '120 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# Reviews are matched by the COMMIT they reviewed, not by "newer than $T": in a
+# rapid review-fix-push cycle the previous round's review can land inside the
+# lookback window, and a time filter would report it as this push's review while
+# the real one never surfaces.
+#
+# --paginate emits one JSON document PER PAGE, so the pages are streamed as bare
+# objects and slurped into a single array here; piping a per-page "[...]" into
+# `jq length` yields one integer per line and breaks the numeric test below.
 fetch_reviews() {
   gh api --paginate "repos/$REPO/pulls/$n/reviews" --jq \
-    "[.[] | select(.submitted_at > \"$T\") | select(.user.login == \"$LOGIN\")]" 2>/dev/null
+    ".[] | select(.commit_id == \"$SHA\") | select(.user.login == \"$LOGIN\")" 2>/dev/null \
+    | jq -s '.'
 }
 
 i=0
@@ -83,8 +100,14 @@ while [ "$i" -lt "$TRIES" ]; do
   COUNT=$(printf '%s' "$REVIEWS" | jq 'length' 2>/dev/null || echo 0)
   [ "${COUNT:-0}" -gt 0 ] || continue
 
-  INLINE=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq \
-    "[.[] | select(.created_at > \"$T\") | select(.user.login == \"$INLINE_LOGIN\")] | map({path, line: (.line // .original_line), body})" 2>/dev/null)
+  # Inline comments are taken from the matched reviews by review id — exact —
+  # with a login+window fallback, because Copilot posts its inline comments under
+  # a DIFFERENT login than its review and may not link them to the review id.
+  REVIEW_IDS=$(printf '%s' "$REVIEWS" | jq '[.[].id]')
+  INLINE=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[]' 2>/dev/null \
+    | jq -s --argjson ids "$REVIEW_IDS" --arg login "$INLINE_LOGIN" --arg since "$T" \
+      '[.[] | select((.pull_request_review_id as $r | $ids | index($r)) or (.user.login == $login and .created_at > $since))]
+       | unique_by(.id) | map({path, line: (.line // .original_line), body})')
 
   echo "PR #$n ($REPO) — $BOT review'u geldi (push: $SHA, pencere: $T sonrası):"
   echo
