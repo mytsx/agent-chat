@@ -1523,3 +1523,19 @@ func TestDiscoverHubAddrTrimsEnvironmentPort(t *testing.T) {
 		t.Errorf("adres = %q, want ws://localhost:4321/ws", addr)
 	}
 }
+
+// Codex review round 9, PR #113: a whitespace-only override must not look
+// unset. Trimming before the emptiness check made it fall back to hub.port
+// instead of being the permanent configuration error it is.
+func TestDiscoverHubAddrRejectsWhitespaceOnlyEnvOverride(t *testing.T) {
+	t.Setenv("AGENT_CHAT_HUB_PORT", "   ")
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "hub.port"), []byte("4321"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := DiscoverHubAddr(dataDir)
+	if !errors.Is(err, ErrInvalidHubPortConfig) {
+		t.Fatalf("DiscoverHubAddr() error = %v, want ErrInvalidHubPortConfig (hub.port'a düşmemeli)", err)
+	}
+}

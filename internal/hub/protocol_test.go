@@ -1990,3 +1990,44 @@ func TestPromotionInAnotherRoomDoesNotUnbindAnObserver(t *testing.T) {
 		t.Error("salt-okunur bağlantı yeniden katılmadan mesaj gönderebildi")
 	}
 }
+
+// Codex review round 9, PR #113: the outgoing manager's ROSTER role goes with
+// the lock. Clearing only the lock left the old agent listed as a manager next
+// to the new one, so the UI and the persisted roster showed two.
+func TestHandoffDowngradesThePreviousManagerInTheRoster(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "eski")
+
+	oldMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(oldMgr, types.Request{
+		ID: "join-old", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "eski", "role": "manager"}),
+	})
+	readResponse(t, oldMgr, "join_room")
+
+	newMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(newMgr, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	readResponse(t, newMgr, "join_room")
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yeni"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	agents := h.getOrCreateRoom("r1").GetAgents()
+	if got := agents["eski"].Role; got == "manager" {
+		t.Error("devir sonrası eski manager roster'da hâlâ manager; arayüz iki manager gösterir")
+	}
+	if got := agents["yeni"].Role; got != "manager" {
+		t.Errorf("yeni manager rolü = %q, want manager", got)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "yeni" {
+		t.Errorf("manager kilidi = %q, want yeni", got)
+	}
+}

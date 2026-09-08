@@ -750,16 +750,28 @@ func (r *RoomState) HandoffManager(managerAgent string) bool {
 	r.configuredManager = managerAgent
 
 	heldBySameAgent := sameAgentName(r.managerAgent, managerAgent) && r.managerLastSeen != 0
+	rosterChanged := false
 	if !sameAgentName(r.managerAgent, managerAgent) {
+		previous := r.managerAgent
 		if r.managerAgent != "" || r.managerLastSeen != 0 {
 			r.managerAgent = ""
 			r.managerLastSeen = 0
 			r.dirty = true
 		}
+		// The outgoing manager's ROSTER role goes with the lock. Clearing only
+		// the lock left the old agent listed as a manager next to the new one, so
+		// the UI and the persisted roster showed two managers until it rejoined.
+		if key, inRoom := r.rosterKeyLocked(previous); inRoom {
+			if agent := r.agents[key]; strings.EqualFold(strings.TrimSpace(agent.Role), "manager") {
+				agent.Role = ""
+				r.agents[key] = agent
+				rosterChanged = true
+			}
+		}
 	}
 
 	if managerAgent == "" {
-		return false
+		return rosterChanged
 	}
 
 	// The CONFIGURATION is the claim. Waiting for a refused join to leave one
@@ -777,13 +789,13 @@ func (r *RoomState) HandoffManager(managerAgent string) bool {
 	// install nothing.
 	key, inRoom := r.rosterKeyLocked(managerAgent)
 	if !inRoom {
-		return false
+		return rosterChanged
 	}
 	if r.connectedFn != nil && !r.connectedFn(key) {
-		return false
+		return rosterChanged
 	}
 	agent := r.agents[key]
-	changed := !strings.EqualFold(strings.TrimSpace(agent.Role), "manager")
+	changed := rosterChanged || !strings.EqualFold(strings.TrimSpace(agent.Role), "manager")
 	agent.Role = "manager"
 	r.agents[key] = agent
 	// The heartbeat is NOT refreshed when the seat is already this agent's. The

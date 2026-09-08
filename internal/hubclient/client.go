@@ -203,11 +203,15 @@ var ErrInvalidHubPortConfig = errors.New("invalid hub port configuration")
 // DiscoverHubAddr reads the hub port from the data directory.
 func DiscoverHubAddr(dataDir string) (string, error) {
 	// Check env var override first
-	if port := strings.TrimSpace(os.Getenv("AGENT_CHAT_HUB_PORT")); port != "" {
-		// Trimmed ONCE, before both the check and the URL. validateHubPort trims
-		// a local copy, so a padded value ("  4321 ") passed validation and was
-		// then interpolated verbatim into an unusable ws:// address that the
-		// background connector would retry forever.
+	// Presence is decided on the RAW value, the port is used trimmed. Trimming
+	// before the emptiness check made a whitespace-only override look unset, so
+	// it silently fell back to hub.port instead of being the permanent
+	// configuration error it is. Trimming after it is what the URL needs: a
+	// padded value ("  4321 ") passed validation (which trims a local copy) and
+	// was then interpolated verbatim into an unusable ws:// address the
+	// background connector would retry forever.
+	if raw := os.Getenv("AGENT_CHAT_HUB_PORT"); raw != "" {
+		port := strings.TrimSpace(raw)
 		if err := validateHubPort("AGENT_CHAT_HUB_PORT", port); err != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidHubPortConfig, err)
 		}
