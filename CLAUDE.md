@@ -112,7 +112,24 @@ Liveness claims are per-connection (`Client.livenessKey`), not per join:
 same socket must not add a claim nothing will ever release.
 
 Client-side read deadline is 90s with a ping handler, so a half-open socket is
-detected instead of hanging `readLoop` forever.
+detected instead of hanging `readLoop` forever. A **write** can notice the same
+half-open socket sooner, so a write failure tears the connection down and wakes
+the supervisor (`dropConnIf`) rather than leaving a dead socket installed.
+
+A reconnecting socket is **gated** while its session replays: only
+identity/join/subscribe pass (`HubClient.restoring`, and the `Bootstrap` view
+handed to `SetBootstrap`), so an ordinary tool call cannot land on a connection
+that has not identified yet and collect a protocol rejection.
+
+`Takeover` **rejects** a manager role whose seat is held by a different live
+manager instead of writing the role and silently skipping the lock — that is how
+a room ended up with a connected manager and no routing gateway. The
+connection-bound observer flag is likewise authoritative in both directions, so a
+revoked observer is not stuck read-only for the life of its socket.
+
+`AGENT_CHAT_HUB_PORT` is fixed for the process lifetime and outranks `hub.port`,
+so a malformed value is fatal at startup (`ErrInvalidHubPortConfig`). A missing
+or torn `hub.port` stays transient and is waited out in the background.
 
 ### Hub Internals
 

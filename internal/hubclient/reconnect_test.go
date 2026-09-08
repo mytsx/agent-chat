@@ -2,10 +2,14 @@ package hubclient
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -349,7 +353,7 @@ func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
 
 	var calls int
 	var mu sync.Mutex
-	c.SetBootstrap(func(cl *HubClient) error {
+	c.SetBootstrap(func(cl Bootstrap) error {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -747,5 +751,121 @@ func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
 	c.mu.Unlock()
 	if joined {
 		t.Error("bayat bir join, araya giren leave'in temizlediği niyeti geri diriltti")
+	}
+}
+
+// #108/1: AGENT_CHAT_HUB_PORT cannot change while the process runs and outranks
+// hub.port, so a malformed value is permanent — the MCP server would serve stdio
+// and retry the same bad port forever. A missing hub.port is the opposite and
+// must stay transient, or startup would go back to exiting on a hub that simply
+// had not written the file yet.
+func TestDiscoverHubAddrSeparatesPermanentConfigFromTransient(t *testing.T) {
+	t.Run("invalid env override is permanent", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "70000")
+
+		_, err := DiscoverHubAddr(t.TempDir())
+		if !errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, want ErrInvalidHubPortConfig", err)
+		}
+	})
+
+	t.Run("missing hub.port is transient", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "")
+
+		_, err := DiscoverHubAddr(t.TempDir())
+		if err == nil {
+			t.Fatal("DiscoverHubAddr() error = nil, want hub.port not found")
+		}
+		if errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, must NOT be permanent: the desktop writes hub.port moments later", err)
+		}
+	})
+
+	t.Run("malformed hub.port file is transient", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "")
+		dataDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dataDir, "hub.port"), []byte("abc"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := DiscoverHubAddr(dataDir)
+		if err == nil {
+			t.Fatal("DiscoverHubAddr() error = nil, want invalid port")
+		}
+		// The file is rewritten on every hub start, so a torn read is worth
+		// retrying — unlike the env var.
+		if errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, must NOT be permanent for a file source", err)
+		}
+	})
+}
+
+// #108/2: a write can see a half-open connection before the read loop does. The
+// write path used to return the error and leave the dead socket installed, so
+// isConnected() stayed true, the supervisor stayed asleep, and every later RPC
+// went to the same unusable connection until the 90s read deadline expired.
+//
+// The socket is installed WITHOUT a read loop on purpose: that isolates the
+// write path, so a pass cannot be the read loop's cleanup doing the work.
+func TestWriteFailureDropsSocketAndTriggersReconnect(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	conn, _, err := websocket.DefaultDialer.Dial(h.url(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.mu.Lock()
+	c.conn = conn
+	c.connEpoch++
+	c.mu.Unlock()
+
+	// Kill the transport under gorilla so the next write fails while nothing is
+	// reading — the half-open shape.
+	if err := conn.UnderlyingConn().Close(); err != nil {
+		t.Fatalf("underlying close: %v", err)
+	}
+
+	if _, err := c.ListRooms(); err == nil {
+		t.Fatal("ListRooms() error = nil, want write failure")
+	}
+	if c.isConnected() {
+		t.Fatal("yazma hatasından sonra soket hâlâ kurulu; süpervizör uyanmaz")
+	}
+	waitFor(t, "yazma hatasından sonra yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+}
+
+// #108/3: the raw socket used to become visible before identify/join/subscribe
+// replayed onto it, so an ordinary tool call racing the reconnect landed on an
+// unidentified connection and got a protocol rejection instead of its result.
+func TestOrdinarySendsWaitForSessionRestore(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		// Session-building traffic passes the gate: it is what opens it.
+		return cl.Identify("mcp", "alice", "r1", "")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if _, err := c.ListRooms(); err == nil || !strings.Contains(err.Error(), "geri yükleniyor") {
+		t.Fatalf("ListRooms() during restore = %v, want gated", err)
+	}
+
+	close(release)
+	waitFor(t, "oturum hazır", func() bool {
+		_, err := c.ListRooms()
+		return err == nil
+	})
+
+	// The gate must not have swallowed the bootstrap's own request.
+	if !slices.Contains(h.requestTypes(), "identify") {
+		t.Errorf("hub istekleri = %v, identify bekleniyordu", h.requestTypes())
 	}
 }

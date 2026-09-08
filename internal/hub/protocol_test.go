@@ -1194,3 +1194,104 @@ func TestWriteAllMessagesLineFormatsExistingCases(t *testing.T) {
 		})
 	}
 }
+
+// #108/4: the connection-bound observer flag was only ever set. A desktop that
+// revoked the authorization left the socket read-only for its whole life: the
+// roster said worker, send_message still bounced, and nothing short of a
+// reconnect could reconcile the two.
+func TestObserverToWorkerRejoinClearsConnectionState(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	join := func(role string) types.Response {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: "join-" + role, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": role}),
+		})
+		return readResponse(t, c, "join_room")
+	}
+
+	if resp := join("observer"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	if !c.isObserver {
+		t.Fatal("observer join sonrası bağlantı observer işaretlenmedi")
+	}
+
+	// Authorization revoked; the agent rejoins as an ordinary worker.
+	h.setConfiguredObservers("r1", nil)
+	if resp := join(""); !resp.Success {
+		t.Fatalf("worker rejoin başarısız: %s", resp.Error)
+	}
+	if c.isObserver {
+		t.Fatal("worker olarak yeniden join sonrası bağlantı hâlâ observer; send_message reddedilmeye devam eder")
+	}
+
+	h.handleSendMessage(c, types.Request{
+		ID: "msg-1", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "merhaba"}),
+	})
+	if resp := readResponse(t, c, "send_message"); !resp.Success {
+		t.Fatalf("send_message reddedildi: %s", resp.Error)
+	}
+}
+
+// #108/5: a promotion racing set_manager (which configures the new name and
+// clears the old lock as two steps) used to be told it had become manager while
+// the seat stayed with the old one — and the reset then cleared that seat,
+// leaving the room with a manager and no routing gateway.
+func TestJoinAsManagerRejectedWhileSeatHeldByLiveManager(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	// A worker already in the roster, on its own connection.
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
+
+	// set_manager's first step lands: the configuration names the worker, but
+	// the old lock has not been cleared yet.
+	h.setConfiguredManager("r1", "isci")
+
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	resp := readResponse(t, worker, "join_room")
+	if resp.Success {
+		t.Fatal("koltuk doluyken manager join başarı döndü; kilitsiz manager oluşur")
+	}
+	if !strings.Contains(resp.Error, "aktif manager") {
+		t.Errorf("hata = %q, want aktif manager teşhisi", resp.Error)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "yonetici" {
+		t.Errorf("manager kilidi = %q, want yonetici", got)
+	}
+
+	// Once the reset lands, the same join succeeds and actually takes the seat.
+	h.getOrCreateRoom("r1").ResetManagerLockIfDifferent("isci")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w3", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("kilit boşaldıktan sonra manager join başarısız: %s", resp.Error)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci", got)
+	}
+}

@@ -2,6 +2,7 @@ package hubclient
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -104,7 +105,13 @@ type HubClient struct {
 	resolveAddr func() (string, error)
 	// bootstrap establishes the session on the FIRST successful connection.
 	// Later reconnects replay what it recorded rather than running it again.
-	bootstrap func(*HubClient) error
+	bootstrap func(Bootstrap) error
+	// restoring gates ordinary traffic while a freshly dialled socket is being
+	// brought back to the session it left. Without it the raw socket became
+	// visible before identify/join/subscribe replayed, and a concurrent tool
+	// call raced onto an unidentified connection and got a protocol rejection
+	// instead of its result.
+	restoring bool
 	// bootstrapped records that it has actually run to completion. Gating on
 	// "is there any session state" instead was wrong: a join recorded before the
 	// first connect (the background-connect window) counted as state, so the
@@ -138,12 +145,20 @@ func New(hubAddr string, logger *log.Logger) *HubClient {
 	return c
 }
 
+// ErrInvalidHubPortConfig marks a discovery failure that cannot resolve itself.
+// AGENT_CHAT_HUB_PORT is fixed for the lifetime of the process and takes
+// priority over hub.port, so retrying a malformed value is an infinite loop by
+// construction: the MCP server would serve stdio while every tool call reports
+// "connecting to hub". A missing or momentarily empty hub.port is the opposite —
+// the desktop writes it moments later — and stays transient.
+var ErrInvalidHubPortConfig = errors.New("invalid hub port configuration")
+
 // DiscoverHubAddr reads the hub port from the data directory.
 func DiscoverHubAddr(dataDir string) (string, error) {
 	// Check env var override first
 	if port := os.Getenv("AGENT_CHAT_HUB_PORT"); port != "" {
 		if err := validateHubPort("AGENT_CHAT_HUB_PORT", port); err != nil {
-			return "", err
+			return "", fmt.Errorf("%w: %w", ErrInvalidHubPortConfig, err)
 		}
 		return fmt.Sprintf("ws://localhost:%s/ws", port), nil
 	}
@@ -184,6 +199,30 @@ func (c *HubClient) SetAddrResolver(fn func() (string, error)) {
 	c.mu.Unlock()
 }
 
+// Bootstrap is the restricted client view handed to the bootstrap callback.
+//
+// It exists so the callback can build the session while ordinary traffic is
+// still held back: its calls are part of bringing the connection up, so they
+// pass the reconnect gate that everything else waits behind. Taking the client
+// itself would have made that distinction impossible — there is no way to tell
+// a bootstrap's Identify from an unrelated caller's.
+type Bootstrap struct{ c *HubClient }
+
+// Identify identifies the connection being established.
+func (b Bootstrap) Identify(clientType, agentName, room, authToken string) error {
+	return b.c.identify(clientType, agentName, room, authToken, true)
+}
+
+// JoinRoom joins a room on the connection being established.
+func (b Bootstrap) JoinRoom(room, agentName, role string) (*types.Response, error) {
+	return b.c.joinRoom(room, agentName, role, true)
+}
+
+// Subscribe subscribes to room events on the connection being established.
+func (b Bootstrap) Subscribe(rooms []string) error {
+	return b.c.subscribe(rooms, true)
+}
+
 // SetBootstrap installs a callback run on the first successful connection, to
 // establish the session (identify, join, subscribe). It is NOT run again on
 // reconnect: by then the calls it made are recorded as session state and
@@ -191,7 +230,7 @@ func (c *HubClient) SetAddrResolver(fn func() (string, error)) {
 //
 // It exists because a background connect gives the caller no inline moment to
 // perform that setup.
-func (c *HubClient) SetBootstrap(fn func(*HubClient) error) {
+func (c *HubClient) SetBootstrap(fn func(Bootstrap) error) {
 	c.mu.Lock()
 	c.bootstrap = fn
 	c.mu.Unlock()
@@ -207,7 +246,7 @@ func (c *HubClient) runBootstrap() error {
 	if fn == nil || done {
 		return nil
 	}
-	if err := fn(c); err != nil {
+	if err := fn(Bootstrap{c: c}); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	c.mu.Lock()
@@ -346,7 +385,7 @@ func (c *HubClient) reconnectUntilLive() {
 
 		if err := c.Connect(); err != nil {
 			c.logger.Printf("Hub connect failed, retrying: %v", err)
-		} else if err := c.afterConnect(); err != nil {
+		} else if err := c.restoreOnto(); err != nil {
 			// The socket is up but the hub would not have us back. Drop it and
 			// try again rather than pretending we are joined.
 			c.logger.Printf("Hub session restore failed, retrying: %v", err)
@@ -384,6 +423,47 @@ func (c *HubClient) dropConn() {
 	}
 }
 
+// dropConnIf tears down conn, but only if it is still the socket the client
+// holds: a replacement dial may already have installed a newer one, and closing
+// that would kill a healthy connection over a dead socket's error.
+//
+// The read loop's teardown does the rest (fail pending, wake the supervisor)
+// once the close unblocks it; the extra signal here just means the supervisor
+// does not have to wait for that scheduling.
+func (c *HubClient) dropConnIf(conn *websocket.Conn) {
+	c.mu.Lock()
+	current := c.conn == conn
+	if current {
+		c.conn = nil
+	}
+	closed := c.closed
+	c.mu.Unlock()
+	if !current {
+		return
+	}
+	conn.Close()
+	if !closed {
+		c.notifyDisconnected()
+	}
+}
+
+// restoreOnto runs afterConnect with the gate armed, so the socket the dial just
+// installed carries nothing but session-building traffic until it is ready.
+//
+// Only the supervisor's path is gated. The desktop connects inline
+// (ConnectWithRetry then Identify on the same goroutine) and has no concurrent
+// traffic to hold back.
+func (c *HubClient) restoreOnto() error {
+	c.mu.Lock()
+	c.restoring = true
+	c.mu.Unlock()
+	err := c.afterConnect()
+	c.mu.Lock()
+	c.restoring = false
+	c.mu.Unlock()
+	return err
+}
+
 // afterConnect brings a freshly dialled socket up to the session the caller
 // expects, whichever path got here.
 //
@@ -409,7 +489,7 @@ func (c *HubClient) restoreSession() error {
 	c.mu.Unlock()
 
 	if s.identified {
-		if err := c.Identify(s.clientType, s.identAgent, s.identRoom, s.authToken); err != nil {
+		if err := c.identify(s.clientType, s.identAgent, s.identRoom, s.authToken, true); err != nil {
 			return fmt.Errorf("identify: %w", err)
 		}
 	}
@@ -418,7 +498,7 @@ func (c *HubClient) restoreSession() error {
 		// checking err alone would report the session restored while the agent
 		// sat outside the room — with no further transport failure to trigger
 		// another attempt.
-		resp, err := c.JoinRoom(s.joinRoom, s.joinAgent, s.joinRole)
+		resp, err := c.joinRoom(s.joinRoom, s.joinAgent, s.joinRole, true)
 		if err != nil {
 			return fmt.Errorf("join_room: %w", err)
 		}
@@ -427,7 +507,7 @@ func (c *HubClient) restoreSession() error {
 		}
 	}
 	if len(subs) > 0 {
-		if err := c.Subscribe(subs); err != nil {
+		if err := c.subscribe(subs, true); err != nil {
 			return fmt.Errorf("subscribe: %w", err)
 		}
 	}
@@ -518,7 +598,11 @@ func decodeSuccessData[T any](operation string, resp *types.Response) (T, error)
 }
 
 func (c *HubClient) sendExpectSuccess(operation string, req types.Request) error {
-	resp, err := c.Send(req)
+	return c.sendExpectSuccessGated(operation, req, false)
+}
+
+func (c *HubClient) sendExpectSuccessGated(operation string, req types.Request, bypassGate bool) error {
+	resp, err := c.send(req, bypassGate)
 	if err != nil {
 		return err
 	}
@@ -527,6 +611,15 @@ func (c *HubClient) sendExpectSuccess(operation string, req types.Request) error
 
 // Send sends a request and waits for a response (synchronous RPC).
 func (c *HubClient) Send(req types.Request) (*types.Response, error) {
+	return c.send(req, false)
+}
+
+// send is Send with the reconnect gate optionally bypassed. Only the calls that
+// BUILD the session (identify, join, subscribe — replay and bootstrap alike)
+// bypass it; everything else waits for the session to be ready, because a fresh
+// socket that has not identified or rejoined yet answers ordinary requests with
+// a protocol rejection rather than the result the caller expects.
+func (c *HubClient) send(req types.Request, bypassGate bool) (*types.Response, error) {
 	if req.ID == "" {
 		req.ID = uuid.New().String()
 	}
@@ -537,6 +630,12 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	if c.closed {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("hub client closed")
+	}
+	if c.restoring && !bypassGate {
+		c.mu.Unlock()
+		// Same shape as the not-connected answer: transient, and the supervisor
+		// is already working on it.
+		return nil, fmt.Errorf("hub oturumu geri yükleniyor (yeniden bağlanılıyor)")
 	}
 	// Tie the request to the socket it is about to be written on, so only that
 	// socket's death fails it.
@@ -567,6 +666,12 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	c.mu.Unlock()
 	if err != nil {
 		c.forgetPending(req.ID)
+		// A write can see a half-open connection before the read loop does (the
+		// read side only learns of it when the 90s deadline expires). Returning
+		// the error alone left the dead socket installed, so isConnected() stayed
+		// true, the supervisor stayed asleep, and every following RPC went to the
+		// same unusable connection until that deadline. Tear it down here.
+		c.dropConnIf(conn)
 		return nil, fmt.Errorf("hub write: %w", err)
 	}
 
@@ -670,13 +775,17 @@ func (c *HubClient) readLoop(conn *websocket.Conn, epoch uint64) {
 
 // Identify sends an identify request.
 func (c *HubClient) Identify(clientType, agentName, room, authToken string) error {
+	return c.identify(clientType, agentName, room, authToken, false)
+}
+
+func (c *HubClient) identify(clientType, agentName, room, authToken string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string]string{
 		"client_type": clientType,
 		"agent_name":  agentName,
 		"room":        room,
 		"auth_token":  authToken,
 	})
-	if err := c.sendExpectSuccess("identify", types.Request{Type: "identify", Data: data}); err != nil {
+	if err := c.sendExpectSuccessGated("identify", types.Request{Type: "identify", Data: data}, bypassGate); err != nil {
 		return err
 	}
 	c.rememberIdentify(clientType, agentName, room, authToken)
@@ -698,8 +807,12 @@ func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken stri
 
 // Subscribe subscribes to room events.
 func (c *HubClient) Subscribe(rooms []string) error {
+	return c.subscribe(rooms, false)
+}
+
+func (c *HubClient) subscribe(rooms []string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string][]string{"rooms": rooms})
-	resp, err := c.Send(types.Request{Type: "subscribe", Data: data})
+	resp, err := c.send(types.Request{Type: "subscribe", Data: data}, bypassGate)
 
 	// Same rule as JoinRoom: a request the hub never saw is worth replaying, a
 	// request it rejected is not. Without this, a Subscribe issued while the
@@ -744,6 +857,10 @@ func (c *HubClient) DeleteRoom(room string) error {
 
 // JoinRoom joins a room.
 func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, error) {
+	return c.joinRoom(room, agentName, role, false)
+}
+
+func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*types.Response, error) {
 	data, _ := json.Marshal(map[string]string{
 		"agent_name": agentName,
 		"role":       role,
@@ -752,7 +869,7 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 	startGen := c.sess.gen
 	c.mu.Unlock()
 
-	resp, err := c.Send(types.Request{Type: "join_room", Room: room, Data: data})
+	resp, err := c.send(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
 
 	succeeded := err == nil && resp != nil && resp.Success
 	// Three outcomes, three rules:

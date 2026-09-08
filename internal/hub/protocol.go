@@ -310,9 +310,13 @@ func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
 	// Bind the observer role to the connection (#17): a gated observer join makes
 	// this connection permanently read-only, independent of later allow-list/roster
 	// changes.
-	if role == roleObserver {
-		c.isObserver = true
-	}
+	// Authoritative in BOTH directions, like the roster role Takeover writes.
+	// Only ever setting it left a revoked observer read-only for the life of the
+	// socket: the roster said worker, the connection still refused send_message,
+	// and nothing but a reconnect could reconcile them. The observer role is a
+	// restriction, not a privilege — dropping it grants nothing that the
+	// desktop-gated join did not already allow.
+	c.isObserver = role == roleObserver
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
@@ -396,7 +400,21 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	//
 	// Barred when ANOTHER live socket answers to the name — a genuine clash.
 	if !h.isAgentHeldByOther(c, room, data.AgentName) {
-		if agents, ok := roomState.Takeover(data.AgentName, role, heldByOther, claim); ok {
+		agents, ok, err := roomState.Takeover(data.AgentName, role, heldByOther, claim)
+		if err != nil {
+			// The reclaim itself is legitimate; the role it asked for is not
+			// available. Say so instead of falling through to the fresh-join
+			// path, which would answer with a misleading "name already in use".
+			h.events.Log(eventlog.EventError,
+				eventlog.String(eventlog.AttrConversationID, room),
+				eventlog.String(eventlog.AttrAgentName, data.AgentName),
+				eventlog.String(eventlog.AttrMCPMethod, req.Type),
+				eventlog.String(eventlog.AttrErrorType, "join_rejected"),
+			)
+			c.sendError(req.ID, req.Type, err.Error())
+			return
+		}
+		if ok {
 			h.bindClientToRoom(c, room, data.AgentName, role)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),

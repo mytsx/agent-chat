@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -114,6 +115,16 @@ func runMCP() {
 	// which the desktop rewrites each time the hub restarts on a fresh
 	// OS-assigned port.
 	hubAddr, err := hubclient.DiscoverHubAddr(dataDir)
+	if errors.Is(err, hubclient.ErrInvalidHubPortConfig) {
+		// The one discovery failure that is NOT transient. AGENT_CHAT_HUB_PORT
+		// cannot change while we run and outranks hub.port, so waiting in the
+		// background would retry the same bad value forever while every tool
+		// call answered "connecting to hub". Fail loudly instead: a
+		// misconfiguration the operator can see is better than a server that
+		// looks alive and never works.
+		fmt.Fprintf(os.Stderr, "Invalid hub port configuration: %v\n", err)
+		os.Exit(1)
+	}
 	if err != nil {
 		// NOT fatal, and deliberately so. Exiting here is why the log holds
 		// 12.765 "hub.port not found" lines: every MCP process that started
@@ -132,7 +143,7 @@ func runMCP() {
 	// sees an anonymous socket: connection telemetry cannot tell MCP from
 	// desktop, and the connect event never fires for the CLI agents at all.
 	// Registered as session state so every reconnect replays it.
-	client.SetBootstrap(func(c *hubclient.HubClient) error {
+	client.SetBootstrap(func(c hubclient.Bootstrap) error {
 		if err := c.Identify("mcp", "", defaultRoom, ""); err != nil {
 			// Returned, not swallowed: an unidentified client is invisible in
 			// connection telemetry, so the supervisor should retry on the next

@@ -211,15 +211,32 @@ func (r *RoomState) JoinWithClaim(agentName, role string, claim func()) (types.M
 // and checking only for the entry's existence would let both succeed — two live
 // clients under one identity. It must exclude the requesting connection, so a
 // socket repeating a join it already owns still reclaims its own entry.
-func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, claim func()) (map[string]types.Agent, bool) {
+func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, claim func()) (map[string]types.Agent, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.agents[agentName]; !exists {
-		return nil, false
+		return nil, false, nil
 	}
 	if heldByOther != nil && heldByOther() {
-		return nil, false
+		return nil, false, nil
 	}
+
+	// The manager seat is decided BEFORE anything is written. Taking the seat
+	// only when it happens to be free, but reporting success either way, left a
+	// "manager" whose routing gateway nobody held: set_manager configures the
+	// new name and clears the old lock as two steps, and a promotion landing
+	// between them saw the old manager still seated. The role was written
+	// authoritatively, the lock silently was not, and the reset then wiped the
+	// old lock — leaving the room with a connected manager and no gateway.
+	// Rejecting is the honest answer; the client retries and succeeds once the
+	// seat is actually free.
+	wantsManager := strings.EqualFold(strings.TrimSpace(role), "manager")
+	if wantsManager {
+		if active := r.getActiveManagerLocked(); active != "" && !sameAgentName(active, agentName) {
+			return nil, false, fmt.Errorf("bu odada aktif manager var: %s", active)
+		}
+	}
+
 	r.touchAgentLastSeenLocked(agentName)
 
 	// The requested role is authoritative — join_room with role X means "I am X"
@@ -232,13 +249,10 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	r.agents[agentName] = agent
 	r.dirty = true
 
-	if strings.EqualFold(strings.TrimSpace(role), "manager") {
-		// Only when the seat is free or already ours: a live manager under a
-		// different name must not be displaced by a reconnect.
-		if active := r.getActiveManagerLocked(); active == "" || sameAgentName(active, agentName) {
-			r.managerAgent = agentName
-			r.managerLastSeen = types.Now()
-		}
+	if wantsManager {
+		// Free or already ours — the occupied case returned above.
+		r.managerAgent = agentName
+		r.managerLastSeen = types.Now()
 	} else if sameAgentName(r.managerAgent, agentName) {
 		// Downgrade: give up the lock rather than keep routing through an agent
 		// that no longer claims the role.
@@ -249,7 +263,7 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	if claim != nil {
 		claim()
 	}
-	return r.copyAgentsLocked(), true
+	return r.copyAgentsLocked(), true, nil
 }
 
 // LeaveIfDisconnected removes an agent only if it still has no live connection,

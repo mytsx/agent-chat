@@ -1043,14 +1043,24 @@ func TestManagerTakeoverDoesNotDisplaceLiveManager(t *testing.T) {
 	// and reconnects claiming the manager role.
 	roomState := h.getOrCreateRoom("r1")
 	roomState.mu.Lock()
-	roomState.agents["sahte"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	roomState.agents["sahte"] = types.Agent{Role: "worker", LastSeen: types.Now()}
 	roomState.mu.Unlock()
 
-	if _, ok := roomState.Takeover("sahte", "manager", nil, nil); !ok {
-		t.Fatal("kurulum hatası: devralma gerçekleşmedi")
+	// Rejected outright: reporting success while quietly failing to take the
+	// seat is what left the room with a manager and no routing gateway (#108).
+	agents, ok, err := roomState.Takeover("sahte", "manager", nil, nil)
+	if err == nil || ok || agents != nil {
+		t.Fatalf("Takeover() = (%v, %v, %v), want rejection while another manager is live", agents, ok, err)
 	}
 	if got := roomState.GetActiveManager(); got != "yonetici" {
 		t.Errorf("manager kilidi = %q, want yonetici (canlı manager devrilmemeli)", got)
+	}
+	// The rejected role must not have been written either.
+	roomState.mu.Lock()
+	gotRole := roomState.agents["sahte"].Role
+	roomState.mu.Unlock()
+	if gotRole != "worker" {
+		t.Errorf("roster rolü = %q, want worker (reddedilen rol yazılmamalı)", gotRole)
 	}
 }
 
