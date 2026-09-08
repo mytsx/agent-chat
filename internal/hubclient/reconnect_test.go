@@ -3,6 +3,7 @@ package hubclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -36,6 +37,9 @@ type fakeHub struct {
 	// rejectJoin makes the hub refuse join_room at the protocol level (success
 	// false, no transport error) — the shape a manager authorization failure has.
 	rejectJoin bool
+	// rejectLeave does the same for leave_room — the shape an identity mismatch
+	// has, where the agent stays in the room.
+	rejectLeave bool
 	// dropOn severs the connection as soon as a request of this type arrives,
 	// WITHOUT answering — the "hub applied it but the response was lost" shape.
 	dropOn string
@@ -76,7 +80,7 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 
 		h.mu.Lock()
-		reject := h.rejectJoin && req.Type == "join_room"
+		reject := (h.rejectJoin && req.Type == "join_room") || (h.rejectLeave && req.Type == "leave_room")
 		drop := h.dropOn != "" && req.Type == h.dropOn
 		hook := h.onRequest
 		h.mu.Unlock()
@@ -90,7 +94,7 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 
 		resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: json.RawMessage(`{"ok":true}`)}
 		if reject {
-			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "manager rolü atanmadı"}
+			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "istek reddedildi"}
 		}
 		payload, _ := json.Marshal(resp)
 		if conn.WriteMessage(websocket.TextMessage, payload) != nil {
@@ -1045,5 +1049,120 @@ func TestRestoreThatNeverSettlesFailsInsteadOfReportingSuccess(t *testing.T) {
 	}
 	if c.isRestoring() {
 		t.Error("başarısız restore sonrası kapı açık kaldı")
+	}
+}
+
+// Codex review round 3, PR #113: a caller's newer join must cancel a departure
+// that never reached the hub. Flushing it after the join would take the agent
+// straight back out while sess.joined still said it was in.
+func TestNewerJoinCancelsQueuedLeave(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, true)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave != nil {
+		t.Error("yeni join kuyruktaki leave'i iptal etmedi; replay sonrası agent odadan çıkarılırdı")
+	}
+}
+
+// The mirror of it: a REPLAY is putting back a membership that predates the
+// leave, which is exactly what the queued departure exists to undo.
+func TestReplayedJoinDoesNotCancelQueuedLeave(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave == nil {
+		t.Error("replay kuyruktaki leave'i iptal etti; agent odada kalırdı")
+	}
+}
+
+// Codex review round 3, PR #113: the stale-replay guard must key on membership,
+// not on every session revision. An unrelated Subscribe completing concurrently
+// would otherwise discard a good join result, leaving the socket in the room
+// with nothing recorded to replay.
+func TestConcurrentSubscribeDoesNotDiscardJoinResult(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	// Something unrelated advances the session while the join is in flight.
+	c.rememberSubscriptions([]string{"other"}, true)
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, true)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.sess.joined || c.sess.joinRoom != "r1" {
+		t.Errorf("join kaydı = (joined:%v room:%q), want kaydedilmiş r1", c.sess.joined, c.sess.joinRoom)
+	}
+}
+
+// Codex review round 3, PR #113: a compensating leave the hub REFUSES leaves
+// the agent in the room. Clearing the queue there would end restoration out of
+// step with the hub, with nothing left to repair it.
+func TestRefusedCompensatingLeaveStaysQueued(t *testing.T) {
+	h := newFakeHub(t)
+	h.mu.Lock()
+	h.rejectLeave = true
+	h.mu.Unlock()
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	c.mu.Unlock()
+
+	if err := c.flushPendingLeave(); err == nil {
+		t.Fatal("flushPendingLeave() = nil, want refusal")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave == nil {
+		t.Error("reddedilen telafi leave kuyruktan düştü")
+	}
+}
+
+// Codex review round 3, PR #113: on a FAILED restore the gate must stay armed
+// until the caller has dropped the socket. Clearing it as restoreOnto returns
+// exposes a half-restored connection to ordinary traffic for as long as the
+// caller takes to disown it.
+func TestGateStaysArmedWhenRestoreFails(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	c.SetBootstrap(func(cl Bootstrap) error { return fmt.Errorf("kasıtlı hata") })
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// The supervisor arms the gate before dialling; mirror that here.
+	c.setRestoring(true)
+	if err := c.restoreOnto(); err == nil {
+		t.Fatal("restoreOnto() = nil, want failure")
+	}
+	if !c.isRestoring() {
+		t.Error("başarısız restore kapıyı açtı; soket düşürülene kadar kapalı kalmalı")
+	}
+	if _, err := c.ListRooms(); !errors.Is(err, errRestoreGate) {
+		t.Errorf("ListRooms() = %v, want gated", err)
 	}
 }

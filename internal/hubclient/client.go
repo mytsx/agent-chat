@@ -72,6 +72,11 @@ type session struct {
 	joinRole  string
 	// pendingLeave is a departure the gate refused; restoration performs it.
 	pendingLeave *pendingLeave
+	// joinRev counts membership changes only (join intent recorded, leave). The
+	// stale-replay guard compares this rather than rev: an unrelated Subscribe
+	// completing concurrently would otherwise discard a perfectly good join
+	// result, leaving the socket in the room with nothing recorded to replay.
+	joinRev uint64
 	// rev counts every recorded change to this session. A replay compares it
 	// across its own pass to notice intent that landed while it ran — which is
 	// reachable precisely because the gate turns those calls away AFTER they
@@ -418,9 +423,12 @@ func (c *HubClient) reconnectUntilLive() {
 			c.logger.Printf("Hub connect failed, retrying: %v", err)
 		} else if err := c.restoreOnto(); err != nil {
 			// The socket is up but the hub would not have us back. Drop it and
-			// try again rather than pretending we are joined.
+			// try again rather than pretending we are joined. The gate is still
+			// armed here on purpose — it comes down only once the half-restored
+			// socket is gone.
 			c.logger.Printf("Hub session restore failed, retrying: %v", err)
 			c.dropConn()
+			c.setRestoring(false)
 		} else if c.isConnected() {
 			c.logger.Printf("Hub connection restored")
 			return
@@ -506,8 +514,11 @@ func (c *HubClient) setRestoring(v bool) {
 // Only the supervisor's path is gated. The desktop connects inline
 // (ConnectWithRetry then Identify on the same goroutine) and has no concurrent
 // traffic to hold back.
+// The gate is cleared only on SUCCESS. On failure it stays armed and the caller
+// clears it after dropping the socket: the connection is half-restored at that
+// moment, so an ordinary request slipping in between would reach the hub on a
+// session that was never established.
 func (c *HubClient) restoreOnto() error {
-	defer c.setRestoring(false)
 	for attempt := 0; attempt < maxRestorePasses; attempt++ {
 		c.mu.Lock()
 		before := c.sess.rev
@@ -521,6 +532,7 @@ func (c *HubClient) restoreOnto() error {
 		unchanged := c.sess.rev == before
 		c.mu.Unlock()
 		if unchanged {
+			c.setRestoring(false)
 			return nil
 		}
 	}
@@ -566,9 +578,14 @@ func (c *HubClient) flushPendingLeave() error {
 		// Transport failure: keep it queued for the next connection.
 		return err
 	}
-	// Applied, or refused because the agent is not there — either way the room
-	// no longer holds it, so the queue is clear.
-	_ = resp
+	// A protocol refusal (a name that does not match the connection's identity,
+	// say) means the agent may still be in the room. Keep it queued and fail the
+	// restore rather than reporting a session that is out of step with the hub.
+	// An agent the hub no longer holds answers with success, so this branch does
+	// not fire for the already-absent case.
+	if resp != nil && !resp.Success {
+		return fmt.Errorf("kuyruktaki leave_room reddedildi: %s", resp.Error)
+	}
 	c.mu.Lock()
 	if c.sess.pendingLeave == p {
 		c.sess.pendingLeave = nil
@@ -976,7 +993,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 		"role":       role,
 	})
 	c.mu.Lock()
-	startGen, startRev := c.sess.gen, c.sess.rev
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
 	c.mu.Unlock()
 
 	resp, err := c.send(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
@@ -990,7 +1007,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 	//                        way on every reconnect, forever
 	unreached := err != nil
 
-	c.recordJoinIfCurrent(startGen, startRev, room, agentName, role, succeeded, !bypassGate, unreached)
+	c.recordJoinIfCurrent(startGen, startJoinRev, room, agentName, role, succeeded, !bypassGate, unreached)
 	return resp, err
 }
 
@@ -1001,7 +1018,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 // silently rejoin the agent on the next reconnect, undoing a departure the
 // caller asked for. This is reachable through the supervisor's replay, which
 // runs concurrently with user calls.
-func (c *HubClient) recordJoinIfCurrent(startGen, startRev uint64, room, agentName, role string, succeeded, external bool, unreached ...bool) {
+func (c *HubClient) recordJoinIfCurrent(startGen, startJoinRev uint64, room, agentName, role string, succeeded, external bool, unreached ...bool) {
 	transportFailed := len(unreached) > 0 && unreached[0]
 
 	c.mu.Lock()
@@ -1013,7 +1030,7 @@ func (c *HubClient) recordJoinIfCurrent(startGen, startRev uint64, room, agentNa
 	// of an unestablished join for room A can land after the caller corrected
 	// itself to room B (recorded behind the gate); writing A back would make the
 	// next pass replay A and lose B for good.
-	if c.sess.rev != startRev {
+	if c.sess.joinRev != startJoinRev {
 		return
 	}
 	// A failed join is kept only when nothing is established yet: with a
@@ -1028,8 +1045,17 @@ func (c *HubClient) recordJoinIfCurrent(startGen, startRev uint64, room, agentNa
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
+		c.sess.joinRev++
 		if external {
 			c.sess.rev++
+		}
+		// A newer join from the CALLER supersedes a departure that never reached
+		// the hub; flushing it afterwards would take the agent straight back out
+		// while sess.joined still said otherwise. A replay must not cancel it:
+		// the replay is putting back a membership that predates the leave, which
+		// is exactly what the queued departure exists to undo.
+		if p := c.sess.pendingLeave; external && p != nil && p.room == room && p.agent == agentName {
+			c.sess.pendingLeave = nil
 		}
 	}
 }
@@ -1110,6 +1136,7 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	// Advance regardless: a join racing this leave must lose even if the intent
 	// was not set when we looked.
 	c.sess.gen++
+	c.sess.joinRev++
 	c.mu.Unlock()
 
 	resp, err := c.send(types.Request{Type: "leave_room", Room: room, Data: data}, false)

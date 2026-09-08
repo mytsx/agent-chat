@@ -1295,10 +1295,10 @@ func TestJoinAsManagerRejectedWhileSeatHeldByLiveManager(t *testing.T) {
 	}
 }
 
-// The remembered claim must not outlive its owner or its configuration: a
-// handoff to somebody else, or to an agent that is no longer connected, grants
-// nothing.
-func TestPendingManagerClaimIsNotGrantedToTheWrongAgent(t *testing.T) {
+// The seat follows the CONFIGURATION, so a handoff to somebody else must not
+// seat the agent that was refused a moment earlier — not on the handoff, and
+// not on its next join either.
+func TestHandoffToAnotherAgentDoesNotSeatTheRefusedOne(t *testing.T) {
 	h, mgr, _ := newEventHub(t)
 	h.setConfiguredManager("r1", "yonetici")
 	h.handleJoinRoom(mgr, types.Request{
@@ -1336,10 +1336,17 @@ func TestPendingManagerClaimIsNotGrantedToTheWrongAgent(t *testing.T) {
 		t.Error("iddia sahibi olmayan devirde rol manager yapıldı")
 	}
 
-	// And the voided claim must not resurface on a later handoff to its owner.
-	room.HandoffManager("isci")
+	// Nor may its next join quietly take the seat: the configuration names
+	// somebody else now.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w3", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
 	if got := room.GetActiveManager(); got != "" {
-		t.Errorf("iptal edilmiş iddia sonradan verildi: manager kilidi = %q", got)
+		t.Errorf("yapılandırılmamış agent koltuğu aldı: manager kilidi = %q", got)
 	}
 }
 
@@ -1490,5 +1497,78 @@ func TestReplayedWorkerRoleDoesNotUndoConfiguredManagerPromotion(t *testing.T) {
 	readResponse(t, worker, "join_room")
 	if got := room.GetAgents()["isci"].Role; got != "" {
 		t.Errorf("gerçek düşürme sonrası rol = %q, want boş", got)
+	}
+}
+
+// Codex review round 3, PR #113: after a hub restart the roster role is
+// restored but neither lock field is, and an MCP supervisor can replay its
+// worker role before the desktop gets to set_manager. The replay overwrites the
+// persisted manager role, and the configuration that arrives afterwards must
+// still install a gateway.
+func TestManagerGatewayRecoversAfterHubRestartOrdering(t *testing.T) {
+	h, worker, _ := newEventHub(t)
+
+	// Post-restart shape: the roster remembers the role, the locks are empty and
+	// the desktop has not re-configured the room yet.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.agents["isci"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	room.mu.Unlock()
+
+	// The agent reconnects first, replaying the lesser role its client recorded.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma join'i başarısız: %s", resp.Error)
+	}
+
+	// Only now does the desktop re-configure the room.
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci")
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (restart sonrası gateway kurtarılmalı)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+
+	// And a later reconnect replaying "worker" must not undo it.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("sonraki replay gateway'i bozdu: manager kilidi = %q", got)
+	}
+}
+
+// A configured manager whose seat is free takes it even when its client replays
+// the lesser role — after a restart there is no lock to preserve, so without
+// this the room comes back with a configured manager and no gateway.
+func TestConfiguredManagerReclaimsFreeSeatOnLesserReplay(t *testing.T) {
+	h, worker, _ := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("isci") // desktop configured it; nobody is seated
+
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+	// The fresh-join path seats nobody implicitly; the reconnect takeover does.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (boş koltuk yapılandırılmış manager'a ait)", got)
 	}
 }

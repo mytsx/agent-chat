@@ -128,14 +128,16 @@ next disconnect.
 `Takeover` **rejects** a manager role whose seat is held by a different live
 manager instead of writing the role and silently skipping the lock — that is how
 a room ended up with a connected manager and no routing gateway. The refused
-claim is remembered (`pendingManager`, on BOTH the takeover and the fresh-join
-path) and `set_manager`'s `HandoffManager` grants it in one locked step once the
-old lock clears, resolving the roster key case-insensitively like the rest of the
-manager path: nothing client-side retries a protocol rejection, so without that
-the room stays gateway-less. A promoted agent's client still has the lesser role
-recorded, so `Takeover` does **not** downgrade an agent the desktop still names
-as manager (`RoomState.configuredManager`) — otherwise every reconnect would take
-the gateway away again. The
+**configuration is the claim**: `set_manager`'s `HandoffManager` seats whoever
+the desktop names, if that agent is in the room and connected, in one locked step
+that also clears the stale lock (roster key resolved case-insensitively, like the
+rest of the manager path). Waiting for a refused join to leave a claim behind
+cannot work — the client treats a protocol rejection as final, an agent not yet
+in the roster leaves nothing to act on, and after a hub restart neither lock
+field is persisted, so a replayed worker role lands before the desktop
+re-configures the room. For the same reason `Takeover` neither downgrades an
+agent the desktop still names as manager (`RoomState.configuredManager`) nor
+leaves a free seat unclaimed by one. The
 connection-bound observer flag is likewise authoritative in both directions, so a
 revoked observer is not stuck read-only for the life of its socket.
 
