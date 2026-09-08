@@ -40,7 +40,7 @@ Wails v2 desktop app (Go backend + React frontend) that orchestrates multiple AI
 
 1. **Desktop App** (`main.go` / `app.go`): Wails application — UI, PTY terminals, hub lifecycle, orchestrator
 2. **Hub Server** (`internal/hub/`): WebSocket server for in-memory room state, spawned as child process (`mcp-server-bin --hub`)
-3. **MCP Server** (`cmd/mcp-server/main.go`): Tri-mode Go binary embedded via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin`. Flag `--hub` → WebSocket server; `--analyze` → print event-log reports and exit; no flag → stdio MCP server + WebSocket client connecting to hub.
+3. **MCP Server** (`cmd/mcp-server/main.go`, `mark3labs/mcp-go` **v1.0.0**): Tri-mode Go binary embedded via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin`. Flag `--hub` → WebSocket server; `--analyze` → print event-log reports and exit; no flag → stdio MCP server + WebSocket client connecting to hub.
 
 ### Communication Flow
 
