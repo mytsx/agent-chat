@@ -222,6 +222,16 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	}
 	r.touchAgentLastSeenLocked(agentName)
 
+	// The requested role is authoritative — join_room with role X means "I am X"
+	// — so BOTH directions are applied, and the roster entry and the manager
+	// lock move together. Handling only the upgrade left a downgraded agent
+	// still holding the lock, with the room routing through it while the client
+	// had already recorded the lesser role for its next replay.
+	agent := r.agents[agentName]
+	agent.Role = role
+	r.agents[agentName] = agent
+	r.dirty = true
+
 	if strings.EqualFold(strings.TrimSpace(role), "manager") {
 		// Only when the seat is free or already ours: a live manager under a
 		// different name must not be displaced by a reconnect.
@@ -229,6 +239,11 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 			r.managerAgent = agentName
 			r.managerLastSeen = types.Now()
 		}
+	} else if sameAgentName(r.managerAgent, agentName) {
+		// Downgrade: give up the lock rather than keep routing through an agent
+		// that no longer claims the role.
+		r.managerAgent = ""
+		r.managerLastSeen = 0
 	}
 
 	if claim != nil {

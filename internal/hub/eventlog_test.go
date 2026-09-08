@@ -1286,3 +1286,39 @@ func TestReleaseAndGraceArePresentedAtomically(t *testing.T) {
 		t.Error("bırakma ile pencere kurulumu arasındaki boşlukta agent silindi")
 	}
 }
+
+// Codex review round 7, PR #107: the role follow-up was only half done. A
+// downgrade left managerAgent set — the room kept routing through an agent that
+// had already told the hub it was no longer the manager, and the client had
+// recorded the lesser role for its next replay.
+func TestTakeoverAppliesRoleDowngrade(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+	roomState := h.getOrCreateRoom("r1")
+	if got := roomState.GetActiveManager(); got != "alice" {
+		t.Fatalf("kurulum hatası: manager = %q", got)
+	}
+
+	// Same socket rejoins as a plain worker.
+	h.handleJoinRoom(c, types.Request{
+		ID: "downgrade", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("rol düşürme reddedildi: %s", resp.Error)
+	}
+
+	if got := roomState.GetActiveManager(); got != "" {
+		t.Errorf("manager kilidi = %q, want boş — düşürülen agent üzerinden routing sürüyor", got)
+	}
+	if got := roomState.GetAgents()["alice"].Role; got != "" {
+		t.Errorf("roster rolü = %q, want boş — roster ile kilit birlikte hareket etmeli", got)
+	}
+}
