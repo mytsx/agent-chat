@@ -108,11 +108,19 @@ while [ "$i" -lt "$TRIES" ]; do
   # alone would accept a comment from the previous round (created inside the
   # lookback) or from a newer push whose review id is not in the set, and the
   # wake-up would present findings for the wrong revision.
+  #
+  # original_commit_id, NOT commit_id. Measured on this very PR: GitHub
+  # re-anchors an inline comment's commit_id to the current head, so four
+  # comments written against 2c56a13 all reported commit_id 33ad355 once that
+  # was pushed — matching on it would accept exactly the stale round this filter
+  # exists to exclude. original_commit_id keeps the commit the comment was
+  # actually written against. (Review-level commit_id is NOT re-anchored, so the
+  # review query above is fine.)
   INLINE=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[]' 2>/dev/null \
     | jq -s --argjson ids "$REVIEW_IDS" --arg login "$INLINE_LOGIN" --arg since "$T" --arg sha "$SHA" \
       '[.[] | select((.pull_request_review_id as $r | $ids | index($r))
                      or (.user.login == $login and .created_at > $since
-                         and ((.commit_id == $sha) or (.original_commit_id == $sha))))]
+                         and .original_commit_id == $sha))]
        | unique_by(.id) | map({path, line: (.line // .original_line), body})')
 
   echo "PR #$n ($REPO) — $BOT review'u geldi (push: $SHA, pencere: $T sonrası):"
