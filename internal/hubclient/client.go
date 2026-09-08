@@ -70,6 +70,8 @@ type session struct {
 	joinRoom  string
 	joinAgent string
 	joinRole  string
+	// pendingLeave is a departure the gate refused; restoration performs it.
+	pendingLeave *pendingLeave
 	// rev counts every recorded change to this session. A replay compares it
 	// across its own pass to notice intent that landed while it ran — which is
 	// reachable precisely because the gate turns those calls away AFTER they
@@ -153,6 +155,17 @@ func New(hubAddr string, logger *log.Logger) *HubClient {
 	// costs nothing.
 	go c.runSupervisor()
 	return c
+}
+
+// errRestoreGate is returned to an ordinary caller whose request was held back
+// while a reconnect replayed the session. It means the request was NOT written.
+var errRestoreGate = errors.New("hub oturumu geri yükleniyor")
+
+// pendingLeave is a leave_room the gate refused, to be performed once the
+// session is up again.
+type pendingLeave struct {
+	room  string
+	agent string
 }
 
 // ErrInvalidHubPortConfig marks a discovery failure that cannot resolve itself.
@@ -511,7 +524,11 @@ func (c *HubClient) restoreOnto() error {
 			return nil
 		}
 	}
-	return nil
+	// Still moving after the last pass: something recorded is not on the wire.
+	// Reporting success here would stop the supervisor with the gate open and no
+	// reconnect scheduled, so the unreplayed join or subscription would wait for
+	// a disconnect that may never come. Failing drops the socket and redials.
+	return fmt.Errorf("oturum %d turda kararlı hâle gelmedi", maxRestorePasses)
 }
 
 // afterConnect brings a freshly dialled socket up to the session the caller
@@ -526,7 +543,38 @@ func (c *HubClient) afterConnect() error {
 	}
 	// Independent of restoreSession: a client can have a recorded join (made
 	// before any connection existed) and still never have identified.
-	return c.runBootstrap()
+	if err := c.runBootstrap(); err != nil {
+		return err
+	}
+	return c.flushPendingLeave()
+}
+
+// flushPendingLeave performs a departure the gate refused, after the session is
+// back up — the replay may have rejoined the agent the caller had just taken
+// out, and only an actual leave_room reconciles that.
+func (c *HubClient) flushPendingLeave() error {
+	c.mu.Lock()
+	p := c.sess.pendingLeave
+	c.mu.Unlock()
+	if p == nil {
+		return nil
+	}
+
+	data, _ := json.Marshal(map[string]string{"agent_name": p.agent})
+	resp, err := c.send(types.Request{Type: "leave_room", Room: p.room, Data: data}, true)
+	if err != nil {
+		// Transport failure: keep it queued for the next connection.
+		return err
+	}
+	// Applied, or refused because the agent is not there — either way the room
+	// no longer holds it, so the queue is clear.
+	_ = resp
+	c.mu.Lock()
+	if c.sess.pendingLeave == p {
+		c.sess.pendingLeave = nil
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 // restoreSession replays identity, membership and subscriptions onto a fresh
@@ -684,8 +732,10 @@ func (c *HubClient) send(req types.Request, bypassGate bool) (*types.Response, e
 	if c.restoring && !bypassGate {
 		c.mu.Unlock()
 		// Same shape as the not-connected answer: transient, and the supervisor
-		// is already working on it.
-		return nil, fmt.Errorf("hub oturumu geri yükleniyor (yeniden bağlanılıyor)")
+		// is already working on it. Typed, because a caller that must reconcile
+		// afterwards (LeaveRoom) has to tell "never written" from an ambiguous
+		// transport failure.
+		return nil, fmt.Errorf("%w (yeniden bağlanılıyor)", errRestoreGate)
 	}
 	// Tie the request to the socket it is about to be written on, so only that
 	// socket's death fails it.
@@ -926,7 +976,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 		"role":       role,
 	})
 	c.mu.Lock()
-	startGen := c.sess.gen
+	startGen, startRev := c.sess.gen, c.sess.rev
 	c.mu.Unlock()
 
 	resp, err := c.send(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
@@ -940,7 +990,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 	//                        way on every reconnect, forever
 	unreached := err != nil
 
-	c.recordJoinIfCurrent(startGen, room, agentName, role, succeeded, !bypassGate, unreached)
+	c.recordJoinIfCurrent(startGen, startRev, room, agentName, role, succeeded, !bypassGate, unreached)
 	return resp, err
 }
 
@@ -951,12 +1001,19 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 // silently rejoin the agent on the next reconnect, undoing a departure the
 // caller asked for. This is reachable through the supervisor's replay, which
 // runs concurrently with user calls.
-func (c *HubClient) recordJoinIfCurrent(startGen uint64, room, agentName, role string, succeeded, external bool, unreached ...bool) {
+func (c *HubClient) recordJoinIfCurrent(startGen, startRev uint64, room, agentName, role string, succeeded, external bool, unreached ...bool) {
 	transportFailed := len(unreached) > 0 && unreached[0]
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sess.gen != startGen {
+		return
+	}
+	// Nor may it overwrite an intent recorded while it was in flight. A replay
+	// of an unestablished join for room A can land after the caller corrected
+	// itself to room B (recorded behind the gate); writing A back would make the
+	// next pass replay A and lose B for good.
+	if c.sess.rev != startRev {
 		return
 	}
 	// A failed join is kept only when nothing is established yet: with a
@@ -1055,7 +1112,18 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 	c.sess.gen++
 	c.mu.Unlock()
 
-	resp, err := c.Send(types.Request{Type: "leave_room", Room: room, Data: data})
+	resp, err := c.send(types.Request{Type: "leave_room", Room: room, Data: data}, false)
+
+	// A leave the GATE turned away never reached the hub, and the replay running
+	// at that moment may already have put the agent back in the room. The intent
+	// is cleared, so nothing would rejoin — but nothing would take the agent out
+	// either. Queue it: restoration performs it once the session is up.
+	if errors.Is(err, errRestoreGate) {
+		c.mu.Lock()
+		c.sess.pendingLeave = &pendingLeave{room: room, agent: agentName}
+		c.sess.rev++
+		c.mu.Unlock()
+	}
 
 	// Only an explicit protocol rejection means the agent is still in the room,
 	// so only then is the intent put back. A transport error leaves it cleared:

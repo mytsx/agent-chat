@@ -75,6 +75,11 @@ type RoomState struct {
 	// returns an error the client treats as a protocol rejection, so nothing on
 	// the client side ever retries it.
 	pendingManager string
+	// configuredManager is who the desktop last named as this room's manager.
+	// The hub keeps the same value, but the room needs its own copy to decide,
+	// under this lock, whether a lesser role arriving from a client is a real
+	// downgrade or a stale replay.
+	configuredManager string
 }
 
 // SetArchiveFn installs the callback that receives messages leaving the room.
@@ -256,17 +261,26 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	// still holding the lock, with the room routing through it while the client
 	// had already recorded the lesser role for its next replay.
 	agent := r.agents[agentName]
-	agent.Role = role
-	r.agents[agentName] = agent
+	if !(sameAgentName(r.configuredManager, agentName) && sameAgentName(r.managerAgent, agentName)) {
+		agent.Role = role
+		r.agents[agentName] = agent
+	}
 	r.dirty = true
 
 	if wantsManager {
 		// Free or already ours — the occupied case returned above.
 		r.managerAgent = agentName
 		r.managerLastSeen = types.Now()
-	} else if sameAgentName(r.managerAgent, agentName) {
+	} else if sameAgentName(r.managerAgent, agentName) && !sameAgentName(r.configuredManager, agentName) {
 		// Downgrade: give up the lock rather than keep routing through an agent
 		// that no longer claims the role.
+		//
+		// Not when the desktop still names this agent as the manager. A deferred
+		// handoff promotes a roster entry whose CLIENT recorded the lesser role
+		// (its own manager join had been refused), so its next reconnect replays
+		// "worker" — and an authoritative downgrade there would take the gateway
+		// away again, on every reconnect, for as long as the configuration says
+		// otherwise.
 		r.managerAgent = ""
 		r.managerLastSeen = 0
 	}
@@ -304,6 +318,10 @@ func (r *RoomState) join(agentName, role string, claim func()) (types.Message, m
 	isObserver := strings.EqualFold(strings.TrimSpace(role), roleObserver)
 	if isManager {
 		if active := r.getActiveManagerLocked(); active != "" && active != agentName {
+			// Same rule as Takeover: remember who was turned away, or a manager
+			// who is not in the roster yet loses the seat for good — the client
+			// treats the rejection as final and nothing retries it.
+			r.pendingManager = agentName
 			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
@@ -702,6 +720,10 @@ func (r *RoomState) HandoffManager(managerAgent string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Remembered so Takeover can tell a genuine downgrade from a reconnect
+	// replaying a role that predates the promotion (see below).
+	r.configuredManager = managerAgent
+
 	if !sameAgentName(r.managerAgent, managerAgent) {
 		if r.managerAgent != "" || r.managerLastSeen != 0 {
 			r.managerAgent = ""
@@ -722,18 +744,37 @@ func (r *RoomState) HandoffManager(managerAgent string) {
 
 	// Only for an agent that is actually in the room and still connected: the
 	// claim may be minutes old and its client long gone.
-	agent, inRoom := r.agents[managerAgent]
+	// Manager identity is case-insensitive everywhere else, so the roster key is
+	// resolved rather than indexed with the configured spelling: a room keyed
+	// "Pilot" and a set_manager("pilot") would otherwise clear the old lock and
+	// install nothing.
+	key, inRoom := r.rosterKeyLocked(managerAgent)
 	if !inRoom {
 		return
 	}
-	if r.connectedFn != nil && !r.connectedFn(managerAgent) {
+	if r.connectedFn != nil && !r.connectedFn(key) {
 		return
 	}
+	agent := r.agents[key]
 	agent.Role = "manager"
-	r.agents[managerAgent] = agent
-	r.managerAgent = managerAgent
+	r.agents[key] = agent
+	r.managerAgent = key
 	r.managerLastSeen = types.Now()
 	r.dirty = true
+}
+
+// rosterKeyLocked returns the roster key that denotes agentName, matching the
+// case-insensitive identity rule the rest of the manager path uses. Must hold mu.
+func (r *RoomState) rosterKeyLocked(agentName string) (string, bool) {
+	if _, ok := r.agents[agentName]; ok {
+		return agentName, true
+	}
+	for name := range r.agents {
+		if sameAgentName(name, agentName) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // ResetManagerLockIfDifferent clears active manager lock unless it matches managerAgent.

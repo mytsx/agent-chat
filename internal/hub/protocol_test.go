@@ -1342,3 +1342,153 @@ func TestPendingManagerClaimIsNotGrantedToTheWrongAgent(t *testing.T) {
 		t.Errorf("iptal edilmiş iddia sonradan verildi: manager kilidi = %q", got)
 	}
 }
+
+// Codex review round 2, PR #113: the deferred claim was recorded only on the
+// takeover path. A manager that is not in the roster yet takes the fresh-join
+// path, is rejected there, and the handoff that follows would clear the old lock
+// without granting the new one — leaving the room gateway-less all the same.
+func TestFirstTimeManagerJoinRejectionIsRememberedForHandoff(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	// The new manager is not in the roster at all: the fresh-join path.
+	h.setConfiguredManager("r1", "yeni")
+	fresh := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(fresh, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": "manager"}),
+	})
+	if resp := readResponse(t, fresh, "join_room"); resp.Success {
+		t.Fatal("koltuk doluyken ilk kez manager join başarı döndü")
+	}
+
+	// It enters the room with the lesser role its client fell back to — the
+	// manager join was refused, so that is all it has.
+	h.handleJoinRoom(fresh, types.Request{
+		ID: "join-new-worker", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	if resp := readResponse(t, fresh, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
+
+	// The handoff must honour the claim recorded on the FRESH-join path, exactly
+	// as it does the one recorded on takeover.
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("yeni")
+	if got := room.GetActiveManager(); got != "yeni" {
+		t.Errorf("manager kilidi = %q, want yeni (ilk kez katılanın reddi de hatırlanmalı)", got)
+	}
+	if got := room.GetAgents()["yeni"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 2, PR #113: manager identity is case-insensitive
+// everywhere else, so the handoff must resolve the roster key rather than index
+// it with the configured spelling — otherwise it clears the old lock and
+// installs nothing.
+func TestHandoffMatchesRosterNameCaseInsensitively(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "Pilot", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "Pilot")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "Pilot", "role": "manager"}),
+	})
+	if resp := readResponse(t, worker, "join_room"); resp.Success {
+		t.Fatal("kurulum hatası: koltuk doluyken manager join başarı döndü")
+	}
+
+	// Configured with a different casing than the roster key.
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("pilot")
+	if got := room.GetActiveManager(); !sameAgentName(got, "Pilot") {
+		t.Errorf("manager kilidi = %q, want Pilot (kimlik büyük/küçük harften bağımsız)", got)
+	}
+	if got := room.GetAgents()["Pilot"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 2, PR #113: a deferred handoff promotes a roster entry
+// whose CLIENT recorded the lesser role, because its own manager join had been
+// refused. Its next reconnect replays "worker", and an authoritative downgrade
+// there would take the gateway away again — on every reconnect.
+func TestReplayedWorkerRoleDoesNotUndoConfiguredManagerPromotion(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "isci")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	readResponse(t, worker, "join_room")
+
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("isci")
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Fatalf("kurulum hatası: devir sonrası manager = %q", got)
+	}
+
+	// The reconnect replays the role the client still has recorded.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w3", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma join'i başarısız: %s", resp.Error)
+	}
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (bayat worker replay'i terfiyi bozmamalı)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+
+	// A genuine downgrade still works: once the desktop names someone else,
+	// the replayed worker role is authoritative again.
+	h.setConfiguredManager("r1", "baskasi")
+	room.HandoffManager("baskasi")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w4", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	if got := room.GetAgents()["isci"].Role; got != "" {
+		t.Errorf("gerçek düşürme sonrası rol = %q, want boş", got)
+	}
+}

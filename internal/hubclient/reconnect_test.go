@@ -39,6 +39,9 @@ type fakeHub struct {
 	// dropOn severs the connection as soon as a request of this type arrives,
 	// WITHOUT answering — the "hub applied it but the response was lost" shape.
 	dropOn string
+	// onRequest runs before the response is written, so a test can change client
+	// state at a point the client cannot have observed yet.
+	onRequest func(types.Request)
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -75,7 +78,11 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		reject := h.rejectJoin && req.Type == "join_room"
 		drop := h.dropOn != "" && req.Type == h.dropOn
+		hook := h.onRequest
 		h.mu.Unlock()
+		if hook != nil {
+			hook(req)
+		}
 		if drop {
 			conn.Close()
 			return
@@ -741,10 +748,11 @@ func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
 	c.sess.joined = false
 	c.sess.joinEstablished = false
 	stale := c.sess.gen
+	rev := c.sess.rev
 	c.sess.gen++ // araya giren bir leave
 	c.mu.Unlock()
 
-	c.recordJoinIfCurrent(stale, "r1", "alice", "", true, true)
+	c.recordJoinIfCurrent(stale, rev, "r1", "alice", "", true, true)
 
 	c.mu.Lock()
 	joined := c.sess.joined
@@ -937,5 +945,105 @@ func TestGateIsArmedBeforeTheDial(t *testing.T) {
 		if !gated {
 			t.Fatalf("dial #%d kapı açıkken yapıldı; soket replay'den önce trafiğe açılır", i+1)
 		}
+	}
+}
+
+// Codex review round 2, PR #113: a replayed join for room A can land after the
+// caller corrected itself to room B behind the gate. Writing A back would make
+// the next pass replay A and lose B for good.
+func TestStaleReplaySuccessDoesNotOverwriteNewerJoinIntent(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	startGen, startRev := c.sess.gen, c.sess.rev
+	c.mu.Unlock()
+
+	// The corrected join lands while the replay is in flight.
+	c.recordJoinIfCurrent(startGen, startRev, "B", "alice", "", false, true, true)
+
+	// The in-flight replay of A now succeeds, carrying the older revision.
+	c.recordJoinIfCurrent(startGen, startRev, "A", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRoom != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (bayat replay yeni niyeti ezmemeli)", c.sess.joinRoom)
+	}
+}
+
+// Codex review round 2, PR #113: a leave the gate turned away never reached the
+// hub, while the replay running at that moment may have just put the agent back
+// in the room. Nothing would rejoin — but nothing would take it out either.
+func TestLeaveRefusedByGateIsPerformedAfterRestore(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		if err := cl.Identify("mcp", "alice", "r1", ""); err != nil {
+			return err
+		}
+		_, err := cl.JoinRoom("r1", "alice", "")
+		return err
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if _, err := c.LeaveRoom("r1", "alice"); err == nil {
+		t.Fatal("LeaveRoom() during restore = nil, want gated")
+	}
+	close(release)
+
+	waitFor(t, "kapının reddettiği leave'in tamamlanması", func() bool {
+		return slices.Contains(h.requestTypes(), "leave_room")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1 (telafi yeni bağlantı gerektirmemeli)", got)
+	}
+}
+
+// Codex review round 2, PR #113: if the session keeps changing, the last pass
+// used to fall through and report success — stopping the supervisor with work
+// still unreplayed and no reconnect scheduled.
+func TestRestoreThatNeverSettlesFailsInsteadOfReportingSuccess(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub bumps the revision as each replayed identify arrives — before its
+	// response, so the client cannot yet have finished the pass. Every pass
+	// therefore ends with the session changed underneath it.
+	h.mu.Lock()
+	h.onRequest = func(req types.Request) {
+		if req.Type != "identify" {
+			return
+		}
+		c.mu.Lock()
+		c.sess.rev++
+		c.mu.Unlock()
+	}
+	h.mu.Unlock()
+
+	c.mu.Lock()
+	c.sess.identified = true
+	c.sess.clientType = "mcp"
+	c.mu.Unlock()
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	err := c.restoreOnto()
+	if err == nil {
+		t.Fatal("restoreOnto() = nil, want failure: oturum kararlı hâle gelmedi")
+	}
+	if !strings.Contains(err.Error(), "kararlı") {
+		t.Errorf("hata = %v, want kararsız oturum teşhisi", err)
+	}
+	if c.isRestoring() {
+		t.Error("başarısız restore sonrası kapı açık kaldı")
 	}
 }
