@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"desktop/internal/summary"
 	"desktop/internal/eventlog"
+	"desktop/internal/summary"
 	"desktop/internal/types"
 	"desktop/internal/validation"
 )

@@ -73,7 +73,7 @@ const (
 	// AttrReadIDsTruncated marks a read whose ID list exceeded maxReadIDs, in
 	// which case the analyzer falls back to the watermark for that record.
 	AttrReadIDsTruncated = "agent_chat.read.ids_truncated"
-	// AttrRoomGeneration distinguishes room lifetimes. clear_room resets message
+	// AttrRoomLifecycle distinguishes room lifetimes. clear_room resets message
 	// IDs to 1, so without a generation boundary the analyzer would treat reused
 	// IDs in the fresh room as already read.
 	AttrRoomLifecycle    = "agent_chat.room.lifecycle"
