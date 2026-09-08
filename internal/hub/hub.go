@@ -86,6 +86,16 @@ type Hub struct {
 	requestsClosed   bool
 	inflightRequests sync.WaitGroup
 
+	// connMu guards connectedAgents and is deliberately NOT h.mu: liveness is
+	// read from inside cleanupStaleLocked, which runs under the ROOM lock, and
+	// persistRoom already takes h.mu then the room lock. Reusing h.mu here would
+	// invert that order and can deadlock.
+	connMu sync.RWMutex
+	// connectedAgents counts live connections per room+agent. A count, not a
+	// bool: a reconnecting client registers its new connection before the old
+	// one unregisters, and the agent must not flicker to "gone" in between.
+	connectedAgents map[string]int
+
 	listener net.Listener
 
 	// events is the structured event stream (#101): the measurement layer for
@@ -132,6 +142,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
+		connectedAgents:  make(map[string]int),
 		events:           events,
 	}
 }
@@ -340,6 +351,8 @@ func (h *Hub) runClientManager() {
 
 			// If this client had joined as an agent, remove it immediately
 			// so name re-use and manager lock cleanup do not wait for stale timeout.
+			h.agentDisconnected(joinedRoom, agentName)
+
 			if joinedRoom != "" && agentName != "" {
 				roomState := h.getOrCreateRoom(joinedRoom)
 				if sysMsg, found := roomState.Leave(agentName); found {
@@ -369,6 +382,52 @@ func (h *Hub) runClientManager() {
 	}
 }
 
+// connKey identifies one agent's presence in one room.
+func connKey(room, agentName string) string { return room + "\x00" + agentName }
+
+// agentConnected registers a live connection for an agent in a room.
+func (h *Hub) agentConnected(room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	h.connMu.Lock()
+	h.connectedAgents[connKey(room, agentName)]++
+	h.connMu.Unlock()
+}
+
+// agentDisconnected releases one, removing the entry at zero.
+func (h *Hub) agentDisconnected(room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	k := connKey(room, agentName)
+	h.connMu.Lock()
+	if n := h.connectedAgents[k] - 1; n > 0 {
+		h.connectedAgents[k] = n
+	} else {
+		delete(h.connectedAgents, k)
+	}
+	h.connMu.Unlock()
+}
+
+// isAgentConnected reports whether any live socket holds this agent in this
+// room. Safe to call under the room lock — see connMu.
+func (h *Hub) isAgentConnected(room, agentName string) bool {
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	return h.connectedAgents[connKey(room, agentName)] > 0
+}
+
+// connectedFnFor builds the per-room liveness predicate.
+//
+// Liveness must come from the connection, not from a timestamp only RPC calls
+// refresh: an agent can work for well past staleTimeout without calling a tool
+// while its socket answers every hub ping. Evicting it then is #98's third
+// mechanism.
+func (h *Hub) connectedFnFor(room string) func(string) bool {
+	return func(agentName string) bool { return h.isAgentConnected(room, agentName) }
+}
+
 // getOrCreateRoom returns the room state, creating it if it doesn't exist.
 func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	h.mu.Lock()
@@ -382,6 +441,7 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	r.SetArchiveFn(h.archiveFnFor(room))
 	r.SetEvictFn(h.evictFnFor(room))
 	r.SetResetFn(h.resetFnFor(room))
+	r.SetConnectedFn(h.connectedFnFor(room))
 	h.rooms[room] = r
 	return r
 }

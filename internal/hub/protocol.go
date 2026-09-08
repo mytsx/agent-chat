@@ -368,6 +368,10 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		return
 	}
 
+	// This connection now vouches for the agent's liveness, so a quiet stretch
+	// no longer looks like a departure (#98).
+	h.agentConnected(room, data.AgentName)
+
 	h.events.Log(eventlog.EventAgentJoined,
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrAgentName, data.AgentName),
@@ -837,6 +841,8 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		c.sendText(req.ID, req.Type, fmt.Sprintf("\u26a0\ufe0f '%s' zaten odada değil.", data.AgentName))
 		return
 	}
+
+	h.agentDisconnected(room, data.AgentName)
 
 	h.events.Log(eventlog.EventAgentLeft,
 		eventlog.String(eventlog.AttrConversationID, room),

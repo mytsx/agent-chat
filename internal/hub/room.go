@@ -50,6 +50,11 @@ type RoomState struct {
 	// wrong side of it. Like evictFn this must not block — the wired callback is
 	// a non-blocking event-log append.
 	resetFn func(maxID, generation int)
+	// connectedFn reports whether an agent still holds a live connection. Stale
+	// cleanup consults it so a connected agent is never evicted for going quiet;
+	// the timeout then only clears records whose client never came back. Must not
+	// block and must not take the room lock — it is called with it held.
+	connectedFn func(agentName string) bool
 	// generation counts how many times this room has been cleared. Stamped on
 	// send and read events UNDER the room lock so the analyzer never has to
 	// infer a message's generation from log ordering — a send that stores just
@@ -79,6 +84,14 @@ func (r *RoomState) SetEvictFn(fn func(agentName string, idleSeconds float64)) {
 func (r *RoomState) SetResetFn(fn func(maxID, generation int)) {
 	r.mu.Lock()
 	r.resetFn = fn
+	r.mu.Unlock()
+}
+
+// SetConnectedFn installs the liveness predicate consulted by stale cleanup.
+// Passing nil falls back to timestamp-only behaviour. Safe to call concurrently.
+func (r *RoomState) SetConnectedFn(fn func(agentName string) bool) {
+	r.mu.Lock()
+	r.connectedFn = fn
 	r.mu.Unlock()
 }
 
@@ -752,6 +765,11 @@ func (r *RoomState) cleanupStaleLocked() {
 	now := float64(time.Now().UnixNano()) / 1e9
 	for name, info := range r.agents {
 		if now-info.LastSeen >= float64(staleTimeout) {
+			// A live connection is proof of life that no timestamp carries: the
+			// agent may simply have been working, not gone.
+			if r.connectedFn != nil && r.connectedFn(name) {
+				continue
+			}
 			delete(r.agents, name)
 			r.dirty = true
 			if r.evictFn != nil {

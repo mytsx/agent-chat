@@ -267,6 +267,9 @@ func TestEventLogDistinguishesLeaveReasons(t *testing.T) {
 	t.Run("stale eviction", func(t *testing.T) {
 		h, c, dir := newEventHub(t)
 		joinAgent(t, h, c, "r1", "alice")
+		// Liveness now comes from the connection, so an eviction can only
+		// happen once that connection is gone.
+		h.agentDisconnected("r1", "alice")
 
 		roomState := h.getOrCreateRoom("r1")
 		roomState.mu.Lock()
@@ -706,5 +709,73 @@ func TestEventLogDisconnectCarriesCloseCause(t *testing.T) {
 			t.Fatal("disconnect olayı yazılmadı")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// #98 M3: liveness was derived from a timestamp that only RPC calls refreshed,
+// so an agent that spent five minutes working — connected the whole time, its
+// socket answering the hub's pings — was evicted from the roster as "stale".
+func TestConnectedAgentIsNotEvictedAsStale(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice") // join, bağlantıyı canlı olarak kaydeder
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1 // uzun süredir tool çağırmadı
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	roomState.ListAgents("") // stale temizliğini tetikler
+
+	if !roomState.HasAgent("alice") {
+		t.Error("bağlantısı açık agent stale sayılıp roster'dan silindi")
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentEvicted); len(got) != 0 {
+		t.Errorf("bağlı agent için eviction olayı yazıldı: %+v", got)
+	}
+}
+
+// An agent with no connection still ages out: the timeout is what clears
+// records left behind by a client that never came back.
+func TestDisconnectedAgentStillEvicted(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+	h.agentDisconnected("r1", "alice") // soket gitti; kaydı tutan kimse kalmadı
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	roomState.ListAgents("")
+
+	if roomState.HasAgent("alice") {
+		t.Error("bağlantısı olmayan agent stale temizliğinden kurtuldu")
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentEvicted); len(got) != 1 {
+		t.Errorf("eviction olayı sayısı = %d, want 1", len(got))
+	}
+}
+
+// A reconnecting client registers its new connection before the old one
+// unregisters, so liveness is a count rather than a flag — otherwise the agent
+// would briefly look gone and could be evicted mid-handover.
+func TestLivenessSurvivesReconnectHandover(t *testing.T) {
+	h, _, _ := newEventHub(t)
+
+	h.agentConnected("r1", "alice") // eski bağlantı
+	h.agentConnected("r1", "alice") // yeni bağlantı önce kaydolur
+	h.agentDisconnected("r1", "alice")
+
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("devir sırasında agent bir an 'bağlı değil' göründü")
+	}
+
+	h.agentDisconnected("r1", "alice")
+	if h.isAgentConnected("r1", "alice") {
+		t.Error("son bağlantı da kapandığı hâlde agent bağlı sayılıyor")
 	}
 }

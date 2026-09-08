@@ -42,6 +42,7 @@ func (h *Hub) loadPersistedState() {
 		room.SetArchiveFn(h.archiveFnFor(roomName))
 		room.SetEvictFn(h.evictFnFor(roomName))
 		room.SetResetFn(h.resetFnFor(roomName))
+		room.SetConnectedFn(h.connectedFnFor(roomName))
 		room.mu.Lock()
 		if pr.Messages != nil {
 			room.messages = pr.Messages
