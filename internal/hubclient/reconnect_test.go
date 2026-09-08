@@ -1135,9 +1135,23 @@ func TestRefusedCompensatingLeaveStaysQueued(t *testing.T) {
 		t.Fatal("flushPendingLeave() = nil, want refusal")
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.sess.pendingLeave == nil {
+	queued := c.sess.pendingLeave != nil
+	c.mu.Unlock()
+	if !queued {
 		t.Error("reddedilen telafi leave kuyruktan düştü")
+	}
+
+	// But a refusal that never stops being one must not fail every restore
+	// forever: the client would reconnect in a loop instead of working.
+	for i := 1; i < maxPendingLeaveAttempts; i++ {
+		if err := c.flushPendingLeave(); err != nil {
+			continue
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave != nil {
+		t.Errorf("kalıcı ret sonrası leave hâlâ kuyrukta; her restore düşerdi (deneme sınırı %d)", maxPendingLeaveAttempts)
 	}
 }
 

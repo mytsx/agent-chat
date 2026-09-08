@@ -44,6 +44,9 @@ const (
 	// case (one intent recorded behind the gate); the extra is slack, and the
 	// bound is what keeps a caller that records on every attempt from spinning.
 	maxRestorePasses = 3
+	// maxPendingLeaveAttempts bounds how often a refused compensating leave may
+	// fail a restore before it is abandoned.
+	maxPendingLeaveAttempts = 3
 )
 
 // session is what the hub forgets when a socket dies and the client must put
@@ -178,6 +181,10 @@ var errRestoreGate = errors.New("hub oturumu geri yükleniyor")
 type pendingLeave struct {
 	room  string
 	agent string
+	// attempts counts refusals. A refusal that never stops being a refusal — a
+	// name the hub will not accept, say — would otherwise fail every restore
+	// forever, and the client would reconnect in a loop instead of working.
+	attempts int
 }
 
 // ErrInvalidHubPortConfig marks a discovery failure that cannot resolve itself.
@@ -608,6 +615,24 @@ func (c *HubClient) flushPendingLeave() error {
 	// An agent the hub no longer holds answers with success, so this branch does
 	// not fire for the already-absent case.
 	if resp != nil && !resp.Success {
+		c.mu.Lock()
+		giveUp := false
+		if q := c.sess.pendingLeave; q == p {
+			p.attempts++
+			if p.attempts >= maxPendingLeaveAttempts {
+				c.sess.pendingLeave = nil
+				giveUp = true
+			}
+		}
+		c.mu.Unlock()
+		if giveUp {
+			// Stop failing the restore over it: a session that can never come up
+			// is worse than one whose departure the hub refused. Loud, because
+			// the hub and the client now disagree about the room.
+			c.logger.Printf("Kuyruktaki leave_room %d kez reddedildi, vazgeçiliyor (oda=%s agent=%s): %s",
+				p.attempts, p.room, p.agent, resp.Error)
+			return nil
+		}
 		return fmt.Errorf("kuyruktaki leave_room reddedildi: %s", resp.Error)
 	}
 	c.mu.Lock()
