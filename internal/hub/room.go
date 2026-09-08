@@ -38,6 +38,11 @@ type RoomState struct {
 	// on disk I/O — never call it while holding the room lock. nil means
 	// archiving is disabled (backward compatible).
 	archiveFn func([]types.Message)
+	// evictFn, if set, is called for each agent removed by the stale timeout,
+	// with how many seconds it had been idle. Unlike archiveFn this runs WITH
+	// the room lock held, which is safe only because the wired callback is a
+	// non-blocking event-log append — never give this one disk I/O.
+	evictFn func(agentName string, idleSeconds float64)
 }
 
 // SetArchiveFn installs the callback that receives messages leaving the room.
@@ -45,6 +50,14 @@ type RoomState struct {
 func (r *RoomState) SetArchiveFn(fn func([]types.Message)) {
 	r.mu.Lock()
 	r.archiveFn = fn
+	r.mu.Unlock()
+}
+
+// SetEvictFn installs the callback invoked for each stale-timeout eviction.
+// Passing nil disables it. Safe to call concurrently.
+func (r *RoomState) SetEvictFn(fn func(agentName string, idleSeconds float64)) {
+	r.mu.Lock()
+	r.evictFn = fn
 	r.mu.Unlock()
 }
 
@@ -413,6 +426,14 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 	r.touchAgentLastSeenLocked(agentName)
 }
 
+// HasAgent reports whether an agent is currently in the room's roster.
+func (r *RoomState) HasAgent(agentName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.agents[agentName]
+	return ok
+}
+
 // IsObserver reports whether the named agent is currently in the room roster with
 // the observer role (#17). Used to reject a DIRECT message addressed to a live
 // observer even after the desktop revokes it from the allow-list — its roster entry
@@ -675,6 +696,9 @@ func (r *RoomState) cleanupStaleLocked() {
 		if now-info.LastSeen >= float64(staleTimeout) {
 			delete(r.agents, name)
 			r.dirty = true
+			if r.evictFn != nil {
+				r.evictFn(name, now-info.LastSeen)
+			}
 		}
 	}
 	// Clear manager lock if timed out or agent was removed

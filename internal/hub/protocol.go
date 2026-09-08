@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"desktop/internal/summary"
+	"desktop/internal/eventlog"
 	"desktop/internal/types"
 	"desktop/internal/validation"
 )
@@ -347,9 +348,22 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	roomState := h.getOrCreateRoom(room)
 	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
 	if err != nil {
+		h.events.Log(eventlog.EventError,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, data.AgentName),
+			eventlog.String(eventlog.AttrMCPMethod, req.Type),
+			eventlog.String(eventlog.AttrErrorType, "join_rejected"),
+		)
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
+
+	h.events.Log(eventlog.EventAgentJoined,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.AgentName),
+		eventlog.String(eventlog.AttrAgentRole, role),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	// Also subscribe the client to this room
 	h.mu.Lock()
@@ -481,6 +495,28 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	h.logger.Printf("send_message: id=%d saved to room=%s", msg.ID, room)
 
+	// recipient.in_room is recorded at send time because only the hub knows the
+	// roster right then; it is what makes "wrote to somebody who wasn't there"
+	// (#99) countable without replaying the whole event stream.
+	h.events.Log(eventlog.EventMessageSent,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.From),
+		eventlog.String(eventlog.AttrRecipientName, data.To),
+		eventlog.Bool(eventlog.AttrRecipientInRoom, data.To == "all" || roomState.HasAgent(data.To)),
+		eventlog.Int(eventlog.AttrMessageID, msg.ID),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+		eventlog.String(eventlog.AttrInputMessages, data.Content),
+	)
+	if intercepted {
+		h.events.Log(eventlog.EventMessageRerouted,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, data.From),
+			eventlog.String(eventlog.AttrRecipientName, opts.OriginalTo),
+			eventlog.String(eventlog.AttrRerouteTarget, activeManager),
+			eventlog.Int(eventlog.AttrMessageID, msg.ID),
+		)
+	}
+
 	var text string
 	if intercepted {
 		text = fmt.Sprintf("\U0001f4e4 Mesaj manager '%s' agent'ına iletildi, onay bekliyor (ID: %d)", activeManager, msg.ID)
@@ -523,6 +559,21 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	roomState := h.getOrCreateRoom(room)
 	roomState.TouchManagerHeartbeat(c.agentName)
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
+
+	// max_id is the agent's high-water mark: the "sent but never read" report is
+	// built by comparing it against what was addressed to that agent.
+	maxID := 0
+	if len(filtered) > 0 {
+		maxID = filtered[len(filtered)-1].ID
+	}
+	h.events.Log(eventlog.EventMessagesRead,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.AgentName),
+		eventlog.Int(eventlog.AttrReadSinceID, data.SinceID),
+		eventlog.Int(eventlog.AttrReadReturned, len(filtered)),
+		eventlog.Int(eventlog.AttrReadMaxID, maxID),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
@@ -728,6 +779,13 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		c.sendText(req.ID, req.Type, fmt.Sprintf("\u26a0\ufe0f '%s' zaten odada değil.", data.AgentName))
 		return
 	}
+
+	h.events.Log(eventlog.EventAgentLeft,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.AgentName),
+		eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonExplicit),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	c.sendText(req.ID, req.Type, fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName))
 	c.agentName = ""

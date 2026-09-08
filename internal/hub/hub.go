@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"desktop/internal/eventlog"
 	"desktop/internal/types"
 
 	"github.com/gorilla/websocket"
@@ -86,11 +87,28 @@ type Hub struct {
 	inflightRequests sync.WaitGroup
 
 	listener net.Listener
+
+	// events is the structured event stream (#101): the measurement layer for
+	// why agents drop out of rooms and miss each other's messages. Never nil —
+	// a hub without a data dir, or one whose stream cannot be opened, gets a
+	// no-op logger so logging can never be the reason the hub fails.
+	events *eventlog.Logger
 }
 
 // New creates a new Hub.
 func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 	desktopAuthToken := strings.TrimSpace(os.Getenv("AGENT_CHAT_HUB_TOKEN"))
+
+	// A dataDir-less hub (unit tests, in-process use) logs nowhere; otherwise a
+	// failure to open the stream is reported and downgraded, never fatal.
+	events := eventlog.NopLogger()
+	if dataDir != "" {
+		var err error
+		if events, err = eventlog.New(eventlog.Options{Dir: dataDir}); err != nil {
+			logger.Printf("Olay logu açılamadı, olay kaydı devre dışı: %v", err)
+		}
+	}
+
 	return &Hub{
 		rooms:            make(map[string]*RoomState),
 		clients:          make(map[*Client]bool),
@@ -108,6 +126,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
+		events:           events,
 	}
 }
 
@@ -131,6 +150,11 @@ func (h *Hub) Run(port int) error {
 	if err := os.WriteFile(portPath, []byte(fmt.Sprintf("%d", actualPort)), 0644); err != nil {
 		h.logger.Printf("Failed to write hub.port: %v", err)
 	}
+
+	h.events.Log(eventlog.EventHubStarted,
+		eventlog.Int(eventlog.AttrServerPort, actualPort),
+		eventlog.Int(eventlog.AttrPID, os.Getpid()),
+	)
 
 	// Start client manager
 	go h.runClientManager()
@@ -215,6 +239,15 @@ func (h *Hub) Shutdown() {
 	// Remove port file
 	os.Remove(filepath.Join(h.dataDir, "hub.port"))
 
+	// Written synchronously: it reports how many events the buffer dropped, so
+	// it is the one record that must not itself be droppable.
+	h.events.LogSync(eventlog.EventHubStopped,
+		eventlog.Uint64(eventlog.AttrEventsDropped, h.events.Dropped()),
+	)
+	if err := h.events.Close(); err != nil {
+		h.logger.Printf("Olay logu kapatılamadı: %v", err)
+	}
+
 	h.logger.Println("Hub shut down")
 }
 
@@ -261,6 +294,10 @@ func (h *Hub) runClientManager() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			h.events.Log(eventlog.EventClientConnected,
+				eventlog.String(eventlog.AttrClientType, client.clientType),
+				eventlog.String(eventlog.AttrNetworkTransport, eventlog.TransportWebSocket),
+			)
 			h.logger.Printf("Client connected (total: %d)", len(h.clients))
 
 		case client := <-h.unregister:
@@ -288,9 +325,20 @@ func (h *Hub) runClientManager() {
 					agents := roomState.GetAgents()
 					h.broadcastEvent(joinedRoom, "message_new", map[string]any{"message": sysMsg})
 					h.broadcastEvent(joinedRoom, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
+					// Reason "disconnect" is what separates #98's first drop
+					// mechanism (connection lost, no rejoin) from an explicit leave.
+					h.events.Log(eventlog.EventAgentLeft,
+						eventlog.String(eventlog.AttrConversationID, joinedRoom),
+						eventlog.String(eventlog.AttrAgentName, agentName),
+						eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
+					)
 				}
 			}
 
+			h.events.Log(eventlog.EventClientDisconnected,
+				eventlog.String(eventlog.AttrAgentName, agentName),
+				eventlog.String(eventlog.AttrConversationID, joinedRoom),
+			)
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}
 	}
@@ -307,6 +355,7 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	delete(h.deletedRooms, room) // legitimate (re)creation lifts any tombstone
 	r := NewRoomState()
 	r.SetArchiveFn(h.archiveFnFor(room))
+	r.SetEvictFn(h.evictFnFor(room))
 	h.rooms[room] = r
 	return r
 }
@@ -318,6 +367,19 @@ func (h *Hub) getRoom(room string) *RoomState {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rooms[room]
+}
+
+// evictFnFor builds the per-room callback that records a stale-timeout eviction.
+// Safe to run under the room lock: eventlog.Log is a non-blocking channel send,
+// unlike archiveFn which may reach disk.
+func (h *Hub) evictFnFor(room string) func(string, float64) {
+	return func(agentName string, idleSeconds float64) {
+		h.events.Log(eventlog.EventAgentEvicted,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, agentName),
+			eventlog.Float64(eventlog.AttrIdleSeconds, idleSeconds),
+		)
+	}
 }
 
 // archiveFnFor builds the per-room callback that captures messages leaving the
