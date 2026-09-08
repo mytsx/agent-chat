@@ -131,6 +131,66 @@ func TestEventLogRecordsRecipientPresence(t *testing.T) {
 	}
 }
 
+// Copilot review, PR #103: when the manager gateway intercepts a message it is
+// stored for the manager, not the addressee. The event must record both, or the
+// "never read" report blames an agent that was never a delivery target.
+func TestEventLogRecordsDeliveryTargetOnReroute(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	mgrClient := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.setConfiguredManager("r1", "yonetici")
+
+	h.handleJoinRoom(mgrClient, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgrClient, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+	joinAgent(t, h, alice, "r1", "alice")
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "bob", "content": "merhaba"}),
+	})
+	if resp := readResponse(t, alice, "send_message"); !resp.Success {
+		t.Fatalf("send başarısız: %s", resp.Error)
+	}
+
+	events := loggedEvents(t, h, dir)
+	sent := onlyEvent(t, events, eventlog.EventMessageSent)
+	// Addressee stays what the sender typed — report 2 (#99) depends on it.
+	if sent[eventlog.AttrRecipientName] != "bob" {
+		t.Errorf("%s = %v, want bob", eventlog.AttrRecipientName, sent[eventlog.AttrRecipientName])
+	}
+	// Delivery target is where it actually went — report 3 depends on it.
+	if sent[eventlog.AttrDeliveryTarget] != "yonetici" {
+		t.Errorf("%s = %v, want yonetici", eventlog.AttrDeliveryTarget, sent[eventlog.AttrDeliveryTarget])
+	}
+	rerouted := onlyEvent(t, events, eventlog.EventMessageRerouted)
+	if rerouted[eventlog.AttrRerouteTarget] != "yonetici" {
+		t.Errorf("%s = %v, want yonetici", eventlog.AttrRerouteTarget, rerouted[eventlog.AttrRerouteTarget])
+	}
+}
+
+// Without a manager the delivery target is simply the addressee.
+func TestEventLogDeliveryTargetIsAddresseeWithoutManager(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	bob := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	joinAgent(t, h, alice, "r1", "alice")
+	joinAgent(t, h, bob, "r1", "bob")
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "bob", "content": "merhaba"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	sent := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventMessageSent)
+	if sent[eventlog.AttrDeliveryTarget] != "bob" {
+		t.Errorf("%s = %v, want bob", eventlog.AttrDeliveryTarget, sent[eventlog.AttrDeliveryTarget])
+	}
+}
+
 // read.max_id is the high-water mark the "sent but never read" report is built
 // on, so a read must record how far the agent got.
 func TestEventLogRecordsReadProgress(t *testing.T) {

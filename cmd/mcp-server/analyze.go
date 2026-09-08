@@ -127,8 +127,13 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 				fmt.Fprintf(w, "   … %d mesaj daha\n", len(rep.Unread)-limit)
 				break
 			}
+			to := u.To
+			if u.DeliveredTo != "" {
+				// Rerouted by the manager gateway: show who actually owed the read.
+				to = fmt.Sprintf("%s (teslim: %s)", u.To, u.DeliveredTo)
+			}
 			fmt.Fprintf(w, "   %s [%s] %s → %s (id %d) %s\n",
-				u.Time.Format("01-02 15:04:05"), u.Room, u.From, u.To, u.MessageID, snippet(u.Content))
+				u.Time.Format("01-02 15:04:05"), u.Room, u.From, to, u.MessageID, snippet(u.Content))
 		}
 	}
 

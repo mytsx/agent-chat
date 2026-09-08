@@ -151,6 +151,64 @@ func TestAnalyzeUnread(t *testing.T) {
 		t.Errorf("kayıt = %+v, want id 3 / bob", rep.Unread[0])
 	}
 
+	// Copilot review, PR #103: with a manager gateway active, a message is stored
+	// for the manager but addressed to somebody else. Tracking read progress
+	// against the addressee would leave every such message unread forever — in a
+	// manager-gated room that is nearly all traffic.
+	t.Run("manager'a yönlendirilen mesaj özgün alıcıya borç yazılmaz", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			room := String(AttrConversationID, "r1")
+			l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+				String(AttrDeliveryTarget, "yonetici"), Int(AttrMessageID, 1))
+			tick(time.Second)
+			l.Log(EventMessageRerouted, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), String(AttrRerouteTarget, "yonetici"),
+				Int(AttrMessageID, 1))
+			tick(time.Second)
+			// Manager read it; bob never did — and never should have.
+			l.Log(EventMessagesRead, room, String(AttrAgentName, "yonetici"),
+				Int(AttrReadReturned, 1), Int(AttrReadMaxID, 1))
+		})
+
+		if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+			t.Errorf("yönlendirilen mesaj özgün alıcıda okunmamış sayılmış: %+v", got)
+		}
+	})
+
+	t.Run("manager okumadıysa mesaj manager'a borç yazılır", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			l.Log(EventMessageSent, String(AttrConversationID, "r1"),
+				String(AttrAgentName, "alice"), String(AttrRecipientName, "bob"),
+				Bool(AttrRecipientInRoom, true), String(AttrDeliveryTarget, "yonetici"),
+				Int(AttrMessageID, 1))
+		})
+
+		got := analyzeDir(t, dir).Unread
+		if len(got) != 1 {
+			t.Fatalf("okunmamış sayısı = %d, want 1", len(got))
+		}
+		// The report must show both names: who it was addressed to and who
+		// actually owed a read.
+		if got[0].To != "bob" || got[0].DeliveredTo != "yonetici" {
+			t.Errorf("kayıt = %+v, want To=bob DeliveredTo=yonetici", got[0])
+		}
+	})
+
+	t.Run("delivery.target taşımayan eski akış alıcıya düşer", func(t *testing.T) {
+		// Streams written before the attribute existed must still report.
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			l.Log(EventMessageSent, String(AttrConversationID, "r1"),
+				String(AttrAgentName, "alice"), String(AttrRecipientName, "bob"),
+				Bool(AttrRecipientInRoom, true), Int(AttrMessageID, 1))
+		})
+
+		got := analyzeDir(t, dir).Unread
+		if len(got) != 1 || got[0].To != "bob" || got[0].DeliveredTo != "" {
+			t.Errorf("kayıt = %+v, want To=bob DeliveredTo boş", got)
+		}
+	})
+
 	t.Run("odada olmayan alıcı okunmamış sayılmaz", func(t *testing.T) {
 		// Already reported as misaddressed; counting it twice would present one
 		// problem as two.

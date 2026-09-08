@@ -503,6 +503,10 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		eventlog.String(eventlog.AttrAgentName, data.From),
 		eventlog.String(eventlog.AttrRecipientName, data.To),
 		eventlog.Bool(eventlog.AttrRecipientInRoom, data.To == "all" || roomState.HasAgent(data.To)),
+		// The manager gateway can store the message for somebody other than the
+		// addressee; recording both keeps "wrote to an absent agent" and "nobody
+		// read this" answerable without either question corrupting the other.
+		eventlog.String(eventlog.AttrDeliveryTarget, to),
 		eventlog.Int(eventlog.AttrMessageID, msg.ID),
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 		eventlog.String(eventlog.AttrInputMessages, data.Content),

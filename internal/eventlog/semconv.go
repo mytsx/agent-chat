@@ -44,13 +44,20 @@ const (
 	AttrSpanID  = "span_id"
 
 	// Project-specific attributes: no OTel equivalent exists for these.
-	AttrPID              = "agent_chat.pid"
-	AttrClientType       = "agent_chat.client.type"
-	AttrAgentRole        = "agent_chat.agent.role"
-	AttrLeaveReason      = "agent_chat.leave.reason"
-	AttrIdleSeconds      = "agent_chat.agent.idle_seconds"
-	AttrRecipientName    = "agent_chat.recipient.name"
-	AttrRecipientInRoom  = "agent_chat.recipient.in_room"
+	AttrPID         = "agent_chat.pid"
+	AttrClientType  = "agent_chat.client.type"
+	AttrAgentRole   = "agent_chat.agent.role"
+	AttrLeaveReason = "agent_chat.leave.reason"
+	AttrIdleSeconds = "agent_chat.agent.idle_seconds"
+	// AttrRecipientName is who the sender addressed, and AttrRecipientInRoom
+	// whether that name was in the roster — the pair that makes #99 countable.
+	AttrRecipientName   = "agent_chat.recipient.name"
+	AttrRecipientInRoom = "agent_chat.recipient.in_room"
+	// AttrDeliveryTarget is who the message was actually stored for, which the
+	// manager gateway can make different from the addressee. Read progress is
+	// tracked per delivery target, so an intercepted message counts against the
+	// manager who must act on it, not the agent it was addressed to.
+	AttrDeliveryTarget   = "agent_chat.delivery.target"
 	AttrMessageID        = "agent_chat.message.id"
 	AttrRerouteTarget    = "agent_chat.reroute.target"
 	AttrReadSinceID      = "agent_chat.read.since_id"

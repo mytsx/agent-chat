@@ -164,14 +164,18 @@ type Misaddressed struct {
 	Content   string    `json:"content,omitempty"`
 }
 
-// Unread is a message whose recipient never read that far.
+// Unread is a message whose delivery target never read that far. To is the
+// addressee the sender named; DeliveredTo is who it was actually stored for and
+// whose read progress was compared. They differ when the manager gateway
+// intercepted the message.
 type Unread struct {
-	Time      time.Time `json:"time"`
-	Room      string    `json:"room"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	MessageID int       `json:"message_id"`
-	Content   string    `json:"content,omitempty"`
+	Time        time.Time `json:"time"`
+	Room        string    `json:"room"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	DeliveredTo string    `json:"delivered_to,omitempty"`
+	MessageID   int       `json:"message_id"`
+	Content     string    `json:"content,omitempty"`
 }
 
 // Outage is a window during which the hub was not running.
@@ -252,8 +256,9 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// sent indexes messages by (room, recipient) so unread detection is a single
 	// pass against each recipient's high-water mark.
 	type sentMsg struct {
-		rec Record
-		id  int
+		rec    Record
+		id     int
+		target string
 	}
 	sent := map[string][]sentMsg{}
 	highWater := map[string]int{}
@@ -274,6 +279,16 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 
 		case EventMessageSent:
 			to := r.Str(AttrRecipientName)
+			// Read progress belongs to whoever the message was stored for. The
+			// manager gateway rewrites that target, so without this an
+			// intercepted message would sit unread forever against an addressee
+			// who was never a delivery target — in a manager-gated room that is
+			// nearly all traffic. Streams written before this attribute existed
+			// fall back to the addressee.
+			target := r.Str(AttrDeliveryTarget)
+			if target == "" {
+				target = to
+			}
 			if !r.Bool(AttrRecipientInRoom) {
 				rep.Misaddressed = append(rep.Misaddressed, Misaddressed{
 					Time: r.Time, Room: r.Room(), From: r.Str(AttrAgentName), To: to,
@@ -281,13 +296,16 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 				})
 			}
 			// Unread counts messages that reached a real recipient who never
-			// read them. A broadcast has no single recipient whose progress
-			// could be compared, and a message to somebody who was not in the
-			// room is a misaddressing (already reported above) with a different
-			// cause — counting it here too would double-report one problem.
-			if to != "" && to != "all" && r.Bool(AttrRecipientInRoom) {
-				key := r.Room() + "\x00" + to
-				sent[key] = append(sent[key], sentMsg{rec: r, id: r.Int(AttrMessageID)})
+			// read them. A broadcast has no single delivery target whose
+			// progress could be compared. A message to somebody who was not in
+			// the room is a misaddressing (already reported above) with a
+			// different cause — counting it here too would double-report one
+			// problem — but only when it was not rerouted: an intercepted
+			// message did reach the manager regardless of the addressee.
+			undelivered := target == to && !r.Bool(AttrRecipientInRoom)
+			if target != "" && target != "all" && !undelivered {
+				key := r.Room() + "\x00" + target
+				sent[key] = append(sent[key], sentMsg{rec: r, id: r.Int(AttrMessageID), target: target})
 			}
 
 		case EventMessagesRead:
@@ -323,11 +341,15 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		mark := highWater[key]
 		for _, m := range msgs {
 			if m.id > mark {
-				rep.Unread = append(rep.Unread, Unread{
+				u := Unread{
 					Time: m.rec.Time, Room: m.rec.Room(), From: m.rec.Str(AttrAgentName),
 					To: m.rec.Str(AttrRecipientName), MessageID: m.id,
 					Content: m.rec.Str(AttrInputMessages),
-				})
+				}
+				if m.target != u.To {
+					u.DeliveredTo = m.target
+				}
+				rep.Unread = append(rep.Unread, u)
 			}
 		}
 	}
