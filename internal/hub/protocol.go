@@ -101,7 +101,12 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("join_room sonrası agent adı değiştirilemez (mevcut: %s)", c.agentName))
 			return
 		}
+		// Under h.mu: clearObserverBinding reads this field on ANOTHER client's
+		// behalf (the desktop's goroutine), so the identity has to be published
+		// under the same lock or the atomic observer flag just moves the race.
+		h.mu.Lock()
 		c.agentName = data.AgentName
+		h.mu.Unlock()
 	}
 	if data.Room != "" {
 		c.rooms[data.Room] = true
@@ -405,21 +410,29 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// Observer is desktop-gated like manager (#17 P1): role "observer" grants read-all
 	// transcript access, so a client must not be able to self-assert it. Only an agent
 	// the desktop registered as an observer for this room may join with that role.
-	if role == "observer" && !h.isConfiguredObserver(room, data.AgentName) {
-		// One exception, and it is the promotion path: the desktop names this
-		// agent the room's MANAGER, so its authorization was not removed, it was
-		// replaced. Its client still replays "observer" on every reconnect, and
-		// rejecting that would fail the restore forever — the agent would never
-		// get back into the room at all. Fall back to the lesser role: that
-		// grants nothing the gate was protecting (observer is read-all access),
-		// and the takeover below seats it as the manager it is configured to be.
-		if !sameAgentName(h.getConfiguredManager(room), data.AgentName) {
+	if role == "observer" {
+		// The configured manager outranks the observer allow-list, and it is
+		// checked FIRST. The desktop promotes in two calls (set_manager, then
+		// set_observers), and a reconnect landing between them still finds the
+		// agent on the old allow-list: accepting "observer" there would restore
+		// the read-only binding and roster role while the manager lock stayed,
+		// leaving the room routing through a connection send_message rejects.
+		//
+		// Its client replays "observer" because that is what it recorded before
+		// the promotion; rejecting it outright would fail the restore forever and
+		// the agent would never get back into the room. Falling back to the
+		// lesser role grants nothing the gate protects (observer is read-all
+		// access), and the takeover below seats it as the manager it is
+		// configured to be.
+		switch {
+		case sameAgentName(h.getConfiguredManager(room), data.AgentName):
+			h.logger.Printf("join_room: agent=%q oda %q için manager olarak yapılandırılmış; bayat observer rolü düşürülüyor", data.AgentName, room)
+			role = ""
+			data.Role = ""
+		case !h.isConfiguredObserver(room, data.AgentName):
 			c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
 			return
 		}
-		h.logger.Printf("join_room: observer yetkisi kalkmış ama agent=%q oda %q için manager olarak yapılandırılmış; rol düşürülüyor", data.AgentName, room)
-		role = ""
-		data.Role = ""
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
@@ -977,8 +990,11 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 	)
 
 	c.sendText(req.ID, req.Type, fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName))
+	// Same lock as the identity's other writers, for the same reason.
+	h.mu.Lock()
 	c.agentName = ""
 	c.joinedRoom = ""
+	h.mu.Unlock()
 
 	agents := roomState.GetAgents()
 	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})

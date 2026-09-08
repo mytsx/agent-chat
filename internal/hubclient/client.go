@@ -547,13 +547,18 @@ func (c *HubClient) restoreOnto() error {
 			return err
 		}
 
+		// Decide and open the gate under ONE hold. Between a separate check and
+		// a later setRestoring(false), a JoinRoom can see the gate armed, record
+		// its refused intent and advance sess.rev — and this path would then open
+		// the gate and return without another pass, leaving the socket unjoined
+		// with nothing scheduled to fix it.
 		c.mu.Lock()
-		unchanged := c.sess.rev == before
-		c.mu.Unlock()
-		if unchanged {
-			c.setRestoring(false)
+		if c.sess.rev == before {
+			c.restoring = false
+			c.mu.Unlock()
 			return nil
 		}
+		c.mu.Unlock()
 	}
 	// Still moving after the last pass: something recorded is not on the wire.
 	// Reporting success here would stop the supervisor with the gate open and no
@@ -672,7 +677,29 @@ func (c *HubClient) restoreSession() error {
 			return fmt.Errorf("join_room: %w", err)
 		}
 		if err := ensureSuccess("join_room", resp); err != nil {
-			return err
+			// A ROLE the hub no longer grants must not wedge the session. The
+			// recorded role can outlive its authorization — an observer promoted
+			// to manager whose assignment is later cleared is neither any more —
+			// and replaying it would fail every restore, with the gate armed, for
+			// the life of the process: the agent could not even submit a
+			// corrective join. Fall back to the plain membership, which is what
+			// it is entitled to either way.
+			if s.joinRole == "" {
+				return err
+			}
+			c.logger.Printf("Replay edilen rol reddedildi (%v); rolsüz yeniden deneniyor", err)
+			resp, err = c.joinRoom(s.joinRoom, s.joinAgent, "", true)
+			if err != nil {
+				return fmt.Errorf("join_room: %w", err)
+			}
+			if err := ensureSuccess("join_room", resp); err != nil {
+				return err
+			}
+			c.mu.Lock()
+			if c.sess.joined && c.sess.joinRoom == s.joinRoom && c.sess.joinAgent == s.joinAgent {
+				c.sess.joinRole = ""
+			}
+			c.mu.Unlock()
 		}
 	}
 	if len(subs) > 0 {

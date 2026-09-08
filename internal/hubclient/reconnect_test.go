@@ -40,6 +40,9 @@ type fakeHub struct {
 	// rejectLeave does the same for leave_room — the shape an identity mismatch
 	// has, where the agent stays in the room.
 	rejectLeave bool
+	// rejectJoinRole refuses join_room only when it carries this role — the shape
+	// an authorization the desktop withdrew has.
+	rejectJoinRole string
 	// dropOn severs the connection as soon as a request of this type arrives,
 	// WITHOUT answering — the "hub applied it but the response was lost" shape.
 	dropOn string
@@ -81,6 +84,14 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 
 		h.mu.Lock()
 		reject := (h.rejectJoin && req.Type == "join_room") || (h.rejectLeave && req.Type == "leave_room")
+		if !reject && h.rejectJoinRole != "" && req.Type == "join_room" {
+			var payload struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal(req.Data, &payload) == nil && payload.Role == h.rejectJoinRole {
+				reject = true
+			}
+		}
 		drop := h.dropOn != "" && req.Type == h.dropOn
 		hook := h.onRequest
 		h.mu.Unlock()
@@ -1423,5 +1434,77 @@ func TestDeletedRoomIsNotResurrectedByReplay(t *testing.T) {
 		if r.Type == "subscribe" && strings.Contains(string(r.Data), "olu-oda") {
 			t.Fatal("silinmiş oda abonelik replay'inde geri geldi")
 		}
+	}
+}
+
+// Codex review round 7, PR #113: a recorded role can outlive its authorization
+// — an observer promoted to manager whose assignment is later cleared is
+// neither. Replaying it would fail every restore, with the gate armed, for the
+// life of the process: the agent could not even submit a corrective join.
+func TestReplayedRoleRefusedByHubFallsBackToPlainMembership(t *testing.T) {
+	h := newFakeHub(t)
+	h.mu.Lock()
+	h.rejectJoinRole = "observer" // hub artık bu rolü vermiyor
+	h.mu.Unlock()
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.mu.Lock()
+	c.sess.joined, c.sess.joinEstablished = true, true
+	c.sess.joinRoom, c.sess.joinAgent, c.sess.joinRole = "r1", "gozcu", "observer"
+	c.mu.Unlock()
+
+	if err := c.restoreSession(); err != nil {
+		t.Fatalf("restoreSession: %v (bayat rol oturumu kilitlememeli)", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRole != "" {
+		t.Errorf("kayıtlı rol = %q, want boş (reddedilen rol düşürülmeli)", c.sess.joinRole)
+	}
+}
+
+// Codex review round 7, PR #113: the revision check and opening the gate happen
+// under ONE hold, so a join landing in between cannot have its recorded intent
+// stranded by a gate that opened anyway.
+//
+// The interleaving itself is not reproducible on demand — that part is by
+// inspection (one critical section). What this pins is the observable contract:
+// a restore that never settles fails AND leaves the gate armed for the caller
+// that drops the socket.
+func TestExhaustedRestoreFailsWithTheGateStillArmed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub advances the session as the identify replay arrives — before its
+	// response, so the pass cannot have finished yet.
+	h.mu.Lock()
+	h.onRequest = func(req types.Request) {
+		if req.Type != "identify" {
+			return
+		}
+		c.mu.Lock()
+		c.sess.rev++
+		c.mu.Unlock()
+	}
+	h.mu.Unlock()
+
+	c.mu.Lock()
+	c.sess.identified, c.sess.clientType = true, "mcp"
+	c.mu.Unlock()
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.setRestoring(true)
+
+	if err := c.restoreOnto(); err == nil {
+		t.Fatal("restoreOnto() = nil, want failure: oturum kararlı hâle gelmedi")
+	}
+	// The gate stays armed on failure: the caller drops the socket first, and an
+	// ordinary request must not reach a half-restored connection in between.
+	if !c.isRestoring() {
+		t.Error("başarısız restore kapıyı açtı; soket düşürülene kadar kapalı kalmalı")
 	}
 }

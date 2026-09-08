@@ -1861,3 +1861,84 @@ func drain(c *Client) {
 		}
 	}
 }
+
+// Codex review round 7, PR #113: the desktop promotes in two calls. A reconnect
+// landing between them still finds the agent on the OLD observer allow-list;
+// accepting "observer" there would restore the read-only binding and roster role
+// while the manager lock stayed, leaving the room routing through a connection
+// send_message rejects.
+func TestPromotedObserverReconnectInsideTheTwoCallWindow(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// Step one of the promotion only: the allow-list still holds the agent.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	// The agent's client replays its join here, carrying the role it recorded
+	// before the promotion (the supervisor replays on the same socket).
+	h.handleJoinRoom(obs, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	if resp := readResponse(t, obs, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma reddedildi: %s", resp.Error)
+	}
+	if obs.isObserver.Load() {
+		t.Error("iki-çağrı penceresinde salt-okunur bağ geri geldi")
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["gozcu"].Role; got == "observer" {
+		t.Error("roster rolü observer'a geri döndü")
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "gozcu" {
+		t.Errorf("manager kilidi = %q, want gozcu", got)
+	}
+}
+
+// Codex review round 7, PR #113: the promotion reads another client's agentName.
+// identify and leave_room write it, so those writes must take the same lock or
+// the atomic observer flag just moves the race elsewhere.
+func TestPromotionRaceWithIdentityChanges(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 512), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			h.handleIdentify(obs, types.Request{
+				ID: fmt.Sprintf("id%d", i), Type: "identify",
+				Data: mustRawJSON(t, map[string]string{"client_type": "mcp", "agent_name": "gozcu", "room": "r1"}),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			h.clearObserverBinding("r1", "gozcu")
+		}
+	}()
+	wg.Wait()
+}
