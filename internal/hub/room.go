@@ -38,6 +38,24 @@ type RoomState struct {
 	// on disk I/O — never call it while holding the room lock. nil means
 	// archiving is disabled (backward compatible).
 	archiveFn func([]types.Message)
+	// evictFn, if set, is called for each agent removed by the stale timeout,
+	// with how many seconds it had been idle. Unlike archiveFn this runs WITH
+	// the room lock held, which is safe only because the wired callback is a
+	// non-blocking event-log append — never give this one disk I/O.
+	evictFn func(agentName string, idleSeconds float64)
+	// resetFn, if set, is called from inside ClearArchived while the room lock is
+	// held, with the watermark that was wiped. Ordering it under the lock is the
+	// point: once the lock is released the room already accepts new messages that
+	// restart at ID 1, and a boundary logged after that would leave them on the
+	// wrong side of it. Like evictFn this must not block — the wired callback is
+	// a non-blocking event-log append.
+	resetFn func(maxID, generation int)
+	// generation counts how many times this room has been cleared. Stamped on
+	// send and read events UNDER the room lock so the analyzer never has to
+	// infer a message's generation from log ordering — a send that stores just
+	// before a concurrent clear would otherwise be logged after the boundary and
+	// attributed to the fresh room.
+	generation int
 }
 
 // SetArchiveFn installs the callback that receives messages leaving the room.
@@ -45,6 +63,22 @@ type RoomState struct {
 func (r *RoomState) SetArchiveFn(fn func([]types.Message)) {
 	r.mu.Lock()
 	r.archiveFn = fn
+	r.mu.Unlock()
+}
+
+// SetEvictFn installs the callback invoked for each stale-timeout eviction.
+// Passing nil disables it. Safe to call concurrently.
+func (r *RoomState) SetEvictFn(fn func(agentName string, idleSeconds float64)) {
+	r.mu.Lock()
+	r.evictFn = fn
+	r.mu.Unlock()
+}
+
+// SetResetFn installs the callback invoked from inside ClearArchived, under the
+// room lock. Passing nil disables it. Safe to call concurrently.
+func (r *RoomState) SetResetFn(fn func(maxID, generation int)) {
+	r.mu.Lock()
+	r.resetFn = fn
 	r.mu.Unlock()
 }
 
@@ -60,6 +94,11 @@ func NewRoomState() *RoomState {
 type PersistedRoom struct {
 	Messages []types.Message        `json:"messages"`
 	Agents   map[string]types.Agent `json:"agents"`
+	// Generation must survive a restart: events stamped before it carry the
+	// room's clear count, and reloading at zero would put a persisted message
+	// and a later read of that same message in different generations — reporting
+	// it unread forever. Omitted when zero so existing state files stay valid.
+	Generation int `json:"generation,omitempty"`
 }
 
 // SendOptions carries optional routing metadata.
@@ -169,6 +208,19 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 
 // SendMessage adds a message to the room.
 func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, priority string, opts SendOptions) (types.Message, error) {
+	msg, _, _, err := r.SendMessageWithPresence(from, to, content, expectsReply, priority, opts, "")
+	return msg, err
+}
+
+// SendMessageWithPresence stores the message and, under the SAME room lock,
+// reports whether presenceOf was in the roster at that instant.
+//
+// Reading the roster in a separate call after the send lets a concurrent join or
+// leave change the answer, which would make the misaddressed-message report
+// (#99) record the opposite of the roster state at the actual send point. An
+// empty presenceOf reports false and is what the plain SendMessage passes.
+// It also returns the room generation the message was stored in.
+func (r *RoomState) SendMessageWithPresence(from, to, content string, expectsReply bool, priority string, opts SendOptions, presenceOf string) (types.Message, bool, int, error) {
 	r.mu.Lock()
 
 	// Update sender's last_seen
@@ -193,12 +245,18 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	}
 	dropped := r.appendMessageLocked(msg)
 
+	present := false
+	if presenceOf != "" {
+		_, present = r.agents[presenceOf]
+	}
+	gen := r.generation
+
 	r.dirty = true
 	fn := r.archiveFn
 	r.mu.Unlock()
 
 	archiveDropped(dropped, fn)
-	return msg, nil
+	return msg, present, gen, nil
 }
 
 // LogUserPrompt records an out-of-band human→agent prompt in the transcript as a
@@ -268,8 +326,9 @@ func (r *RoomState) appendMessageLocked(msg types.Message) (dropped []types.Mess
 	return dropped
 }
 
-// ReadMessages returns filtered messages for an agent.
-func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnly bool) ([]types.Message, int) {
+// ReadMessages returns filtered messages for an agent, the total match count,
+// and the room generation the read observed.
+func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnly bool) ([]types.Message, int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -305,11 +364,12 @@ func (r *RoomState) ReadMessages(agentName string, sinceID, limit int, unreadOnl
 		filtered = filtered[len(filtered)-limit:]
 	}
 
-	return filtered, totalCount
+	return filtered, totalCount, r.generation
 }
 
 // ReadAllMessages returns all messages after sinceID, optionally limited.
-func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int) {
+// ReadAllMessages also returns the room generation the read observed.
+func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int, int) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -332,7 +392,7 @@ func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int) {
 		filtered = filtered[len(filtered)-limit:]
 	}
 
-	return filtered, totalCount
+	return filtered, totalCount, r.generation
 }
 
 // ListAgents returns active agents, cleaning up stale ones.
@@ -413,6 +473,14 @@ func (r *RoomState) TouchAgentLastSeen(agentName string) {
 	r.touchAgentLastSeenLocked(agentName)
 }
 
+// HasAgent reports whether an agent is currently in the room's roster.
+func (r *RoomState) HasAgent(agentName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.agents[agentName]
+	return ok
+}
+
 // IsObserver reports whether the named agent is currently in the room roster with
 // the observer role (#17). Used to reject a DIRECT message addressed to a live
 // observer even after the desktop revokes it from the allow-list — its roster entry
@@ -489,7 +557,17 @@ func (r *RoomState) ClearArchived(maxID int) {
 	r.agents = make(map[string]types.Agent)
 	r.managerAgent = ""
 	r.managerLastSeen = 0
+	r.generation++
 	r.dirty = true
+
+	// Still holding the lock: the generation boundary is ordered before any
+	// message the cleared room can accept, including the ID-1 message a client
+	// that is still joined may send the instant the lock is released.
+	if r.resetFn != nil {
+		// The generation the clear ended: r.generation was just incremented, so
+		// the boundary belongs to the one before it.
+		r.resetFn(maxID, r.generation-1)
+	}
 }
 
 // GetLastMessageID returns the highest message ID.
@@ -535,8 +613,9 @@ func (r *RoomState) Snapshot() PersistedRoom {
 	msgs := make([]types.Message, len(r.messages))
 	copy(msgs, r.messages)
 	return PersistedRoom{
-		Messages: msgs,
-		Agents:   r.copyAgentsLocked(),
+		Messages:   msgs,
+		Agents:     r.copyAgentsLocked(),
+		Generation: r.generation,
 	}
 }
 
@@ -675,6 +754,9 @@ func (r *RoomState) cleanupStaleLocked() {
 		if now-info.LastSeen >= float64(staleTimeout) {
 			delete(r.agents, name)
 			r.dirty = true
+			if r.evictFn != nil {
+				r.evictFn(name, now-info.LastSeen)
+			}
 		}
 	}
 	// Clear manager lock if timed out or agent was removed

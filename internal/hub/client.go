@@ -2,7 +2,9 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
+	"net"
 	"time"
 
 	"desktop/internal/types"
@@ -28,6 +30,12 @@ type Client struct {
 	desktopAuthed bool
 	agentName     string
 	joinedRoom    string
+	// closeCause is a low-cardinality classification of WHY the connection
+	// ended, set by readPump before it unregisters. Without it the structured
+	// stream cannot tell an orderly leave from a transport failure — which is
+	// the whole question #98 asks. Written by readPump, read by the client
+	// manager after readPump has returned, so no lock is needed.
+	closeCause string
 	// isObserver is set once at a gated observer join (#17). It is connection-bound,
 	// so an observer can never send_message for the life of this connection even if
 	// the desktop later removes it from the allow-list or clear_room wipes the roster
@@ -44,12 +52,44 @@ func newClient(hub *Hub, conn *websocket.Conn) *Client {
 	}
 }
 
+// Close causes. Deliberately few and fixed: this value is counted and grouped
+// by, so it must stay low-cardinality (never a formatted error string).
+const (
+	closeCauseUnknown   = "unknown"
+	closeCauseNormal    = "normal_close"
+	closeCauseGoingAway = "going_away"
+	closeCauseAbnormal  = "abnormal_close"
+	closeCauseTimeout   = "read_timeout"
+	closeCauseShutdown  = "hub_shutdown"
+	closeCauseReadErr   = "read_error"
+)
+
+// classifyCloseError maps a read failure onto one of the fixed causes. An
+// abnormal close is the signature of a process that vanished without a
+// handshake — the dominant pattern in the plain-text log (#98).
+func classifyCloseError(err error) string {
+	switch {
+	case websocket.IsCloseError(err, websocket.CloseNormalClosure):
+		return closeCauseNormal
+	case websocket.IsCloseError(err, websocket.CloseGoingAway):
+		return closeCauseGoingAway
+	case websocket.IsCloseError(err, websocket.CloseAbnormalClosure):
+		return closeCauseAbnormal
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return closeCauseTimeout
+	}
+	return closeCauseReadErr
+}
+
 // readPump reads messages from the WebSocket connection.
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
+	c.closeCause = closeCauseUnknown
 
 	c.conn.SetReadLimit(maxMsgSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -61,6 +101,7 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
+			c.closeCause = classifyCloseError(err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				c.hub.logger.Printf("WebSocket read error: %v", err)
 			}
@@ -78,6 +119,7 @@ func (c *Client) readPump() {
 		// (and the archive writes they trigger) to finish. Once shutdown closes
 		// request handling, stop reading — the connection is being torn down.
 		if !c.hub.beginRequest() {
+			c.closeCause = closeCauseShutdown
 			return
 		}
 		// endRequest via defer so the inflight count is always balanced, even if
@@ -147,27 +189,32 @@ func (c *Client) drainQueuedTextMessages() error {
 }
 
 // sendJSON sends a JSON-encoded message to this client.
-func (c *Client) sendJSON(v any) {
+// sendJSON queues a response, reporting whether it was accepted for delivery.
+// A full buffer drops the response, and a caller that records side effects
+// (read progress) must not record them for a response the client never got.
+func (c *Client) sendJSON(v any) bool {
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("sendJSON marshal error: %v", err)
-		return
+		return false
 	}
 	select {
 	case c.send <- data:
+		return true
 	default:
 		// Client buffer full, drop
 		c.hub.logger.Printf("Client send buffer full, dropping message for %s", c.agentName)
+		return false
 	}
 }
 
 // sendSuccess sends a successful response with an optional JSON payload.
-func (c *Client) sendSuccess(id, reqType string, payload any) {
+func (c *Client) sendSuccess(id, reqType string, payload any) bool {
 	resp := types.Response{ID: id, RequestType: reqType, Success: true}
 	if payload != nil {
 		resp.Data, _ = json.Marshal(payload)
 	}
-	c.sendJSON(resp)
+	return c.sendJSON(resp)
 }
 
 // sendOK sends a standard ok=true success response.
@@ -176,8 +223,8 @@ func (c *Client) sendOK(id, reqType string) {
 }
 
 // sendText sends a text-only success response.
-func (c *Client) sendText(id, reqType, text string) {
-	c.sendSuccess(id, reqType, map[string]string{"text": text})
+func (c *Client) sendText(id, reqType, text string) bool {
+	return c.sendSuccess(id, reqType, map[string]string{"text": text})
 }
 
 // sendError sends an error response.

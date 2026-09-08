@@ -14,11 +14,15 @@ import (
 )
 
 func main() {
-	// Check for --hub flag
+	// Mode selection. No flag = stdio MCP server, which is how the CLIs launch
+	// this binary; the other modes are explicit.
 	for _, arg := range os.Args[1:] {
-		if arg == "--hub" {
+		switch arg {
+		case "--hub":
 			runHub()
 			return
+		case "--analyze":
+			os.Exit(runAnalyze(os.Args[1:]))
 		}
 	}
 	runMCP()
@@ -120,6 +124,15 @@ func runMCP() {
 	defer client.Close()
 
 	logger.Printf("Connected to hub at %s", hubAddr)
+
+	// Identify as an MCP client. Without this the hub only ever sees an
+	// anonymous socket: connection telemetry cannot tell MCP from desktop, and
+	// the connect event (emitted on identify) never fires for the CLI agents at
+	// all. Non-fatal — a hub that rejects it must not stop the agent from
+	// working, so the failure is logged and serving continues.
+	if err := client.Identify("mcp", "", defaultRoom, ""); err != nil {
+		logger.Printf("Identify failed (continuing unidentified): %v", err)
+	}
 
 	app := mcpserver.NewMCPServerApp(client, defaultRoom, logger)
 	if err := app.Serve(); err != nil {

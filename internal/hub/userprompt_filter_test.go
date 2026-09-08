@@ -19,7 +19,7 @@ func TestUserPromptFilteredFromAgentReads(t *testing.T) {
 	r.LogUserPrompt(types.UserPromptFrom, "alice", "şu görevi yap", "")
 
 	// read_messages("alice") — no user_prompt, but the normal message stays.
-	msgs, _ := r.ReadMessages("alice", 0, 0, false)
+	msgs, _, _ := r.ReadMessages("alice", 0, 0, false)
 	for _, m := range msgs {
 		if m.Type == types.MsgTypeUserPrompt {
 			t.Fatalf("ReadMessages leaked a user_prompt to the agent: %+v", m)
@@ -36,7 +36,7 @@ func TestUserPromptFilteredFromAgentReads(t *testing.T) {
 	}
 
 	// read_all_messages (manager) — also excludes user_prompt.
-	all, _ := r.ReadAllMessages(0, 0)
+	all, _, _ := r.ReadAllMessages(0, 0)
 	for _, m := range all {
 		if m.Type == types.MsgTypeUserPrompt {
 			t.Fatalf("ReadAllMessages leaked a user_prompt: %+v", m)

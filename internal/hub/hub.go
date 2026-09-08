@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"desktop/internal/eventlog"
 	"desktop/internal/types"
 
 	"github.com/gorilla/websocket"
@@ -86,11 +87,34 @@ type Hub struct {
 	inflightRequests sync.WaitGroup
 
 	listener net.Listener
+
+	// events is the structured event stream (#101): the measurement layer for
+	// why agents drop out of rooms and miss each other's messages. Never nil —
+	// a hub without a data dir, or one whose stream cannot be opened, gets a
+	// no-op logger so logging can never be the reason the hub fails.
+	events *eventlog.Logger
 }
 
 // New creates a new Hub.
 func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 	desktopAuthToken := strings.TrimSpace(os.Getenv("AGENT_CHAT_HUB_TOKEN"))
+
+	// A dataDir-less hub (unit tests, in-process use) logs nowhere; otherwise a
+	// failure to open the stream is reported and downgraded, never fatal.
+	events := eventlog.NopLogger()
+	if dataDir != "" {
+		var err error
+		// OnError routes sink failures into the plain-text log: the desktop
+		// starts the hub with its stderr unset, so a bare stderr write would
+		// vanish exactly when the disk is failing.
+		opts := eventlog.Options{Dir: dataDir, OnError: func(err error) {
+			logger.Printf("Olay logu yazma hatası: %v", err)
+		}}
+		if events, err = eventlog.New(opts); err != nil {
+			logger.Printf("Olay logu açılamadı, olay kaydı devre dışı: %v", err)
+		}
+	}
+
 	return &Hub{
 		rooms:            make(map[string]*RoomState),
 		clients:          make(map[*Client]bool),
@@ -108,6 +132,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveCh:        make(chan archiveJob, archiveBufferSize),
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
+		events:           events,
 	}
 }
 
@@ -131,6 +156,11 @@ func (h *Hub) Run(port int) error {
 	if err := os.WriteFile(portPath, []byte(fmt.Sprintf("%d", actualPort)), 0644); err != nil {
 		h.logger.Printf("Failed to write hub.port: %v", err)
 	}
+
+	h.events.Log(eventlog.EventHubStarted,
+		eventlog.Int(eventlog.AttrServerPort, actualPort),
+		eventlog.Int(eventlog.AttrPID, os.Getpid()),
+	)
 
 	// Start client manager
 	go h.runClientManager()
@@ -172,6 +202,12 @@ func (h *Hub) Shutdown() {
 	// "enqueue-after-drain" shutdown races.
 	if h.listener != nil {
 		h.listener.Close()
+		// The hub is unreachable from here on, but the stopped record is only
+		// written after draining and persistence — potentially seconds later.
+		// Connections refused in between belong to the outage, so mark its real
+		// start now. Written synchronously: a crash mid-shutdown must not lose
+		// the boundary, and there may be no later event to carry it.
+		h.events.LogSync(eventlog.EventHubUnavailable)
 	}
 	h.requestMu.Lock()
 	h.requestsClosed = true
@@ -201,8 +237,10 @@ func (h *Hub) Shutdown() {
 	}
 	h.drainArchiveBacklog()
 
-	// Persist all state
-	h.persistAll()
+	// Persist all state. Whether it succeeded is continuity evidence: a failed
+	// persist leaves the next process loading an older snapshot, free to reuse
+	// message IDs exactly as a crash does.
+	persisted := h.persistAll()
 
 	// Close all client connections
 	h.mu.Lock()
@@ -214,6 +252,19 @@ func (h *Hub) Shutdown() {
 
 	// Remove port file
 	os.Remove(filepath.Join(h.dataDir, "hub.port"))
+
+	// Drain BEFORE snapshotting the count: a queued event that fails to write
+	// increments it, and once this record is out there is no later event for the
+	// writer to hang a durable marker on. Written synchronously because it
+	// reports the loss and so must not itself be droppable.
+	h.events.Drain()
+	h.events.LogSync(eventlog.EventHubStopped,
+		eventlog.Uint64(eventlog.AttrEventsDropped, h.events.Dropped()),
+		eventlog.Bool(eventlog.AttrPersistOK, persisted),
+	)
+	if err := h.events.Close(); err != nil {
+		h.logger.Printf("Olay logu kapatılamadı: %v", err)
+	}
 
 	h.logger.Println("Hub shut down")
 }
@@ -261,10 +312,16 @@ func (h *Hub) runClientManager() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			// No connect event here: clientType is not assigned until identify
+			// runs, so this point can only ever record a blank one. The typed
+			// event is emitted from handleIdentify instead.
 			h.logger.Printf("Client connected (total: %d)", len(h.clients))
 
 		case client := <-h.unregister:
-			var joinedRoom, agentName string
+			var joinedRoom, agentName, clientType string
+			// readPump has returned by the time it sends on unregister, so this
+			// is safe to read without a lock.
+			closeCause := client.closeCause
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
@@ -277,6 +334,7 @@ func (h *Hub) runClientManager() {
 				}
 				joinedRoom = client.joinedRoom
 				agentName = client.agentName
+				clientType = client.clientType
 			}
 			h.mu.Unlock()
 
@@ -288,9 +346,24 @@ func (h *Hub) runClientManager() {
 					agents := roomState.GetAgents()
 					h.broadcastEvent(joinedRoom, "message_new", map[string]any{"message": sysMsg})
 					h.broadcastEvent(joinedRoom, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
+					// Reason "disconnect" is what separates #98's first drop
+					// mechanism (connection lost, no rejoin) from an explicit leave.
+					h.events.Log(eventlog.EventAgentLeft,
+						eventlog.String(eventlog.AttrConversationID, joinedRoom),
+						eventlog.String(eventlog.AttrAgentName, agentName),
+						eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
+					)
 				}
 			}
 
+			h.events.Log(eventlog.EventClientDisconnected,
+				eventlog.String(eventlog.AttrAgentName, agentName),
+				eventlog.String(eventlog.AttrConversationID, joinedRoom),
+				eventlog.String(eventlog.AttrClientType, clientType),
+				// Answers "did it leave or did it fall over" — the distinction
+				// the whole stream exists to make (#98).
+				eventlog.String(eventlog.AttrErrorType, closeCause),
+			)
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}
 	}
@@ -307,6 +380,8 @@ func (h *Hub) getOrCreateRoom(room string) *RoomState {
 	delete(h.deletedRooms, room) // legitimate (re)creation lifts any tombstone
 	r := NewRoomState()
 	r.SetArchiveFn(h.archiveFnFor(room))
+	r.SetEvictFn(h.evictFnFor(room))
+	r.SetResetFn(h.resetFnFor(room))
 	h.rooms[room] = r
 	return r
 }
@@ -318,6 +393,37 @@ func (h *Hub) getRoom(room string) *RoomState {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rooms[room]
+}
+
+// evictFnFor builds the per-room callback that records a stale-timeout eviction.
+// Safe to run under the room lock: eventlog.Log is a non-blocking channel send,
+// unlike archiveFn which may reach disk.
+func (h *Hub) evictFnFor(room string) func(string, float64) {
+	return func(agentName string, idleSeconds float64) {
+		h.events.Log(eventlog.EventAgentEvicted,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, agentName),
+			eventlog.Float64(eventlog.AttrIdleSeconds, idleSeconds),
+		)
+	}
+}
+
+// resetFnFor builds the per-room callback that records a clear as a generation
+// boundary. Safe under the room lock for the same reason evictFn is: an event-log
+// append is a non-blocking channel send.
+func (h *Hub) resetFnFor(room string) func(int, int) {
+	return func(maxID, generation int) {
+		h.events.Log(eventlog.EventRoomReset,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleCleared),
+			eventlog.Int(eventlog.AttrRoomResetMaxID, maxID),
+			// The generation this clear ENDED, stamped under the room lock. The
+			// analyzer would otherwise reconstruct it by counting boundaries,
+			// which drifts once rotation discards an older clear or a rollback
+			// reloads an earlier generation.
+			eventlog.Int(eventlog.AttrRoomGeneration, generation),
+		)
+	}
 }
 
 // archiveFnFor builds the per-room callback that captures messages leaving the

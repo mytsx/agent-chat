@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"desktop/internal/eventlog"
 	"desktop/internal/summary"
 	"desktop/internal/types"
 	"desktop/internal/validation"
@@ -105,6 +106,16 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 	if data.Room != "" {
 		c.rooms[data.Room] = true
 	}
+
+	// The connect event is emitted here rather than at register: a raw WebSocket
+	// reaches the register case before identify runs, so the client type would
+	// always be blank there and the telemetry could not tell MCP from desktop.
+	h.events.Log(eventlog.EventClientConnected,
+		eventlog.String(eventlog.AttrClientType, c.clientType),
+		eventlog.String(eventlog.AttrAgentName, c.agentName),
+		eventlog.String(eventlog.AttrNetworkTransport, eventlog.TransportWebSocket),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	h.logger.Printf("Client identified: type=%s agent=%s", data.ClientType, data.AgentName)
 
@@ -347,9 +358,22 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	roomState := h.getOrCreateRoom(room)
 	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
 	if err != nil {
+		h.events.Log(eventlog.EventError,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, data.AgentName),
+			eventlog.String(eventlog.AttrMCPMethod, req.Type),
+			eventlog.String(eventlog.AttrErrorType, "join_rejected"),
+		)
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
+
+	h.events.Log(eventlog.EventAgentJoined,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.AgentName),
+		eventlog.String(eventlog.AttrAgentRole, role),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	// Also subscribe the client to this room
 	h.mu.Lock()
@@ -473,13 +497,46 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		to = activeManager
 	}
 
-	msg, err := roomState.SendMessage(data.From, to, data.Content, data.ExpectsReply, data.Priority, opts)
+	// Presence is captured under the same lock as the store: a separate lookup
+	// afterwards could see a roster a concurrent join/leave already changed.
+	msg, recipientPresent, roomGen, err := roomState.SendMessageWithPresence(
+		data.From, to, data.Content, data.ExpectsReply, data.Priority, opts, data.To)
 	if err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
 	}
 
 	h.logger.Printf("send_message: id=%d saved to room=%s", msg.ID, room)
+
+	// recipient.in_room is recorded at send time because only the hub knows the
+	// roster right then; it is what makes "wrote to somebody who wasn't there"
+	// (#99) countable without replaying the whole event stream.
+	h.events.Log(eventlog.EventMessageSent,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.From),
+		eventlog.String(eventlog.AttrRecipientName, data.To),
+		eventlog.Bool(eventlog.AttrRecipientInRoom, data.To == "all" || recipientPresent),
+		// The manager gateway can store the message for somebody other than the
+		// addressee; recording both keeps "wrote to an absent agent" and "nobody
+		// read this" answerable without either question corrupting the other.
+		eventlog.String(eventlog.AttrDeliveryTarget, to),
+		// Stamped from the locked store, not inferred from log order: a clear
+		// racing this send would otherwise put the event on the wrong side of
+		// the generation boundary.
+		eventlog.Int(eventlog.AttrRoomGeneration, roomGen),
+		eventlog.Int(eventlog.AttrMessageID, msg.ID),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+		eventlog.String(eventlog.AttrInputMessages, data.Content),
+	)
+	if intercepted {
+		h.events.Log(eventlog.EventMessageRerouted,
+			eventlog.String(eventlog.AttrConversationID, room),
+			eventlog.String(eventlog.AttrAgentName, data.From),
+			eventlog.String(eventlog.AttrRecipientName, opts.OriginalTo),
+			eventlog.String(eventlog.AttrRerouteTarget, activeManager),
+			eventlog.Int(eventlog.AttrMessageID, msg.ID),
+		)
+	}
 
 	var text string
 	if intercepted {
@@ -522,14 +579,61 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 
 	roomState := h.getOrCreateRoom(room)
 	roomState.TouchManagerHeartbeat(c.agentName)
-	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
+	filtered, totalCount, roomGen := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, roomGen, nil)
 		return
 	}
 
-	c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit))
+	// Record progress only once the response is accepted for delivery: a full
+	// client buffer drops it, and marking those IDs read would erase from the
+	// report the very messages the agent never received.
+	if c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit)) {
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, roomGen, filtered)
+	}
+}
+
+// logMessagesRead records exactly which messages a read returned.
+//
+// The ID list — not just the highest ID — is what the analyzer needs: a read is
+// capped by its limit and returns only the newest matching tail, so an older
+// direct message can be pushed out by newer broadcasts. Treating the highest
+// returned ID as a watermark would mark that unseen message as read.
+func (h *Hub) logMessagesRead(room, agentName, requestID string, sinceID, roomGen int, msgs []types.Message) {
+	if agentName == "" {
+		return // unauthenticated read: no agent whose progress this advances
+	}
+
+	maxID := 0
+	ids := make([]int, 0, len(msgs))
+	for _, m := range msgs {
+		if m.ID > maxID {
+			maxID = m.ID
+		}
+		ids = append(ids, m.ID)
+	}
+
+	attrs := []eventlog.Attr{
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, agentName),
+		eventlog.Int(eventlog.AttrRoomGeneration, roomGen),
+		eventlog.Int(eventlog.AttrReadSinceID, sinceID),
+		eventlog.Int(eventlog.AttrReadReturned, len(msgs)),
+		eventlog.Int(eventlog.AttrReadMaxID, maxID),
+		eventlog.String(eventlog.AttrRequestID, requestID),
+	}
+	// Ranges, not a capped ID list: a read is almost always a contiguous tail,
+	// so this collapses to one pair, and an oversized read no longer has to fall
+	// back to the watermark — which cannot express "these IDs specifically".
+	// A manager's read_all_messages(limit=1000) can exceed any fixed cap because
+	// manager and observer joins deliberately bypass the room's truncation.
+	if r := eventlog.EncodeIDRanges(ids); len(r) > 0 {
+		attrs = append(attrs, eventlog.Ints(eventlog.AttrReadIDRanges, r))
+	}
+
+	h.events.Log(eventlog.EventMessagesRead, attrs...)
 }
 
 func formatAgentMessages(messages []types.Message, totalCount, limit int) string {
@@ -559,17 +663,22 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		return
 	}
 	var filtered []types.Message
-	totalCount := 0
+	totalCount, roomGen := 0, 0
 	if roomState != nil {
-		filtered, totalCount = roomState.ReadAllMessages(data.SinceID, data.Limit)
+		filtered, totalCount, roomGen = roomState.ReadAllMessages(data.SinceID, data.Limit)
 	}
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, roomGen, nil)
 		return
 	}
 
-	c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit))
+	// Managers are told to poll read_all_messages, so this path must record
+	// progress too — but, as above, only for a response that was actually queued.
+	if c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit)) {
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, roomGen, filtered)
+	}
 }
 
 func formatAllMessages(messages []types.Message, totalCount, limit int) string {
@@ -729,6 +838,13 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		return
 	}
 
+	h.events.Log(eventlog.EventAgentLeft,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, data.AgentName),
+		eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonExplicit),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
+
 	c.sendText(req.ID, req.Type, fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName))
 	c.agentName = ""
 	c.joinedRoom = ""
@@ -784,6 +900,8 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	// wrongly skip its snapshot.
 	h.resetSessionTracking(room)
 
+	// Same reason the analyzer must forget its read state: with IDs restarting
+	// at 1, a recipient's earlier progress would make reused IDs look read.
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
 	c.sendText(req.ID, req.Type, text)
 
@@ -1094,6 +1212,15 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 	delete(h.subs, room)
 	delete(h.roomManager, room)
 	delete(h.roomObservers, room)
+	// Emitted while h.mu still excludes recreation: a room recreated in this gap
+	// restarts its message IDs, and its events would otherwise be logged before
+	// the boundary and stranded in the deleted room's generation. (No disk I/O
+	// here — an event-log append is a non-blocking channel send.)
+	h.events.Log(eventlog.EventRoomReset,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleDeleted),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 	h.mu.Unlock()
 
 	// Forget the room's last-snapshot signature so a later room reusing this name isn't

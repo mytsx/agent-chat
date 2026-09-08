@@ -1,8 +1,6 @@
 package hub
 
 import (
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,7 +43,7 @@ func TestRoomNameValidation_RejectsTraversal(t *testing.T) {
 // room into a write outside hub-state. Its guard must skip a traversal name even
 // when called directly (defense-in-depth beyond the handler checks).
 func TestPersistRoom_RejectsTraversalName(t *testing.T) {
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 	rs := h.getOrCreateRoom("legit")
 	if _, err := rs.SendMessage("a", "all", "hi", false, "", SendOptions{}); err != nil {
 		t.Fatalf("seed: %v", err)
