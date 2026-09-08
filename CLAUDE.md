@@ -66,7 +66,7 @@ CLI Agent (Claude/Gemini/Copilot)
 |---------|---------|
 | `internal/types/` | Shared types: `Message`, `Agent`, `Request`, `Response`, `Event` |
 | `internal/hub/` | WebSocket hub server: room state, client management, persistence, request dispatch |
-| `internal/hubclient/` | WebSocket client: request-response RPC (15s timeout), event handling, reconnection (exponential backoff) |
+| `internal/hubclient/` | WebSocket client: request-response RPC (15s timeout), event handling, **supervised reconnect** (jittered backoff, address re-resolution, session replay) |
 | `internal/mcpserver/` | MCP tool implementations (9 tools), thin RPC wrappers over hub client |
 | `internal/pty/` | PTY management — spawns CLIs, handles UTF-8 buffering, idle detection |
 | `internal/orchestrator/` | Message routing — analyzes content, manages cooldowns (3s), batches notifications |
@@ -76,10 +76,41 @@ CLI Agent (Claude/Gemini/Copilot)
 | `internal/validation/` | Name validation (path traversal, forbidden chars, emoji) |
 | `internal/eventlog/` | Structured JSONL event stream + `--analyze` reports (OTel semconv field names) |
 
+### Agent Liveness (#98)
+
+Three distinct mechanisms used to look like one bug ("agent odadan düştü"):
+
+1. **Never reached the hub.** `DiscoverHubAddr` failing used to `os.Exit(1)`, so
+   an MCP process that started before the desktop wrote `hub.port` simply died
+   (12.765 such lines in the shipped log). Startup no longer blocks or exits on
+   the hub: stdio is served immediately and `StartBackgroundConnect` dials in the
+   background. An MCP server that stalls or exits during startup is marked failed
+   by its host and never retried, so this is not optional.
+2. **Connected, dropped, never came back.** There was no reconnect at all —
+   `ConnectWithRetry` ran once at startup, and after any read error `conn` went
+   nil and every `Send` failed for the life of the process. `readLoop` now hands
+   off to a supervisor: jittered exponential backoff (500ms → 30s), the address
+   **re-resolved on every dial** (the hub uses `Run(0)`, so a restart moves it to
+   a new port), and the session — identify, join, subscriptions — replayed on
+   reconnect, because the hub drops an agent from the roster the moment its
+   socket dies. A deliberate `leave_room` cancels the replay.
+3. **Connected but evicted.** `staleTimeout` only saw `LastSeen`, which only RPC
+   calls refreshed, so an agent working quietly for five minutes was removed.
+   Liveness now comes from the connection (`Hub.connectedAgents`, a **count** so a
+   reconnect handover never flickers to "gone"), guarded by its own `connMu` —
+   reusing `h.mu` would invert `persistRoom`'s `h.mu → room lock` order.
+
+Departures are deferred by `graceWindow` (5s): the room's system messages are
+read by the other agents, so a blip must not tell the team that someone left and
+a stranger arrived.
+
+Client-side read deadline is 90s with a ping handler, so a half-open socket is
+detected instead of hanging `readLoop` forever.
+
 ### Hub Internals
 
 - Room messages capped at 500; truncated to 300 when limit exceeded
-- Stale agents (5min idle) automatically removed on `list_agents`
+- Stale agents (5min idle) removed on `list_agents` — **only if disconnected** (see Agent Liveness)
 - Each WebSocket message must be a single JSON frame (no batching/concatenation)
 - Hub discovers port via `~/.agent-chat/hub.port` file or `AGENT_CHAT_HUB_PORT` env override
 - Persistence: atomic write (temp file + rename) to `hub-state/{room}.json`

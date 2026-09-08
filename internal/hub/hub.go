@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"desktop/internal/eventlog"
 	"desktop/internal/types"
@@ -95,6 +96,9 @@ type Hub struct {
 	// bool: a reconnecting client registers its new connection before the old
 	// one unregisters, and the agent must not flicker to "gone" in between.
 	connectedAgents map[string]int
+	// graceWindow is how long a departure waits before it is written down. A
+	// client that reconnects inside it leaves no trace; see releaseAgent.
+	graceWindow time.Duration
 
 	listener net.Listener
 
@@ -143,6 +147,7 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 		archiveDone:      make(chan struct{}),
 		sessionLastSig:   make(map[string]string),
 		connectedAgents:  make(map[string]int),
+		graceWindow:      defaultGraceWindow,
 		events:           events,
 	}
 }
@@ -351,23 +356,7 @@ func (h *Hub) runClientManager() {
 
 			// If this client had joined as an agent, remove it immediately
 			// so name re-use and manager lock cleanup do not wait for stale timeout.
-			h.agentDisconnected(joinedRoom, agentName)
-
-			if joinedRoom != "" && agentName != "" {
-				roomState := h.getOrCreateRoom(joinedRoom)
-				if sysMsg, found := roomState.Leave(agentName); found {
-					agents := roomState.GetAgents()
-					h.broadcastEvent(joinedRoom, "message_new", map[string]any{"message": sysMsg})
-					h.broadcastEvent(joinedRoom, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
-					// Reason "disconnect" is what separates #98's first drop
-					// mechanism (connection lost, no rejoin) from an explicit leave.
-					h.events.Log(eventlog.EventAgentLeft,
-						eventlog.String(eventlog.AttrConversationID, joinedRoom),
-						eventlog.String(eventlog.AttrAgentName, agentName),
-						eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
-					)
-				}
-			}
+			h.releaseAgent(joinedRoom, agentName)
 
 			h.events.Log(eventlog.EventClientDisconnected,
 				eventlog.String(eventlog.AttrAgentName, agentName),
@@ -381,6 +370,15 @@ func (h *Hub) runClientManager() {
 		}
 	}
 }
+
+// defaultGraceWindow defers a departure long enough for a reconnect to land.
+//
+// The room's system messages are read BY the other agents, so writing
+// "X ayrıldı" and then "X katıldı" for every blip is not just log noise: it
+// tells the team someone left and a new one arrived. The client's reconnect
+// backoff starts well under a second, so a few seconds covers a real blip while
+// still clearing a genuinely departed agent promptly.
+const defaultGraceWindow = 5 * time.Second
 
 // connKey identifies one agent's presence in one room.
 func connKey(room, agentName string) string { return room + "\x00" + agentName }
@@ -426,6 +424,62 @@ func (h *Hub) isAgentConnected(room, agentName string) bool {
 // mechanism.
 func (h *Hub) connectedFnFor(room string) func(string) bool {
 	return func(agentName string) bool { return h.isAgentConnected(room, agentName) }
+}
+
+// releaseAgent gives up one connection's claim on an agent and, if that was the
+// last one, schedules the departure after the grace window.
+//
+// The departure is deferred rather than immediate because a reconnect that
+// lands inside the window should be invisible: previously every blip wrote a
+// leave and a join into the room, which the other agents read as a teammate
+// leaving and a stranger arriving.
+func (h *Hub) releaseAgent(room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	h.agentDisconnected(room, agentName)
+	if h.isAgentConnected(room, agentName) {
+		return // another connection still holds this agent
+	}
+
+	grace := h.graceWindow
+	if grace <= 0 {
+		h.finalizeDeparture(room, agentName)
+		return
+	}
+	time.AfterFunc(grace, func() {
+		select {
+		case <-h.done:
+			return // shutting down; the roster is being torn down anyway
+		default:
+		}
+		h.finalizeDeparture(room, agentName)
+	})
+}
+
+// finalizeDeparture removes an agent that did not come back.
+func (h *Hub) finalizeDeparture(room, agentName string) {
+	if h.isAgentConnected(room, agentName) {
+		return // reconnected inside the window: nothing happened
+	}
+	roomState := h.getRoom(room)
+	if roomState == nil {
+		return
+	}
+	sysMsg, found := roomState.Leave(agentName)
+	if !found {
+		return
+	}
+	agents := roomState.GetAgents()
+	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})
+	h.broadcastEvent(room, "agent_left", map[string]any{"agent_name": agentName, "agents": agents})
+	// Reason "disconnect" is what separates #98's connection-loss mechanism
+	// from an explicit leave.
+	h.events.Log(eventlog.EventAgentLeft,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, agentName),
+		eventlog.String(eventlog.AttrLeaveReason, eventlog.LeaveReasonDisconnect),
+	)
 }
 
 // getOrCreateRoom returns the room state, creating it if it doesn't exist.

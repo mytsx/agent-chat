@@ -779,3 +779,53 @@ func TestLivenessSurvivesReconnectHandover(t *testing.T) {
 		t.Error("son bağlantı da kapandığı hâlde agent bağlı sayılıyor")
 	}
 }
+
+// A brief blip used to write "X ayrıldı" and then "X katıldı" into the room —
+// system messages the other agents READ, so a reconnect looked like a departure
+// and a new arrival. With a grace window a client that comes right back leaves
+// no trace.
+func TestQuickReconnectLeavesNoDepartureNoise(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.graceWindow = 200 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	msgsBefore := len(h.getOrCreateRoom("r1").GetMessages())
+
+	// The socket dies and the client is back before the window closes.
+	h.releaseAgent("r1", "alice")
+	h.agentConnected("r1", "alice")
+
+	time.Sleep(400 * time.Millisecond)
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("pencere içinde dönen agent yine de odadan düşürüldü")
+	}
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != msgsBefore {
+		t.Errorf("mesaj sayısı %d → %d; kısa kopuş transcript'e gürültü yazdı", msgsBefore, got)
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentLeft); len(got) != 0 {
+		t.Errorf("dönen agent için ayrılma olayı yazıldı: %+v", got)
+	}
+}
+
+// An agent that does NOT come back must still be removed once the window
+// closes — the window defers the departure, it does not cancel it.
+func TestAgentGoneAfterGraceWindow(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.graceWindow = 100 * time.Millisecond
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.releaseAgent("r1", "alice")
+	time.Sleep(300 * time.Millisecond)
+
+	if h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("pencere kapandığı hâlde agent roster'da kaldı")
+	}
+	got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentLeft)
+	if len(got) != 1 {
+		t.Fatalf("ayrılma olayı sayısı = %d, want 1", len(got))
+	}
+	if got[0][eventlog.AttrLeaveReason] != eventlog.LeaveReasonDisconnect {
+		t.Errorf("%s = %v, want %q", eventlog.AttrLeaveReason, got[0][eventlog.AttrLeaveReason], eventlog.LeaveReasonDisconnect)
+	}
+}
