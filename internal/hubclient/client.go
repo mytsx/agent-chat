@@ -57,9 +57,13 @@ type session struct {
 	// pre-connect join (say the caller corrected the room) was discarded because
 	// the first pending intent already set joined.
 	joinEstablished bool
-	joinRoom        string
-	joinAgent       string
-	joinRole        string
+	// gen advances on every deliberate membership change (a leave). A join that
+	// was already in flight — notably one the supervisor is replaying — must not
+	// resurrect an intent the caller cleared while it ran.
+	gen       uint64
+	joinRoom  string
+	joinAgent string
+	joinRole  string
 
 	subs []string
 }
@@ -744,6 +748,10 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 		"agent_name": agentName,
 		"role":       role,
 	})
+	c.mu.Lock()
+	startGen := c.sess.gen
+	c.mu.Unlock()
+
 	resp, err := c.Send(types.Request{Type: "join_room", Room: room, Data: data})
 
 	succeeded := err == nil && resp != nil && resp.Success
@@ -755,22 +763,38 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 	//                        way on every reconnect, forever
 	unreached := err != nil
 
+	c.recordJoinIfCurrent(startGen, room, agentName, role, succeeded, unreached)
+	return resp, err
+}
+
+// recordJoinIfCurrent stores the join outcome unless a deliberate leave landed
+// while the request was in flight.
+//
+// A leave that arrives mid-join wins: recording the intent afterwards would
+// silently rejoin the agent on the next reconnect, undoing a departure the
+// caller asked for. This is reachable through the supervisor's replay, which
+// runs concurrently with user calls.
+func (c *HubClient) recordJoinIfCurrent(startGen uint64, room, agentName, role string, succeeded bool, unreached ...bool) {
+	transportFailed := len(unreached) > 0 && unreached[0]
+
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.gen != startGen {
+		return
+	}
 	// A failed join is kept only when nothing is established yet: with a
 	// background connect the agent can call join_room before the first dial
 	// lands, and dropping that would leave it outside the room. But letting a
 	// failed join for room B overwrite an established membership in room A would
 	// silently move the client, and its later operations — still aimed at A —
 	// would be rejected as wrong-room.
-	if succeeded || (unreached && !c.sess.joinEstablished) {
+	if succeeded || (transportFailed && !c.sess.joinEstablished) {
 		c.sess.joined = true
 		c.sess.joinEstablished = succeeded
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
 	}
-	c.mu.Unlock()
-	return resp, err
 }
 
 // SendMessage sends a message to a room.
@@ -846,6 +870,9 @@ func (c *HubClient) LeaveRoom(room, agentName string) (*types.Response, error) {
 		c.sess.joined = false
 		c.sess.joinEstablished = false
 	}
+	// Advance regardless: a join racing this leave must lose even if the intent
+	// was not set when we looked.
+	c.sess.gen++
 	c.mu.Unlock()
 
 	resp, err := c.Send(types.Request{Type: "leave_room", Room: room, Data: data})

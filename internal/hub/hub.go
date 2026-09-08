@@ -489,6 +489,19 @@ func (h *Hub) claimDeparture(key string, gen uint64) bool {
 	return true
 }
 
+// isAgentHeldByOther reports whether some OTHER connection currently vouches
+// for this agent. clear_room empties the roster without touching sockets, so a
+// name can be free in the roster while a live socket still answers to it.
+func (h *Hub) isAgentHeldByOther(c *Client, room, agentName string) bool {
+	key := connKey(room, agentName)
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	if h.connectedAgents[key] == 0 {
+		return false
+	}
+	return c == nil || c.livenessKey != key
+}
+
 // isAgentProtected reports whether an agent must survive stale cleanup: it is
 // connected, or its grace window has not closed yet.
 func (h *Hub) isAgentProtected(room, agentName string) bool {
@@ -520,8 +533,59 @@ func (h *Hub) releaseAgentForClient(c *Client, room, agentName string) {
 	if room == "" || agentName == "" {
 		return
 	}
-	h.releaseClientLiveness(c)
-	h.scheduleDeparture(room, agentName)
+	// Releasing the claim and installing the grace window must be ONE locked
+	// step: in the gap between them the agent counts as neither connected nor
+	// departing, and a concurrent list_agents on a long-quiet agent deletes the
+	// roster entry outright — turning the reconnect into a noisy fresh join.
+	gen, armed := h.releaseAndArmGrace(c, room, agentName)
+	if !armed {
+		return // another connection still holds the agent
+	}
+	h.startDepartureTimer(room, agentName, gen)
+}
+
+// releaseAndArmGrace drops this connection's claim and, if it was the last one,
+// arms the grace window — atomically. Returns the window's generation and
+// whether it was armed.
+func (h *Hub) releaseAndArmGrace(c *Client, room, agentName string) (uint64, bool) {
+	key := connKey(room, agentName)
+
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+
+	if c != nil && c.livenessKey == key {
+		if n := h.connectedAgents[key] - 1; n > 0 {
+			h.connectedAgents[key] = n
+		} else {
+			delete(h.connectedAgents, key)
+		}
+		c.livenessKey = ""
+	}
+	if h.connectedAgents[key] > 0 {
+		return 0, false
+	}
+
+	h.departGen[key]++
+	if h.graceWindow > 0 {
+		h.departUntil[key] = time.Now().Add(h.graceWindow)
+	}
+	return h.departGen[key], true
+}
+
+// startDepartureTimer schedules the removal for an already-armed window.
+func (h *Hub) startDepartureTimer(room, agentName string, gen uint64) {
+	if h.graceWindow <= 0 {
+		h.finalizeDeparture(room, agentName, gen)
+		return
+	}
+	time.AfterFunc(h.graceWindow, func() {
+		select {
+		case <-h.done:
+			return // shutting down; the roster is being torn down anyway
+		default:
+		}
+		h.finalizeDeparture(room, agentName, gen)
+	})
 }
 
 // scheduleDeparture defers the removal so a reconnect inside the window is

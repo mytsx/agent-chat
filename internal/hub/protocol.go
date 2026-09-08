@@ -382,34 +382,21 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// takeover and the fresh-join path. Claiming after the lock is released
 	// leaves a window in which another socket sees the entry as unclaimed.
 	claim := func() { h.claimLiveness(c, room, data.AgentName) }
+	heldByOther := func() bool { return h.isAgentHeldByOther(c, room, data.AgentName) }
 
-	// A repeat of the join this very socket already owns is idempotent, not a
-	// collision. It happens on the normal startup path: join_room called before
-	// the background dial returns a transport error, the supervisor replays it
-	// successfully, and the agent — having only seen the error — tries again.
-	// Falling through to Join would tell it its own name is taken.
+	// Reclaiming an existing roster entry — whether because the grace window is
+	// still holding it after a drop, or because this very socket is repeating a
+	// join it already owns (the startup path: join_room before the background
+	// dial errors, the supervisor replays it, the agent retries on the error it
+	// saw). Either way nobody new arrived, so the room hears nothing.
 	//
-	// The roster check is not redundant: clear_room empties the roster without
-	// touching connections, so this socket can still believe it is joined while
-	// its entry is gone. Short-circuiting then would report success and leave the
-	// agent out of the room for good.
-	if c.agentName == data.AgentName && c.joinedRoom == room && roomState.HasAgent(data.AgentName) {
-		h.claimLiveness(c, room, data.AgentName)
-		c.sendSuccess(req.ID, req.Type, map[string]any{
-			"text":   fmt.Sprintf("\u2705 '%s' zaten '%s' odasında.", data.AgentName, room),
-			"agents": roomState.GetAgents(),
-		})
-		return
-	}
-
-	// A reconnecting client finds its own roster entry still held by the grace
-	// window (releaseAgent). That is a takeover, not a name collision: refresh
-	// the entry, bind the new connection, and stay silent — announcing an
-	// arrival for a client that never really left is exactly the noise the
-	// window exists to prevent. Guarded on the entry being DISCONNECTED, so a
-	// genuine name clash with a live agent still fails.
-	if !h.isAgentConnected(room, data.AgentName) {
-		if agents, ok := roomState.Takeover(data.AgentName, role, claim); ok {
+	// Takeover applies the role, which matters: a repeat that upgrades to
+	// "manager" must actually take the routing lock rather than report a success
+	// that changes nothing.
+	//
+	// Barred when ANOTHER live socket answers to the name — a genuine clash.
+	if !h.isAgentHeldByOther(c, room, data.AgentName) {
+		if agents, ok := roomState.Takeover(data.AgentName, role, heldByOther, claim); ok {
 			h.bindClientToRoom(c, room, data.AgentName, role)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),
@@ -423,6 +410,14 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 			})
 			return
 		}
+	}
+
+	// clear_room empties the roster without touching sockets, so the name can be
+	// free here while a live socket still answers to it. Without this the fresh
+	// path would hand a second client the same identity.
+	if h.isAgentHeldByOther(c, room, data.AgentName) {
+		c.sendError(req.ID, req.Type, fmt.Sprintf("agent adı '%s' bu odada zaten kullanımda", data.AgentName))
+		return
 	}
 
 	sysMsg, agents, err := roomState.JoinWithClaim(data.AgentName, data.Role, claim)

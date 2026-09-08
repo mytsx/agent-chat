@@ -706,3 +706,46 @@ func TestSubscribeIntentSurvivesTransportFailure(t *testing.T) {
 		return false
 	})
 }
+
+// Codex review round 6, PR #107: a join already in flight — notably one the
+// supervisor is replaying — must not resurrect an intent the caller cleared
+// while it ran, or the next disconnect silently rejoins the agent.
+func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// Model the replay's window: capture the pre-leave generation, let the leave
+	// land, then complete the join.
+	if _, err := c.LeaveRoom("r1", "alice"); err != nil {
+		t.Fatalf("LeaveRoom: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", ""); err != nil {
+		t.Fatalf("JoinRoom (replay): %v", err)
+	}
+
+	// The replayed join was a fresh call, so it legitimately re-establishes
+	// membership; what must NOT happen is a stale in-flight join reviving it.
+	// Simulate that directly: a join whose generation predates the leave.
+	c.mu.Lock()
+	c.sess.joined = false
+	c.sess.joinEstablished = false
+	stale := c.sess.gen
+	c.sess.gen++ // araya giren bir leave
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(stale, "r1", "alice", "", true)
+
+	c.mu.Lock()
+	joined := c.sess.joined
+	c.mu.Unlock()
+	if joined {
+		t.Error("bayat bir join, araya giren leave'in temizlediği niyeti geri diriltti")
+	}
+}

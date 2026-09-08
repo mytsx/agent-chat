@@ -1033,7 +1033,7 @@ func TestManagerTakeoverDoesNotDisplaceLiveManager(t *testing.T) {
 	roomState.agents["sahte"] = types.Agent{Role: "manager", LastSeen: types.Now()}
 	roomState.mu.Unlock()
 
-	if _, ok := roomState.Takeover("sahte", "manager", nil); !ok {
+	if _, ok := roomState.Takeover("sahte", "manager", nil, nil); !ok {
 		t.Fatal("kurulum hatası: devralma gerçekleşmedi")
 	}
 	if got := roomState.GetActiveManager(); got != "yonetici" {
@@ -1191,5 +1191,98 @@ func TestRepeatJoinAfterClearActuallyRejoins(t *testing.T) {
 
 	if !h.getOrCreateRoom("r1").HasAgent("alice") {
 		t.Error("idempotent kısayol başarı dönüp agent'ı roster'a geri koymadı")
+	}
+}
+
+// Codex review round 6, PR #107: clear_room empties the roster without touching
+// sockets, so a name can be free in the roster while a live socket still
+// answers to it. The fresh-join path checked only the roster and handed a
+// SECOND client the same identity.
+func TestFreshJoinRejectedWhileAnotherSocketHoldsName(t *testing.T) {
+	h, owner, _ := newEventHub(t)
+	joinAgent(t, h, owner, "r1", "alice")
+
+	h.getOrCreateRoom("r1").ClearArchived(0) // roster boş, owner'ın soketi duruyor
+
+	intruder := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+	h.handleJoinRoom(intruder, types.Request{
+		ID: "steal", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, intruder, "join_room"); resp.Success {
+		t.Error("başka bir soket canlıyken aynı isim ikinci istemciye verildi")
+	}
+
+	// The owner itself must still be able to rejoin after the clear.
+	h.handleJoinRoom(owner, types.Request{
+		ID: "self", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, owner, "join_room"); !resp.Success {
+		t.Errorf("sahibi kendi ismine geri dönemedi: %s", resp.Error)
+	}
+}
+
+// Codex review round 6: a repeat join that upgrades the role must actually take
+// the routing lock, not report a success that changes nothing.
+func TestRepeatJoinAppliesRoleUpgrade(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	joinAgent(t, h, c, "r1", "alice") // önce rolsüz katılır
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: manager kilidi = %q, want boş", got)
+	}
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "upgrade", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("rol yükseltmesi reddedildi: %s", resp.Error)
+	}
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "alice" {
+		t.Errorf("manager kilidi = %q, want alice — kısayol başarı dönüp rolü uygulamamış", got)
+	}
+}
+
+// Codex review round 6: releasing the claim and arming the grace window must be
+// one locked step. In the gap the agent counts as neither connected nor
+// departing, so a concurrent list_agents deletes a long-quiet agent outright.
+func TestReleaseAndGraceArePresentedAtomically(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.graceWindow = 2 * time.Second
+	joinAgent(t, h, c, "r1", "alice")
+
+	roomState := h.getOrCreateRoom("r1")
+	roomState.mu.Lock()
+	a := roomState.agents["alice"]
+	a.LastSeen = types.Now() - float64(staleTimeout) - 1
+	roomState.agents["alice"] = a
+	roomState.mu.Unlock()
+
+	// Hammer stale cleanup from another goroutine while the release happens.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				roomState.ListAgents("")
+			}
+		}
+	}()
+
+	h.releaseAgentForClient(c, "r1", "alice")
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	<-done
+
+	if !roomState.HasAgent("alice") {
+		t.Error("bırakma ile pencere kurulumu arasındaki boşlukta agent silindi")
 	}
 }

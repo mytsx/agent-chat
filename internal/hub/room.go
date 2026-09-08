@@ -206,19 +206,18 @@ func (r *RoomState) JoinWithClaim(agentName, role string, claim func()) (types.M
 // lock here is the only thing that brings the gateway back — and it cannot
 // self-heal, because while the manager stays connected later joins are rejected
 // as a duplicate name.
-func (r *RoomState) Takeover(agentName, role string, claim func()) (map[string]types.Agent, bool) {
+// heldByOther is evaluated HERE, under the lock, not at the call site: two
+// replacement sockets replaying the same name can both see "free" outside it,
+// and checking only for the entry's existence would let both succeed — two live
+// clients under one identity. It must exclude the requesting connection, so a
+// socket repeating a join it already owns still reclaims its own entry.
+func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, claim func()) (map[string]types.Agent, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.agents[agentName]; !exists {
 		return nil, false
 	}
-	// Re-check disconnection HERE, not at the call site: two replacement sockets
-	// replaying the same name can both see "disconnected" outside this lock, and
-	// checking only for the entry's existence would let both succeed — two live
-	// clients sending and consuming under one identity. The first claims
-	// liveness below, so the second finds the agent connected and falls through
-	// to a normal join, which rejects the duplicate name.
-	if r.connectedFn != nil && r.connectedFn(agentName) {
+	if heldByOther != nil && heldByOther() {
 		return nil, false
 	}
 	r.touchAgentLastSeenLocked(agentName)
