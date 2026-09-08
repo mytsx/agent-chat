@@ -695,11 +695,17 @@ func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken stri
 // Subscribe subscribes to room events.
 func (c *HubClient) Subscribe(rooms []string) error {
 	data, _ := json.Marshal(map[string][]string{"rooms": rooms})
-	if _, err := c.Send(types.Request{Type: "subscribe", Data: data}); err != nil {
-		return err
+	resp, err := c.Send(types.Request{Type: "subscribe", Data: data})
+
+	// Same rule as JoinRoom: a request the hub never saw is worth replaying, a
+	// request it rejected is not. Without this, a Subscribe issued while the
+	// supervisor is between sockets is lost — CreateTeam only logs that error,
+	// so the desktop stays connected but receives no events for the new team
+	// until an explicit resubscribe or a restart.
+	if err != nil || (resp != nil && resp.Success) {
+		c.rememberSubscriptions(rooms)
 	}
-	c.rememberSubscriptions(rooms)
-	return nil
+	return err
 }
 
 // rememberSubscriptions accumulates rooms across calls: the desktop subscribes

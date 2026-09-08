@@ -1093,3 +1093,80 @@ func TestStaleCleanupRespectsGraceWindow(t *testing.T) {
 		t.Error("grace penceresi içindeki kayıt stale temizliğiyle silindi; yeniden bağlanma gürültülü join olurdu")
 	}
 }
+
+// Codex review round 5, PR #107: the normal startup path makes the agent retry
+// a join it cannot know already succeeded — join_room before the background
+// dial returns a transport error, the supervisor replays it, and the agent
+// tries again. Falling through to Join told it its own name was taken.
+func TestRepeatJoinByOwningSocketIsIdempotent(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "again", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	resp := readResponse(t, c, "join_room")
+	if !resp.Success {
+		t.Fatalf("kendi sahibi olduğu odaya tekrar katılım reddedildi: %s", resp.Error)
+	}
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("yinelenen katılım canlılık kaydını düşürdü")
+	}
+}
+
+// Codex review round 5: the fresh-join path claimed liveness after releasing the
+// room lock, so two sockets racing an unused name could both end up live under
+// one identity — the first adds the entry and pauses, the second takes it over.
+func TestConcurrentFreshJoinsDoNotShareIdentity(t *testing.T) {
+	h, _, _ := newEventHub(t)
+
+	first := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+	second := &Client{hub: h, send: make(chan []byte, 32), rooms: make(map[string]bool)}
+
+	join := func(cl *Client, id string) bool {
+		h.handleJoinRoom(cl, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+		})
+		return readResponse(t, cl, "join_room").Success
+	}
+
+	if !join(first, "a") {
+		t.Fatal("ilk katılım başarısız")
+	}
+	if join(second, "b") {
+		t.Error("ikinci soket aynı ismi aldı; taze join de kilit altında talep etmeli")
+	}
+}
+
+// Codex review round 5: a superseded timer must not retire the window a newer
+// disconnect just earned.
+func TestSupersededTimerDoesNotStealNewGraceWindow(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	key := connKey("r1", "alice")
+
+	h.agentConnected("r1", "alice")
+	h.agentDisconnected("r1", "alice")
+	h.connMu.Lock()
+	h.departGen[key]++
+	stale := h.departGen[key]
+	h.departUntil[key] = time.Now().Add(time.Second)
+	h.connMu.Unlock()
+
+	// A newer disconnect supersedes it.
+	h.connMu.Lock()
+	h.departGen[key]++
+	h.departUntil[key] = time.Now().Add(5 * time.Second)
+	h.connMu.Unlock()
+
+	if h.claimDeparture(key, stale) {
+		t.Error("eski timer pencereyi sahiplendi")
+	}
+	h.connMu.RLock()
+	_, stillSet := h.departUntil[key]
+	h.connMu.RUnlock()
+	if !stillSet {
+		t.Error("eski timer yeni kopuşun penceresini sildi")
+	}
+}

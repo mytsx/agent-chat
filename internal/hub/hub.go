@@ -472,6 +472,23 @@ func (h *Hub) connectedFnFor(room string) func(string) bool {
 	return func(agentName string) bool { return h.isAgentConnected(room, agentName) }
 }
 
+// claimDeparture verifies this timer still owns the window and retires it, in
+// ONE locked operation.
+//
+// Reading the generation, releasing the lock and then deleting the deadline let
+// a reconnect-plus-second-disconnect install a newer window in between: the old
+// timer deleted the NEW deadline and removed the agent at its own stale one,
+// denying the second disconnect the grace it had just earned.
+func (h *Hub) claimDeparture(key string, gen uint64) bool {
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	if h.departGen[key] != gen || h.connectedAgents[key] > 0 {
+		return false
+	}
+	delete(h.departUntil, key)
+	return true
+}
+
 // isAgentProtected reports whether an agent must survive stale cleanup: it is
 // connected, or its grace window has not closed yet.
 func (h *Hub) isAgentProtected(room, agentName string) bool {
@@ -554,16 +571,9 @@ func (h *Hub) scheduleDeparture(room, agentName string) {
 // finalizeDeparture removes an agent that did not come back, unless a newer
 // disconnect has superseded this one.
 func (h *Hub) finalizeDeparture(room, agentName string, gen uint64) {
-	key := connKey(room, agentName)
-	h.connMu.RLock()
-	current := h.departGen[key]
-	h.connMu.RUnlock()
-	if current != gen {
+	if !h.claimDeparture(connKey(room, agentName), gen) {
 		return // a later disconnect (or a reconnect) owns the window now
 	}
-	h.connMu.Lock()
-	delete(h.departUntil, key)
-	h.connMu.Unlock()
 
 	roomState := h.getRoom(room)
 	if roomState == nil {

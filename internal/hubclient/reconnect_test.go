@@ -682,3 +682,27 @@ func TestPendingJoinIntentCanBeCorrected(t *testing.T) {
 		t.Errorf("kayıtlı oda = %q, want B (kurulu üyelik ezilmemeli)", room)
 	}
 }
+
+// Codex review round 5, PR #107: a Subscribe issued while the supervisor is
+// between sockets was lost. CreateTeam only logs that error, so the desktop
+// stayed connected but received no events for the new team until a restart.
+func TestSubscribeIntentSurvivesTransportFailure(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// Nothing connected yet: the subscribe fails at the transport.
+	if err := c.Subscribe([]string{"r1", "r2"}); err == nil {
+		t.Fatal("bağlantı yokken subscribe başarılı görünmemeli")
+	}
+
+	c.StartBackgroundConnect()
+
+	waitFor(t, "bağlantı kurulunca subscribe'ın replay edilmesi", func() bool {
+		for _, typ := range h.requestTypes() {
+			if typ == "subscribe" {
+				return true
+			}
+		}
+		return false
+	})
+}

@@ -174,7 +174,19 @@ func (r *RoomState) touchAgentLastSeenByIdentityLocked(agentName string) {
 
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
-	return r.join(agentName, role)
+	return r.join(agentName, role, nil)
+}
+
+// JoinWithClaim is Join with the liveness registration folded into the same
+// locked transaction.
+//
+// Claiming after the lock is released leaves a gap: two fresh sockets racing the
+// same unused name can both end up live under one identity — the first adds the
+// roster entry and pauses before claiming, the second sees nobody connected and
+// takes the new entry over. Takeover rechecks atomically now, so this closes the
+// other side of the same race.
+func (r *RoomState) JoinWithClaim(agentName, role string, claim func()) (types.Message, map[string]types.Agent, error) {
+	return r.join(agentName, role, claim)
 }
 
 // Takeover reclaims a roster entry the same agent already owns, for a
@@ -239,7 +251,7 @@ func (r *RoomState) LeaveIfDisconnected(agentName string) (types.Message, bool) 
 	})
 }
 
-func (r *RoomState) join(agentName, role string) (types.Message, map[string]types.Agent, error) {
+func (r *RoomState) join(agentName, role string, claim func()) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
 
 	r.cleanupStaleLocked()
@@ -291,6 +303,12 @@ func (r *RoomState) join(agentName, role string) (types.Message, map[string]type
 		dropped = r.appendMessageLocked(sysMsg)
 	}
 	r.dirty = true
+
+	// Register the connection before releasing the lock, so no other socket can
+	// see this brand-new entry as unclaimed and take it over.
+	if claim != nil {
+		claim()
+	}
 
 	agentsCopy := r.copyAgentsLocked()
 	fn := r.archiveFn

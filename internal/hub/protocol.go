@@ -378,6 +378,25 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 
 	roomState := h.getOrCreateRoom(room)
 
+	// The liveness claim runs while the room lock is still held — on BOTH the
+	// takeover and the fresh-join path. Claiming after the lock is released
+	// leaves a window in which another socket sees the entry as unclaimed.
+	claim := func() { h.claimLiveness(c, room, data.AgentName) }
+
+	// (2) A repeat of the join this very socket already owns is idempotent, not
+	// a collision. It happens on the normal startup path: join_room called
+	// before the background dial returns a transport error, the supervisor
+	// replays it successfully, and the agent — having only seen the error —
+	// tries again. Falling through to Join would tell it its own name is taken.
+	if c.agentName == data.AgentName && c.joinedRoom == room {
+		h.claimLiveness(c, room, data.AgentName)
+		c.sendSuccess(req.ID, req.Type, map[string]any{
+			"text":   fmt.Sprintf("\u2705 '%s' zaten '%s' odasında.", data.AgentName, room),
+			"agents": roomState.GetAgents(),
+		})
+		return
+	}
+
 	// A reconnecting client finds its own roster entry still held by the grace
 	// window (releaseAgent). That is a takeover, not a name collision: refresh
 	// the entry, bind the new connection, and stay silent — announcing an
@@ -385,10 +404,6 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// window exists to prevent. Guarded on the entry being DISCONNECTED, so a
 	// genuine name clash with a live agent still fails.
 	if !h.isAgentConnected(room, data.AgentName) {
-		// The liveness claim runs while the room lock is still held, so a grace
-		// timer that already decided this agent was gone cannot slip between the
-		// reclaim and the registration.
-		claim := func() { h.claimLiveness(c, room, data.AgentName) }
 		if agents, ok := roomState.Takeover(data.AgentName, role, claim); ok {
 			h.bindClientToRoom(c, room, data.AgentName, role)
 			h.events.Log(eventlog.EventAgentRejoined,
@@ -405,7 +420,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		}
 	}
 
-	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
+	sysMsg, agents, err := roomState.JoinWithClaim(data.AgentName, data.Role, claim)
 	if err != nil {
 		h.events.Log(eventlog.EventError,
 			eventlog.String(eventlog.AttrConversationID, room),
