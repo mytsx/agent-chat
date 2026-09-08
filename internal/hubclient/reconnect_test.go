@@ -744,7 +744,7 @@ func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
 	c.sess.gen++ // araya giren bir leave
 	c.mu.Unlock()
 
-	c.recordJoinIfCurrent(stale, "r1", "alice", "", true)
+	c.recordJoinIfCurrent(stale, "r1", "alice", "", true, true)
 
 	c.mu.Lock()
 	joined := c.sess.joined
@@ -867,5 +867,75 @@ func TestOrdinarySendsWaitForSessionRestore(t *testing.T) {
 	// The gate must not have swallowed the bootstrap's own request.
 	if !slices.Contains(h.requestTypes(), "identify") {
 		t.Errorf("hub istekleri = %v, identify bekleniyordu", h.requestTypes())
+	}
+}
+
+// Codex review, PR #113: a join turned away by the restore gate still records
+// its intent. If the replay had already taken its snapshot, that intent was not
+// carried — restore reported success, the supervisor stopped, and the client sat
+// connected but outside the room until the next disconnect. In the startup race
+// that is the whole session.
+func TestJoinRecordedDuringRestoreIsStillReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		return cl.Identify("mcp", "alice", "r1", "")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	// The agent's own join lands while the session is being restored: refused
+	// here, but recorded as intent.
+	if _, err := c.JoinRoom("r1", "alice", ""); err == nil {
+		t.Fatal("JoinRoom() during restore = nil, want gated")
+	}
+	close(release)
+
+	// No second disconnect: the same restore has to notice and replay it.
+	waitFor(t, "kapının reddettiği join'in replay edilmesi", func() bool {
+		return slices.Contains(h.requestTypes(), "join_room")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1 (replay yeni bağlantı gerektirmemeli)", got)
+	}
+}
+
+// Codex review, PR #113: the gate used to be armed only after Connect returned,
+// so a request scheduled between the socket being published and the replay
+// starting saw a live socket and an open gate — and reached the hub before
+// identify replayed, collecting the protocol rejection the gate exists to
+// prevent. The window is a few instructions wide, so it is pinned at its source:
+// the address resolver runs inside Connect, before the dial.
+func TestGateIsArmedBeforeTheDial(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	var mu sync.Mutex
+	var gatedAtDial []bool
+	c.SetAddrResolver(func() (string, error) {
+		mu.Lock()
+		gatedAtDial = append(gatedAtDial, c.isRestoring())
+		mu.Unlock()
+		return h.url(), nil
+	})
+
+	c.StartBackgroundConnect()
+	waitFor(t, "bağlantı", func() bool { return h.acceptedCount() >= 1 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gatedAtDial) == 0 {
+		t.Fatal("çözümleyici hiç çağrılmadı")
+	}
+	for i, gated := range gatedAtDial {
+		if !gated {
+			t.Fatalf("dial #%d kapı açıkken yapıldı; soket replay'den önce trafiğe açılır", i+1)
+		}
 	}
 }

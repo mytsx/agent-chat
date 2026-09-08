@@ -38,6 +38,11 @@ const (
 	// block indefinitely on a wedged connection — which would leak goroutines for
 	// callers that run Close asynchronously (monitorHub, shutdown).
 	closeWriteTimeout = 2 * time.Second
+	// maxRestorePasses bounds how many times a reconnect replays the session
+	// because it changed while the previous pass ran. Two passes cover the real
+	// case (one intent recorded behind the gate); the extra is slack, and the
+	// bound is what keeps a caller that records on every attempt from spinning.
+	maxRestorePasses = 3
 )
 
 // session is what the hub forgets when a socket dies and the client must put
@@ -65,6 +70,11 @@ type session struct {
 	joinRoom  string
 	joinAgent string
 	joinRole  string
+	// rev counts every recorded change to this session. A replay compares it
+	// across its own pass to notice intent that landed while it ran — which is
+	// reachable precisely because the gate turns those calls away AFTER they
+	// record.
+	rev uint64
 
 	subs []string
 }
@@ -383,7 +393,15 @@ func (c *HubClient) reconnectUntilLive() {
 			return // someone else got there first
 		}
 
+		// The gate is armed BEFORE the dial, not after it. Arming it once the
+		// dial returned left a window where the socket was already installed and
+		// the gate still open, so a tool call scheduled in between reached the
+		// hub before identify/join replayed — the very rejection this exists to
+		// prevent. While the dial is in flight there is no socket anyway, so
+		// ordinary callers see the same transient answer either way.
+		c.setRestoring(true)
 		if err := c.Connect(); err != nil {
+			c.setRestoring(false)
 			c.logger.Printf("Hub connect failed, retrying: %v", err)
 		} else if err := c.restoreOnto(); err != nil {
 			// The socket is up but the hub would not have us back. Drop it and
@@ -447,21 +465,53 @@ func (c *HubClient) dropConnIf(conn *websocket.Conn) {
 	}
 }
 
-// restoreOnto runs afterConnect with the gate armed, so the socket the dial just
-// installed carries nothing but session-building traffic until it is ready.
+// isRestoring reports whether the reconnect gate is armed.
+func (c *HubClient) isRestoring() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.restoring
+}
+
+func (c *HubClient) setRestoring(v bool) {
+	c.mu.Lock()
+	c.restoring = v
+	c.mu.Unlock()
+}
+
+// restoreOnto replays the session onto the socket the dial just installed. The
+// caller arms the gate; this always leaves it closed.
+//
+// It repeats while the session changed underneath it. A JoinRoom or Subscribe
+// turned away by the gate still RECORDS its intent before failing, and a replay
+// that had already taken its snapshot would not carry it: restore would report
+// success, the supervisor would stop, and the client would sit connected
+// without that membership until the next disconnect — a startup join landing in
+// this window would leave the agent outside the room for the whole session.
+// Bounded, so a caller recording on every attempt cannot spin here; whatever the
+// last pass missed is replayed by the next reconnect.
 //
 // Only the supervisor's path is gated. The desktop connects inline
 // (ConnectWithRetry then Identify on the same goroutine) and has no concurrent
 // traffic to hold back.
 func (c *HubClient) restoreOnto() error {
-	c.mu.Lock()
-	c.restoring = true
-	c.mu.Unlock()
-	err := c.afterConnect()
-	c.mu.Lock()
-	c.restoring = false
-	c.mu.Unlock()
-	return err
+	defer c.setRestoring(false)
+	for attempt := 0; attempt < maxRestorePasses; attempt++ {
+		c.mu.Lock()
+		before := c.sess.rev
+		c.mu.Unlock()
+
+		if err := c.afterConnect(); err != nil {
+			return err
+		}
+
+		c.mu.Lock()
+		unchanged := c.sess.rev == before
+		c.mu.Unlock()
+		if unchanged {
+			return nil
+		}
+	}
+	return nil
 }
 
 // afterConnect brings a freshly dialled socket up to the session the caller
@@ -788,14 +838,18 @@ func (c *HubClient) identify(clientType, agentName, room, authToken string, bypa
 	if err := c.sendExpectSuccessGated("identify", types.Request{Type: "identify", Data: data}, bypassGate); err != nil {
 		return err
 	}
-	c.rememberIdentify(clientType, agentName, room, authToken)
+	c.rememberIdentify(clientType, agentName, room, authToken, !bypassGate)
 	return nil
 }
 
 // rememberIdentify and its siblings record what a reconnect has to put back.
 // Only successful calls are remembered: replaying a request the hub rejected
 // would just fail the same way on every retry.
-func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken string) {
+// external distinguishes a caller's own call from the supervisor replaying what
+// was already recorded. Only the former advances sess.rev: a replay bumping it
+// would make every restore look like it had raced something and run its passes
+// out for nothing.
+func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken string, external bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sess.identified = true
@@ -803,6 +857,9 @@ func (c *HubClient) rememberIdentify(clientType, agentName, room, authToken stri
 	c.sess.identAgent = agentName
 	c.sess.identRoom = room
 	c.sess.authToken = authToken
+	if external {
+		c.sess.rev++
+	}
 }
 
 // Subscribe subscribes to room events.
@@ -820,19 +877,22 @@ func (c *HubClient) subscribe(rooms []string, bypassGate bool) error {
 	// so the desktop stays connected but receives no events for the new team
 	// until an explicit resubscribe or a restart.
 	if err != nil || (resp != nil && resp.Success) {
-		c.rememberSubscriptions(rooms)
+		c.rememberSubscriptions(rooms, !bypassGate)
 	}
 	return err
 }
 
 // rememberSubscriptions accumulates rooms across calls: the desktop subscribes
 // incrementally as teams open, and a reconnect has to restore all of them.
-func (c *HubClient) rememberSubscriptions(rooms []string) {
+func (c *HubClient) rememberSubscriptions(rooms []string, external bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, room := range rooms {
 		if !slices.Contains(c.sess.subs, room) {
 			c.sess.subs = append(c.sess.subs, room)
+			if external {
+				c.sess.rev++
+			}
 		}
 	}
 }
@@ -880,7 +940,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 	//                        way on every reconnect, forever
 	unreached := err != nil
 
-	c.recordJoinIfCurrent(startGen, room, agentName, role, succeeded, unreached)
+	c.recordJoinIfCurrent(startGen, room, agentName, role, succeeded, !bypassGate, unreached)
 	return resp, err
 }
 
@@ -891,7 +951,7 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 // silently rejoin the agent on the next reconnect, undoing a departure the
 // caller asked for. This is reachable through the supervisor's replay, which
 // runs concurrently with user calls.
-func (c *HubClient) recordJoinIfCurrent(startGen uint64, room, agentName, role string, succeeded bool, unreached ...bool) {
+func (c *HubClient) recordJoinIfCurrent(startGen uint64, room, agentName, role string, succeeded, external bool, unreached ...bool) {
 	transportFailed := len(unreached) > 0 && unreached[0]
 
 	c.mu.Lock()
@@ -911,6 +971,9 @@ func (c *HubClient) recordJoinIfCurrent(startGen uint64, room, agentName, role s
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
+		if external {
+			c.sess.rev++
+		}
 	}
 }
 

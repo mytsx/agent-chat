@@ -119,11 +119,18 @@ the supervisor (`dropConnIf`) rather than leaving a dead socket installed.
 A reconnecting socket is **gated** while its session replays: only
 identity/join/subscribe pass (`HubClient.restoring`, and the `Bootstrap` view
 handed to `SetBootstrap`), so an ordinary tool call cannot land on a connection
-that has not identified yet and collect a protocol rejection.
+that has not identified yet and collect a protocol rejection. The gate is armed
+**before the dial**, not after it, and the replay repeats while `sess.rev`
+changed underneath it — a gated join still records its intent, and a pass that
+had already snapshotted would otherwise leave that membership unmade until the
+next disconnect.
 
 `Takeover` **rejects** a manager role whose seat is held by a different live
 manager instead of writing the role and silently skipping the lock — that is how
-a room ended up with a connected manager and no routing gateway. The
+a room ended up with a connected manager and no routing gateway. The refused
+claim is remembered (`pendingManager`) and `set_manager`'s `HandoffManager`
+grants it in one locked step once the old lock clears: nothing client-side
+retries a protocol rejection, so without that the room stays gateway-less. The
 connection-bound observer flag is likewise authoritative in both directions, so a
 revoked observer is not stuck read-only for the life of its socket.
 

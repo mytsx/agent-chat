@@ -1282,16 +1282,63 @@ func TestJoinAsManagerRejectedWhileSeatHeldByLiveManager(t *testing.T) {
 		t.Errorf("manager kilidi = %q, want yonetici", got)
 	}
 
-	// Once the reset lands, the same join succeeds and actually takes the seat.
-	h.getOrCreateRoom("r1").ResetManagerLockIfDifferent("isci")
+	// set_manager's remaining step lands. The refused claim is remembered, so
+	// the seat is handed over without anyone rejoining — nothing on the client
+	// side retries a protocol rejection, and the room must not be left
+	// configured-with-a-manager but gateway-less.
+	h.getOrCreateRoom("r1").HandoffManager("isci")
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
+		t.Errorf("devir sonrası manager kilidi = %q, want isci", got)
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("devir sonrası roster rolü = %q, want manager", got)
+	}
+}
+
+// The remembered claim must not outlive its owner or its configuration: a
+// handoff to somebody else, or to an agent that is no longer connected, grants
+// nothing.
+func TestPendingManagerClaimIsNotGrantedToTheWrongAgent(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 	h.handleJoinRoom(worker, types.Request{
-		ID: "join-w3", Type: "join_room", Room: "r1",
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "isci")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
 		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
 	})
-	if resp := readResponse(t, worker, "join_room"); !resp.Success {
-		t.Fatalf("kilit boşaldıktan sonra manager join başarısız: %s", resp.Error)
+	if resp := readResponse(t, worker, "join_room"); resp.Success {
+		t.Fatal("kurulum hatası: koltuk doluyken manager join başarı döndü")
 	}
-	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
-		t.Errorf("manager kilidi = %q, want isci", got)
+
+	room := h.getOrCreateRoom("r1")
+
+	// Handing the seat to a third name voids the claim rather than granting it.
+	room.HandoffManager("baskasi")
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("manager kilidi = %q, want boş", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got == "manager" {
+		t.Error("iddia sahibi olmayan devirde rol manager yapıldı")
+	}
+
+	// And the voided claim must not resurface on a later handoff to its owner.
+	room.HandoffManager("isci")
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("iptal edilmiş iddia sonradan verildi: manager kilidi = %q", got)
 	}
 }

@@ -232,7 +232,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	h.setConfiguredManager(room, managerAgent)
 
 	roomState := h.getOrCreateRoom(room)
-	roomState.ResetManagerLockIfDifferent(managerAgent)
+	roomState.HandoffManager(managerAgent)
 
 	var text string
 	if managerAgent == "" {
