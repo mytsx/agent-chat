@@ -245,8 +245,11 @@ func (h *Hub) Shutdown() {
 	// Remove port file
 	os.Remove(filepath.Join(h.dataDir, "hub.port"))
 
-	// Written synchronously: it reports how many events the buffer dropped, so
-	// it is the one record that must not itself be droppable.
+	// Drain BEFORE snapshotting the count: a queued event that fails to write
+	// increments it, and once this record is out there is no later event for the
+	// writer to hang a durable marker on. Written synchronously because it
+	// reports the loss and so must not itself be droppable.
+	h.events.Drain()
 	h.events.LogSync(eventlog.EventHubStopped,
 		eventlog.Uint64(eventlog.AttrEventsDropped, h.events.Dropped()),
 	)

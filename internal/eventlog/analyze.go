@@ -178,6 +178,24 @@ func readFile(path string, since time.Time) ([]Record, int, error) {
 	return out, corrupted, sc.Err()
 }
 
+// readState is one (room, generation, agent)'s read progress: the exact IDs a
+// read returned, plus a coarse watermark for records written before
+// read.message_ids existed (or whose list was too large to record).
+type readState struct {
+	ids       map[int]bool
+	watermark int
+}
+
+// readFor returns (creating if needed) the read state at key.
+func readFor(reads map[string]*readState, key string) *readState {
+	rs, ok := reads[key]
+	if !ok {
+		rs = &readState{ids: map[int]bool{}}
+		reads[key] = rs
+	}
+	return rs
+}
+
 // sentMsg is one message awaiting proof that its delivery target read it.
 type sentMsg struct {
 	rec    Record
@@ -288,15 +306,13 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if opts.Room != "" {
-		kept := recs[:0]
-		for _, r := range recs {
-			// Hub lifecycle events belong to no room but bound every room's outages.
-			if r.Room() == opts.Room || isHubLifecycle(r.Name) {
-				kept = append(kept, r)
-			}
-		}
-		recs = kept
+	// The room filter selects FINDINGS, not records. Global evidence — loss
+	// markers (which carry no room), hub lifecycle, and activity in other rooms
+	// that bounds an unclean restart — must still be processed, or a
+	// room-filtered report would claim zero losses after a crash and date an
+	// outage from the selected room's much older last event.
+	inRoom := func(r Record) bool {
+		return opts.Room == "" || r.Room() == opts.Room
 	}
 
 	// inWindow reports whether a record counts toward the report's contents.
@@ -308,7 +324,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 
 	rep := Report{Corrupted: corrupted}
 	for _, r := range recs {
-		if !inWindow(r) {
+		if !inWindow(r) || !inRoom(r) {
 			continue
 		}
 		rep.Events++
@@ -337,28 +353,18 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// which are among the most interesting findings the report has. Keying by
 	// generation keeps that history while making old IDs unmatchable by new reads.
 	generation := map[string]int{}
-	genOf := func(room string) int { return generation[room] }
+	// epoch separates hub runs that rolled back. Room state is persisted only
+	// every five seconds, so an unclean restart can reload a snapshot that is
+	// behind the log and REUSE message IDs. Without this boundary, a read of a
+	// reused ID in the new run would clear the pre-crash message that was
+	// actually lost — hiding exactly the data loss the report exists to find.
+	epoch := 0
 	key := func(room string, agent string) string {
-		return fmt.Sprintf("%s\x00%d\x00%s", room, genOf(room), agent)
+		return fmt.Sprintf("%s\x00%d\x00%d\x00%s", room, epoch, generation[room], agent)
 	}
 
 	sent := map[string][]sentMsg{}
-	// readState per (room, agent): the exact IDs a read returned, plus a coarse
-	// watermark for records written before read.message_ids existed (or whose
-	// list was too large to record).
-	type readState struct {
-		ids       map[int]bool
-		watermark int
-	}
 	reads := map[string]*readState{}
-	readFor := func(key string) *readState {
-		rs, ok := reads[key]
-		if !ok {
-			rs = &readState{ids: map[int]bool{}}
-			reads[key] = rs
-		}
-		return rs
-	}
 
 	// runDropped is the highest loss count seen within the current hub run. Both
 	// the durable marker and hub.stopped report a cumulative figure, so the run's
@@ -381,13 +387,19 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// Loss is loss regardless of the window: a run that dropped events
 			// before the cutoff still produced an incomplete stream.
 			if isHubLifecycle(r.Name) || r.Name == EventEventsDropped {
-				applyHubLifecycle(r, &stoppedAt, &hubRunning, &runDropped, &rep)
+				applyHubLifecycle(r, &stoppedAt, &hubRunning, &runDropped, &rep, &epoch)
 			}
 			lastEventAt = r.Time
 			continue
 		}
+		// Findings below are room-scoped; global state above is not.
+		roomOK := inRoom(r)
+
 		switch r.Name {
 		case EventAgentLeft:
+			if !roomOK {
+				break
+			}
 			d := dropFor(r)
 			switch r.Str(AttrLeaveReason) {
 			case LeaveReasonExplicit:
@@ -396,9 +408,15 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 				d.Disconnect++
 			}
 		case EventAgentEvicted:
+			if !roomOK {
+				break
+			}
 			dropFor(r).Evicted++
 
 		case EventMessageSent:
+			if !roomOK {
+				break
+			}
 			to := r.Str(AttrRecipientName)
 			// Read progress belongs to whoever the message was stored for. The
 			// manager gateway rewrites that target, so without this an
@@ -434,7 +452,10 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			}
 
 		case EventMessagesRead:
-			rs := readFor(key(r.Room(), r.Str(AttrAgentName)))
+			if !roomOK {
+				break
+			}
+			rs := readFor(reads, key(r.Room(), r.Str(AttrAgentName)))
 			ids := r.Ints(AttrReadMessageIDs)
 			for _, id := range ids {
 				rs.ids[id] = true
@@ -450,6 +471,9 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			}
 
 		case EventRoomReset:
+			if !roomOK {
+				break
+			}
 			// Start a new generation rather than discarding state: messages the
 			// clear wiped unread stay reportable, while their IDs can no longer
 			// be matched by reads in the fresh room.
@@ -458,11 +482,17 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// keeping anything that arrived while the archive I/O ran. Those
 			// messages survive into the new room and stay readable, so they must
 			// move with it — otherwise they would be reported unread forever.
-			survivedAbove := r.Int(AttrRoomResetMaxID)
-			old := key(r.Room(), "")
+			// ClearArchived(maxID) keeps everything ABOVE maxID, and maxID==0
+			// (an empty snapshot) means every racing message survives — so a
+			// zero watermark still migrates. A delete leaves no survivors, and
+			// a stream written before this attribute existed cannot say what
+			// survived, so it migrates nothing rather than guessing.
+			survivedAbove, haveWatermark := r.Attrs[AttrRoomResetMaxID]
+			oldPrefix := key(r.Room(), "")
 			generation[r.Room()]++
-			if survivedAbove > 0 {
-				migrateSurvivors(sent, r.Room(), survivedAbove, old, key)
+			if haveWatermark && r.Str(AttrRoomLifecycle) != RoomLifecycleDeleted {
+				above, _ := survivedAbove.(float64)
+				migrateSurvivors(sent, reads, r.Room(), int(above), oldPrefix, key)
 			}
 
 		case EventEventsDropped:
@@ -496,6 +526,10 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 					Start: lastEventAt, End: r.Time,
 					Duration: r.Time.Sub(lastEventAt), Unclean: true,
 				})
+				// The restarted hub may have rolled back to an older snapshot
+				// and can reuse message IDs, so nothing it records may clear a
+				// send from before the crash.
+				epoch++
 			}
 			hubRunning = true
 		}
@@ -564,10 +598,21 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	return rep, nil
 }
 
-// migrateSurvivors moves sends with an ID above the cleared watermark into the
-// room's new generation, keyed by their delivery target. Messages at or below it
-// were wiped and stay in the old generation as permanently unread findings.
-func migrateSurvivors(sent map[string][]sentMsg, room string, above int, oldPrefix string, key func(string, string) string) {
+// migrateSurvivors moves everything above the cleared watermark into the room's
+// new generation: both the sends that survived the clear and the reads that
+// already covered them.
+//
+// The reset event is logged after the room lock is released, so a reader can
+// legitimately read a surviving message in that gap and have its read recorded
+// in the old generation. Moving only the sends would strand that read and report
+// the message unread forever. Messages at or below the watermark were wiped and
+// stay behind as permanently unread findings.
+func migrateSurvivors(
+	sent map[string][]sentMsg,
+	reads map[string]*readState,
+	room string, above int, oldPrefix string,
+	key func(string, string) string,
+) {
 	for k, msgs := range sent {
 		if !strings.HasPrefix(k, oldPrefix) {
 			continue
@@ -587,6 +632,33 @@ func migrateSurvivors(sent map[string][]sentMsg, room string, above int, oldPref
 		nk := key(room, move[0].target)
 		sent[nk] = append(sent[nk], move...)
 	}
+
+	for k, rs := range reads {
+		if !strings.HasPrefix(k, oldPrefix) {
+			continue
+		}
+		agent := strings.TrimPrefix(k, oldPrefix)
+		var moved *readState
+		for id := range rs.ids {
+			if id <= above {
+				continue
+			}
+			if moved == nil {
+				moved = readFor(reads, key(room, agent))
+			}
+			moved.ids[id] = true
+			delete(rs.ids, id)
+		}
+		if rs.watermark > above {
+			if moved == nil {
+				moved = readFor(reads, key(room, agent))
+			}
+			if rs.watermark > moved.watermark {
+				moved.watermark = rs.watermark
+			}
+			rs.watermark = above
+		}
+	}
 }
 
 // isHubLifecycle reports whether a record drives hub up/down state.
@@ -597,7 +669,7 @@ func isHubLifecycle(name string) bool {
 // applyHubLifecycle advances outage-reconstruction state for a record outside
 // the --since window. It records no finding, but loss counts are still banked:
 // events dropped by a hub that ran before the cutoff were still lost.
-func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDropped *uint64, rep *Report) {
+func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDropped *uint64, rep *Report, epoch *int) {
 	switch r.Name {
 	case EventEventsDropped:
 		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
@@ -612,6 +684,9 @@ func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDrop
 	case EventHubStarted:
 		rep.Dropped += *runDropped
 		*runDropped = 0
+		if *hubRunning {
+			*epoch++ // unclean restart outside the window still rolls IDs back
+		}
 		*stoppedAt = time.Time{}
 		*hubRunning = true
 	}

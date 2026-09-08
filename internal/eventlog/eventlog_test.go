@@ -465,3 +465,55 @@ func TestSinkWriteFailureIsCountedAndReported(t *testing.T) {
 		t.Error("yazma hatası OnError'a bildirilmedi")
 	}
 }
+
+// Codex review round 4, PR #103: a queued event that fails to write increments
+// the drop count, so a stopped record written before the drain reports a count
+// taken too early — with no later event to carry a durable marker.
+func TestDrainBeforeFinalRecordSeesLateLosses(t *testing.T) {
+	hold := make(chan struct{})
+	var once sync.Once
+	l, dir := newTestLogger(t, func(o *Options) {
+		o.beforeWrite = func() { once.Do(func() { <-hold }) }
+	})
+
+	// Two events queued; the writer is parked on the first.
+	l.Log(EventHubStarted)
+	l.Log(EventMessageSent)
+
+	// Break the sink while both are still queued, then let the writer run.
+	if err := l.sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("artık dizin değil"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	close(hold)
+
+	// Drain is what makes the losses visible in time to report them; reading the
+	// count before it would race the writer, which is precisely the bug — the
+	// hub used to snapshot Dropped() while events were still queued.
+	l.Drain()
+	if l.Dropped() == 0 {
+		t.Error("drain sonrası başarısız yazmalar sayılmadı; hub.stopped kaybı gizlerdi")
+	}
+	if err := l.Close(); err != nil {
+		t.Logf("Close: %v", err) // bozuk sink'te beklenebilir
+	}
+}
+
+func TestDrainIsIdempotentAndCloseStillWorks(t *testing.T) {
+	l, _ := newTestLogger(t)
+	l.Log(EventHubStarted)
+	l.Drain()
+	l.Drain() // ikinci çağrı panik etmemeli
+	if err := l.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Errorf("ikinci Close: %v", err)
+	}
+	l.Log(EventMessageSent) // kapanıştan sonra sessizce yutulmalı
+}

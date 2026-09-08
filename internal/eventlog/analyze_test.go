@@ -461,7 +461,9 @@ func TestAnalyzeKeepsUnreadFromBeforeRoomReset(t *testing.T) {
 			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
 			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 7))
 		tick(time.Minute)
-		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared))
+		// Watermark 7: message 7 was wiped by the clear, nothing survived it.
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 7))
 		tick(time.Minute)
 		// Fresh generation reuses ID 7 and bob reads it; the old one stays unread.
 		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
@@ -679,5 +681,124 @@ func TestReadToleratesBackupRemovedMidRun(t *testing.T) {
 	}
 	if len(recs) != 1 {
 		t.Errorf("okunan kayıt = %d, want 1 (canlı akış okunabilmeli)", len(recs))
+	}
+}
+
+// Codex review round 4, PR #103: --room selects findings, not evidence. A
+// roomless loss marker and other rooms' activity must still be processed, or a
+// filtered report claims zero losses after a crash.
+func TestAnalyzeRoomFilterKeepsGlobalEvidence(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Minute)
+		l.Log(EventAgentEvicted, String(AttrConversationID, "r2"), String(AttrAgentName, "bob"))
+		tick(time.Minute)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 9)) // odasız
+		tick(time.Minute)
+		l.Log(EventAgentEvicted, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+		// Hiç hub.stopped yok: çökme.
+	})
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Room: "r1"})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.Dropped != 9 {
+		t.Errorf("Dropped = %d, want 9 (odasız işaret oda filtresine takılmamalı)", rep.Dropped)
+	}
+	if len(rep.Drops) != 1 || rep.Drops[0].Agent != "alice" {
+		t.Errorf("bulgular odaya göre süzülmedi: %+v", rep.Drops)
+	}
+}
+
+// Codex review round 4: an unclean restart bound must use the hub's real last
+// activity, even when it happened in another room.
+func TestAnalyzeUncleanOutageUsesOtherRoomActivity(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(2 * time.Hour)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r2"), String(AttrAgentName, "bob"))
+		tick(time.Minute)
+		l.Log(EventHubStarted) // stop yok: çökmüş
+	})
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Room: "r1"})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1", len(rep.Outages))
+	}
+	if got := rep.Outages[0].Duration; got != time.Minute {
+		t.Errorf("süre = %v, want 1m (başka odadaki son aktiviteden)", got)
+	}
+}
+
+// Codex review round 4: ClearArchived(0) retains every racing message, so a
+// zero watermark must still migrate survivors.
+func TestAnalyzeMigratesSurvivorsOnZeroWatermark(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 3))
+		tick(time.Second)
+		// Empty snapshot: nothing was wiped, message 3 survives.
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 0))
+		tick(time.Second)
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 3), Ints(AttrReadMessageIDs, []int{3}))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("sıfır eşikli clear'da sağ kalan mesaj okunmuş sayılmadı: %+v", got)
+	}
+}
+
+// Codex review round 4: the reset event is logged after the room lock is
+// released, so a read of a surviving message can land in the old generation.
+// Migrating only the sends would strand that read.
+func TestAnalyzeMigratesSurvivorReadState(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 9))
+		// Read lands BEFORE the reset event — the window where the room lock is
+		// already released but the reset has not been logged.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 9), Ints(AttrReadMessageIDs, []int{9}))
+		tick(time.Second)
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 5))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("sağ kalan mesajın okuması taşınmadı, sonsuza kadar okunmamış görünüyor: %+v", got)
+	}
+}
+
+// Codex review round 4: room state is persisted every five seconds, so an
+// unclean restart can roll back and reuse message IDs. A read in the new run
+// must not clear a send that was lost in the crash.
+func TestAnalyzeCrashRollbackSeparatesMessageIDs(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventHubStarted)
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 10))
+		tick(time.Minute)
+		l.Log(EventHubStarted) // stop yok: çökme, snapshot geri sarabilir
+		tick(time.Minute)
+		// New run reuses ID 10 and bob reads it.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 10), Ints(AttrReadMessageIDs, []int{10}))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 || got[0].MessageID != 10 {
+		t.Errorf("çökme öncesi kaybolan mesaj, yeniden kullanılan kimliğin okunmasıyla kapatılmış: %+v", got)
 	}
 }

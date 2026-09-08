@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"desktop/internal/eventlog"
+	"desktop/internal/sanitize"
 )
 
 // runAnalyze is the binary's third mode (alongside --hub and stdio MCP): it
@@ -185,9 +187,16 @@ func writeLegacy(w io.Writer, rep eventlog.Report) {
 }
 
 // snippet keeps a report line to one terminal row.
+//
+// Captured content is agent-authored, so it is stripped of control and
+// invisible-format runes before reaching the terminal: truncating to one line
+// does not defuse an ANSI CSI or OSC sequence, and a malformed or compromised
+// agent could otherwise repaint the operator's report or trigger terminal
+// features such as OSC 52 clipboard writes. --json output is left untouched;
+// its consumer is not a terminal.
 func snippet(s string) string {
 	const max = 60
-	s = firstLine(s)
+	s = firstLine(sanitizeForTerminal(s))
 	if len(s) <= max {
 		if s == "" {
 			return ""
@@ -211,3 +220,15 @@ func firstLine(s string) string {
 }
 
 func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
+
+// sanitizeForTerminal drops the rune classes that can drive a terminal rather
+// than print on it, reusing the project's shared classifiers so this cannot
+// drift from the PTY-injection path.
+func sanitizeForTerminal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if sanitize.IsControl(r) || sanitize.IsInvisibleFormat(r) {
+			return -1
+		}
+		return r
+	}, s)
+}

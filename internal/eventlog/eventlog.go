@@ -145,6 +145,7 @@ type Logger struct {
 	now             func() time.Time
 	beforeWrite     func()
 
+	drainOnce sync.Once
 	closeOnce sync.Once
 	// reportedWriteErr keeps a failing sink from turning into a log storm: the
 	// first write error is reported, the rest are counted only.
@@ -283,13 +284,18 @@ func (l *Logger) Flush() {
 	}
 }
 
-// Close drains the backlog and closes the file. Safe to call more than once.
-func (l *Logger) Close() error {
+// Drain stops accepting events and blocks until the queue is empty, leaving the
+// sink open.
+//
+// It exists so a caller can write a FINAL record after draining: a queued event
+// that fails to write increments the drop count, and a stopped record written
+// before the drain would report a count taken too early — with no later event
+// for the writer to attach a durable marker to. Safe to call more than once.
+func (l *Logger) Drain() {
 	if l.isNop() {
-		return nil
+		return
 	}
-	var err error
-	l.closeOnce.Do(func() {
+	l.drainOnce.Do(func() {
 		// Shut the door before closing the channel: any producer is either
 		// already past its send or will see closed and give up.
 		l.closeMu.Lock()
@@ -298,8 +304,17 @@ func (l *Logger) Close() error {
 
 		close(l.ch)
 		<-l.done // writer drains what is queued, then exits
-		err = l.sink.Close()
 	})
+}
+
+// Close drains the backlog and closes the file. Safe to call more than once.
+func (l *Logger) Close() error {
+	if l.isNop() {
+		return nil
+	}
+	l.Drain()
+	var err error
+	l.closeOnce.Do(func() { err = l.sink.Close() })
 	return err
 }
 
