@@ -256,7 +256,12 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	// role and is entitled to it. It simply does not take the seat now — the
 	// configuration still names it, so HandoffManager seats it when the current
 	// manager lets go.
-	takesSeat := wantsManager || (isConfiguredManager && seatFree())
+	// An observer join is never turned into a manager one. The two roles are
+	// mutually exclusive by construction (a team has one or the other), and an
+	// observer that took the routing seat would be a read-only agent every
+	// message is routed through.
+	wantsObserver := strings.EqualFold(strings.TrimSpace(role), roleObserver)
+	takesSeat := wantsManager || (isConfiguredManager && !wantsObserver && seatFree())
 
 	r.touchAgentLastSeenLocked(agentName)
 

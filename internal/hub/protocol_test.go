@@ -1572,3 +1572,36 @@ func TestConfiguredManagerReclaimsFreeSeatOnLesserReplay(t *testing.T) {
 		t.Errorf("manager kilidi = %q, want isci (boş koltuk yapılandırılmış manager'a ait)", got)
 	}
 }
+
+// The implicit claim must not turn an observer join into a manager one: the
+// roles are mutually exclusive, and an observer holding the routing seat would
+// be a read-only agent every message is routed through.
+func TestConfiguredManagerJoiningAsObserverDoesNotTakeSeat(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"cift"})
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("cift") // aynı ad manager olarak da yapılandırılmış
+
+	join := func(id string) types.Response {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "cift", "role": "observer"}),
+		})
+		return readResponse(t, c, "join_room")
+	}
+	if resp := join("j1"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	// İkinci join devralma yolundan geçer — örtük iddianın uygulandığı yer.
+	if resp := join("j2"); !resp.Success {
+		t.Fatalf("observer yeniden join başarısız: %s", resp.Error)
+	}
+
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("observer manager koltuğunu aldı: %q", got)
+	}
+	if got := room.GetAgents()["cift"].Role; got != "observer" {
+		t.Errorf("rol = %q, want observer", got)
+	}
+}
