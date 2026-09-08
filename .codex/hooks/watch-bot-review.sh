@@ -104,9 +104,15 @@ while [ "$i" -lt "$TRIES" ]; do
   # with a login+window fallback, because Copilot posts its inline comments under
   # a DIFFERENT login than its review and may not link them to the review id.
   REVIEW_IDS=$(printf '%s' "$REVIEWS" | jq '[.[].id]')
+  # The fallback is bound to the pushed commit as well: a login+window match
+  # alone would accept a comment from the previous round (created inside the
+  # lookback) or from a newer push whose review id is not in the set, and the
+  # wake-up would present findings for the wrong revision.
   INLINE=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[]' 2>/dev/null \
-    | jq -s --argjson ids "$REVIEW_IDS" --arg login "$INLINE_LOGIN" --arg since "$T" \
-      '[.[] | select((.pull_request_review_id as $r | $ids | index($r)) or (.user.login == $login and .created_at > $since))]
+    | jq -s --argjson ids "$REVIEW_IDS" --arg login "$INLINE_LOGIN" --arg since "$T" --arg sha "$SHA" \
+      '[.[] | select((.pull_request_review_id as $r | $ids | index($r))
+                     or (.user.login == $login and .created_at > $since
+                         and ((.commit_id == $sha) or (.original_commit_id == $sha))))]
        | unique_by(.id) | map({path, line: (.line // .original_line), body})')
 
   echo "PR #$n ($REPO) — $BOT review'u geldi (push: $SHA, pencere: $T sonrası):"
