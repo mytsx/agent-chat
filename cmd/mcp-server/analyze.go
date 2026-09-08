@@ -164,8 +164,14 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 				fmt.Fprintf(w, "   … %d kesinti daha\n", len(rep.Outages)-limit)
 				break
 			}
+			impact := ""
+			if o.LegacyHits > 0 {
+				// What the outage actually cost: MCP clients that could not
+				// reach the hub while it was down.
+				impact = fmt.Sprintf("  — %d ulaşamayan MCP bağlantısı", o.LegacyHits)
+			}
 			if o.Ongoing {
-				fmt.Fprintf(w, "   %s → (sürüyor)\n", o.Start.Format(time.RFC3339))
+				fmt.Fprintf(w, "   %s → (sürüyor)%s\n", o.Start.Format(time.RFC3339), impact)
 				continue
 			}
 			note := ""
@@ -173,8 +179,8 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 				// Start is a lower bound here: the hub died without logging it.
 				note = "  [kirli kapanış — hub stop kaydı yok, başlangıç en erken sınır]"
 			}
-			fmt.Fprintf(w, "   %s → %s (%s)%s\n",
-				o.Start.Format(time.RFC3339), o.End.Format("15:04:05"), o.Duration.Round(time.Second), note)
+			fmt.Fprintf(w, "   %s → %s (%s)%s%s\n",
+				o.Start.Format(time.RFC3339), o.End.Format("15:04:05"), o.Duration.Round(time.Second), note, impact)
 		}
 	}
 
@@ -188,6 +194,12 @@ func writeLegacy(w io.Writer, rep eventlog.Report) {
 		rep.LegacyUnreachable,
 		rep.LegacyFirst.Format(time.RFC3339), rep.LegacyLast.Format(time.RFC3339))
 	fmt.Fprintln(w, "Bu satırlar yapısal akışta görünemez: o MCP instance'larının hub'a bağlantısı hiç kurulmadı.")
+	if rep.LegacyOutsideOutages > 0 {
+		// A hub that was UP and still unreachable is a different fault from one
+		// that was down, so the two must not be presented as one number.
+		fmt.Fprintf(w, "Bunların %d tanesi bilinen hiçbir kesinti penceresine düşmüyor (hub ayaktayken ulaşılamamış).\n",
+			rep.LegacyOutsideOutages)
+	}
 }
 
 // snippet keeps a report line to one terminal row.

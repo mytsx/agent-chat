@@ -574,3 +574,35 @@ func TestIDRangeRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// Codex review round 7, PR #103: the 0600 on OpenFile applies only when the
+// file is created. An existing stream keeps its old mode, which matters because
+// this file holds captured message content and AGENT_CHAT_DATA_DIR can be shared.
+func TestNewTightensPermissionsOnExistingStream(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := New(Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("izin = %o, want 600 (mevcut akış sıkılaştırılmalı)", perm)
+	}
+
+	// Content capture must still be on: the guarantee was restored, not lost.
+	l.Log(EventMessageSent, String(AttrInputMessages, "gizli"))
+	l.Flush()
+	if got := readEvents(t, dir)[0][AttrInputMessages]; got != "gizli" {
+		t.Errorf("izin sıkılaştırıldıktan sonra içerik yakalama kapanmış: %v", got)
+	}
+}

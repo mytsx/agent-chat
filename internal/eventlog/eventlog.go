@@ -212,8 +212,20 @@ func New(opts Options) (*Logger, error) {
 	if err != nil {
 		return NopLogger(), err
 	}
+	info, statErr := f.Stat()
 	if err := f.Close(); err != nil {
 		return NopLogger(), err
+	}
+	// The 0600 above applies only when the file is CREATED. An existing stream
+	// keeps whatever mode it had, which matters because this file holds captured
+	// message content and AGENT_CHAT_DATA_DIR can be shared. Tighten it; if that
+	// is impossible, keep logging but refuse to add content to a file others can
+	// read, rather than silently breaking the owner-only guarantee.
+	contentSafe := true
+	if statErr == nil && info.Mode().Perm() != 0600 {
+		if chmodErr := os.Chmod(path, 0600); chmodErr != nil {
+			contentSafe = false
+		}
 	}
 
 	sink := &lumberjack.Logger{
@@ -228,7 +240,7 @@ func New(opts Options) (*Logger, error) {
 		sink:           sink,
 		ch:             make(chan entry, orDefault(opts.BufferSize, defaultBufferSize)),
 		done:           make(chan struct{}),
-		captureContent: resolveCapture(opts.CaptureContent),
+		captureContent: contentSafe && resolveCapture(opts.CaptureContent),
 		onError:        opts.OnError,
 		now:            opts.now,
 		beforeWrite:    opts.beforeWrite,
@@ -237,6 +249,9 @@ func New(opts Options) (*Logger, error) {
 		l.onError = func(err error) {
 			os.Stderr.WriteString("eventlog: " + err.Error() + "\n")
 		}
+	}
+	if !contentSafe {
+		l.onError(fmt.Errorf("%s izinleri sahibe kısıtlanamadı; mesaj içeriği kaydedilmeyecek", path))
 	}
 	if l.now == nil {
 		l.now = time.Now

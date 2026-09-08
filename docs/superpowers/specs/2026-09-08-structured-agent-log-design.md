@@ -201,7 +201,7 @@ Dört soruyu cevaplar:
 
 **3. Gönderilmiş ama hiç okunmamış mesajlar.** Her alıcı için `agent_chat.messages.read` olaylarındaki en yüksek `agent_chat.read.max_id` bulunur; o alıcıya gönderilmiş ve bu eşiğin üstünde kalan mesajlar listelenir.
 
-**4. Hub kesinti pencereleri ve etkisi.** `agent_chat.hub.stopped` → `agent_chat.hub.started` aralıkları pencereleri verir. `--legacy-log` ile `mcp-server.log` da okunur; bu pencerelere düşen `hub.port not found` ve `connection refused` satırları sayılır — yani "kaç agent, ne kadar süre hub'sız kaldı".
+**4. Hub kesinti pencereleri ve etkisi.** `agent_chat.hub.stopped` → `agent_chat.hub.started` aralıkları pencereleri verir. `--legacy-log` ile `mcp-server.log` da okunur ve her "hub'a ulaşılamadı" satırı **içine düştüğü kesinti penceresine yazılır** (`Outage.LegacyHits`) — yani her kesintinin gerçek bedeli. Hiçbir pencereye düşmeyenler ayrı sayılır (`LegacyOutsideOutages`): hub ayaktayken ulaşılamamak, hub'ın kapalı olmasından farklı bir arızadır ve ikisi tek sayıda birleştirilmemelidir.
 
 `--json` çıktısı makine okunur; ileride UI paneli aynı veriyi tüketir.
 

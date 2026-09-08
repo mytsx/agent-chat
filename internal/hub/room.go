@@ -94,6 +94,11 @@ func NewRoomState() *RoomState {
 type PersistedRoom struct {
 	Messages []types.Message        `json:"messages"`
 	Agents   map[string]types.Agent `json:"agents"`
+	// Generation must survive a restart: events stamped before it carry the
+	// room's clear count, and reloading at zero would put a persisted message
+	// and a later read of that same message in different generations — reporting
+	// it unread forever. Omitted when zero so existing state files stay valid.
+	Generation int `json:"generation,omitempty"`
 }
 
 // SendOptions carries optional routing metadata.
@@ -606,8 +611,9 @@ func (r *RoomState) Snapshot() PersistedRoom {
 	msgs := make([]types.Message, len(r.messages))
 	copy(msgs, r.messages)
 	return PersistedRoom{
-		Messages: msgs,
-		Agents:   r.copyAgentsLocked(),
+		Messages:   msgs,
+		Agents:     r.copyAgentsLocked(),
+		Generation: r.generation,
 	}
 }
 

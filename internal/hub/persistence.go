@@ -46,6 +46,7 @@ func (h *Hub) loadPersistedState() {
 		if pr.Messages != nil {
 			room.messages = pr.Messages
 		}
+		room.generation = pr.Generation
 		if pr.Agents != nil {
 			room.agents = pr.Agents
 		}

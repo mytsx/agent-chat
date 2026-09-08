@@ -619,3 +619,32 @@ func TestEventLogDeleteResetOrderedUnderHubLock(t *testing.T) {
 		t.Errorf("%s = %v", eventlog.AttrConversationID, e[eventlog.AttrConversationID])
 	}
 }
+
+// Codex review round 7, PR #103: the stamped generation must survive a restart,
+// or a persisted message and a later read of it land in different generations.
+func TestRoomGenerationSurvivesPersistRoundTrip(t *testing.T) {
+	r := NewRoomState()
+	if _, _, err := r.Join("alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	r.ClearArchived(0)
+	r.ClearArchived(0)
+
+	snap := r.Snapshot()
+	if snap.Generation != 2 {
+		t.Fatalf("Snapshot().Generation = %d, want 2", snap.Generation)
+	}
+
+	restored := NewRoomState()
+	restored.mu.Lock()
+	restored.generation = snap.Generation
+	restored.mu.Unlock()
+
+	_, _, gen, err := restored.SendMessageWithPresence("alice", "all", "m", false, "", SendOptions{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen != 2 {
+		t.Errorf("yeniden yüklenen odada kuşak = %d, want 2", gen)
+	}
+}

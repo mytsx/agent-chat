@@ -214,6 +214,23 @@ func readFile(path string, since time.Time) (recs []Record, corrupted, tornTail 
 	return recs, corrupted, pendingBad, sc.Err()
 }
 
+// attributeToOutage credits one unreachable-hub timestamp to the outage window
+// containing it, reporting whether any did. An ongoing outage has no end, so it
+// claims everything at or after its start.
+func attributeToOutage(outages []Outage, t time.Time) bool {
+	for i := range outages {
+		o := &outages[i]
+		if t.Before(o.Start) {
+			continue
+		}
+		if o.Ongoing || !t.After(o.End) {
+			o.LegacyHits++
+			return true
+		}
+	}
+	return false
+}
+
 // isTruncatedArchive reports whether a gzip read failed the way a file still
 // being written does, as opposed to genuine corruption of a settled file.
 func isTruncatedArchive(err error) bool {
@@ -302,6 +319,11 @@ type Outage struct {
 	// is then only a lower bound (the last event the dead instance produced),
 	// which is precisely the failure this report exists to surface.
 	Unclean bool `json:"unclean"`
+	// LegacyHits is how many "could not reach the hub" lines in the plain-text
+	// log fall inside this window — the outage's actual impact on MCP clients,
+	// which is the question report 4 exists to answer. Only populated when the
+	// legacy log is scanned.
+	LegacyHits int `json:"legacy_hits,omitempty"`
 }
 
 // Report answers the four questions #101 was opened to answer.
@@ -325,10 +347,14 @@ type Report struct {
 
 	// Legacy* summarise the old plain-text log: MCP instances that could not
 	// reach the hub at all never had a connection to log an event through, so
-	// this is the only place they appear.
-	LegacyUnreachable int       `json:"legacy_unreachable"`
-	LegacyFirst       time.Time `json:"legacy_first,omitempty"`
-	LegacyLast        time.Time `json:"legacy_last,omitempty"`
+	// this is the only place they appear. LegacyOutsideOutages counts the ones
+	// that fall in no reconstructed outage — a hub that was up and still
+	// unreachable is a different problem from one that was down.
+	LegacyUnreachable    int `json:"legacy_unreachable"`
+	LegacyOutsideOutages int `json:"legacy_outside_outages"`
+
+	LegacyFirst time.Time `json:"legacy_first,omitempty"`
+	LegacyLast  time.Time `json:"legacy_last,omitempty"`
 }
 
 // AnalyzeOptions selects what to report on.
@@ -397,11 +423,21 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// pending sends would erase genuinely unread messages from before the clear,
 	// which are among the most interesting findings the report has. Keying by
 	// generation keeps that history while making old IDs unmatchable by new reads.
-	generation := map[string]int{}
-	// deletes counts delete_room boundaries. A recreated room is a fresh
-	// RoomState whose stamped generation restarts at zero, so the hub's counter
-	// alone cannot separate it from its predecessor.
-	deletes := map[string]int{}
+	// clearCount counts clear boundaries, used only for streams written before
+	// the hub stamped the generation itself.
+	clearCount := map[string]int{}
+	// lifetimeBase offsets every generation in a room's CURRENT lifetime. A
+	// recreated room is a fresh RoomState whose stamped generation restarts at
+	// zero, so without an offset its keys would collide with the deleted room's.
+	lifetimeBase := map[string]int{}
+	// maxGenSeen is the highest generation observed in the current lifetime, so
+	// a delete can advance the base past all of it.
+	maxGenSeen := map[string]int{}
+	// resetAbove[room][gen] is the watermark a clear left behind for that
+	// generation: messages above it survived into the next one. Needed because a
+	// send can stall and be logged AFTER the boundary while still carrying the
+	// older stamped generation.
+	resetAbove := map[string]map[int]int{}
 	// epoch separates hub runs that rolled back. Room state is persisted only
 	// every five seconds, so an unclean restart can reload a snapshot that is
 	// behind the log and REUSE message IDs. Without this boundary, a read of a
@@ -412,10 +448,32 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// stream written before that attribute falls back to counting boundaries,
 	// which is ordering-dependent and therefore racy.
 	genOf := func(r Record) int {
-		if g, ok := r.Attrs[AttrRoomGeneration].(float64); ok {
-			return int(g) + deletes[r.Room()]
+		room := r.Room()
+		g, stamped := r.Attrs[AttrRoomGeneration].(float64)
+		gen := clearCount[room]
+		if stamped {
+			gen = int(g)
 		}
-		return generation[r.Room()]
+		gen += lifetimeBase[room]
+		if gen > maxGenSeen[room] {
+			maxGenSeen[room] = gen
+		}
+		return gen
+	}
+
+	// survivorGen walks a stamped send forward through every clear it outlived.
+	// A message stored above a clear's watermark physically survives into the
+	// next generation, so a read there must be able to match it — even when the
+	// send was logged after the boundary and still carries the older stamp.
+	survivorGen := func(room string, gen, id int) int {
+		marks := resetAbove[room]
+		for {
+			above, ok := marks[gen]
+			if !ok || id <= above {
+				return gen
+			}
+			gen++
+		}
 	}
 	key := func(room string, gen int, agent string) string {
 		return fmt.Sprintf("%s\x00%d\x00%d\x00%s", room, epoch, gen, agent)
@@ -520,7 +578,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// message did reach the manager regardless of the addressee.
 			undelivered := target == to && !r.Bool(AttrRecipientInRoom)
 			if target != "" && target != "all" && !undelivered {
-				k := key(r.Room(), genOf(r), target)
+				k := key(r.Room(), survivorGen(r.Room(), genOf(r), r.Int(AttrMessageID)), target)
 				sent[k] = append(sent[k], sentMsg{rec: r, id: r.Int(AttrMessageID), target: target})
 			}
 
@@ -563,21 +621,36 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// zero watermark still migrates. A delete leaves no survivors, and
 			// a stream written before this attribute existed cannot say what
 			// survived, so it migrates nothing rather than guessing.
+			room := r.Room()
 			survivedAbove, haveWatermark := r.Attrs[AttrRoomResetMaxID]
 			deleted := r.Str(AttrRoomLifecycle) == RoomLifecycleDeleted
-			oldGen := generation[r.Room()] + deletes[r.Room()]
-			oldPrefix := key(r.Room(), oldGen, "")
-			if deleted {
-				deletes[r.Room()]++
-			} else {
-				generation[r.Room()]++
+			oldGen := clearCount[room] + lifetimeBase[room]
+			if oldGen > maxGenSeen[room] {
+				maxGenSeen[room] = oldGen
 			}
-			if haveWatermark && !deleted {
+			oldPrefix := key(room, oldGen, "")
+
+			if deleted {
+				// A new lifetime must not reuse ANY key of the old one, whose
+				// generations ran up to maxGenSeen.
+				lifetimeBase[room] = maxGenSeen[room] + 1
+				clearCount[room] = 0
+				maxGenSeen[room] = lifetimeBase[room]
+				delete(resetAbove, room)
+				break
+			}
+
+			clearCount[room]++
+			if haveWatermark {
 				above, _ := survivedAbove.(float64)
+				if resetAbove[room] == nil {
+					resetAbove[room] = map[int]int{}
+				}
+				resetAbove[room][oldGen] = int(above)
 				newKey := func(room, agent string) string {
 					return key(room, oldGen+1, agent)
 				}
-				migrateSurvivors(sent, reads, r.Room(), int(above), oldPrefix, newKey)
+				migrateSurvivors(sent, reads, room, int(above), oldPrefix, newKey)
 			}
 
 		case EventEventsDropped:
@@ -777,7 +850,9 @@ func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDrop
 			*runDropped = uint64(f)
 		}
 	case EventHubStarted:
-		rep.Dropped += *runDropped
+		// Deliberately NOT banking: a run that both started and ended before the
+		// --since cutoff lost its events outside the selected interval, and
+		// adding them would make a healthy window declare itself incomplete.
 		*runDropped = 0
 		if *hubRunning {
 			*epoch++ // unclean restart outside the window still rolls IDs back
@@ -799,7 +874,9 @@ var legacyUnreachableMarkers = []string{
 	"failed to connect to hub after",
 }
 
-// scanLegacyLog counts unreachable-hub lines in the old plain-text log. Best
+// scanLegacyLog counts unreachable-hub lines in the old plain-text log and
+// attributes each to the outage window it falls in, so the report can say how
+// many MCP clients each outage actually affected rather than only a total. Best
 // effort by design: it is a bridge until the structured stream has history.
 func scanLegacyLog(path string, since time.Time, rep *Report) error {
 	f, err := os.Open(path)
@@ -852,6 +929,9 @@ func scanLegacyLog(path string, since time.Time, rep *Report) error {
 		}
 		if stamp.After(rep.LegacyLast) {
 			rep.LegacyLast = stamp
+		}
+		if !attributeToOutage(rep.Outages, stamp) {
+			rep.LegacyOutsideOutages++
 		}
 	}
 	return sc.Err()

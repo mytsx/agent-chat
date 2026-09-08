@@ -989,3 +989,133 @@ func TestAnalyzeSeparatesGenerationsAfterFailedPersist(t *testing.T) {
 		}
 	})
 }
+
+// Codex review round 7, PR #103: a delete must not let the recreated room's
+// stamped generation collide with the old lifetime's keys.
+func TestAnalyzeDeleteAdvancesLifetimeBase(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		// Old lifetime, already cleared once: this send is generation 1.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 4),
+			Int(AttrRoomGeneration, 1))
+		tick(time.Second)
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleDeleted))
+		tick(time.Second)
+		// Recreated room: a fresh RoomState stamps generation 0 again.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrRoomGeneration, 0), Int(AttrReadMaxID, 4),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{4})))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 || got[0].MessageID != 4 {
+		t.Errorf("silinen odanın mesajı, yeniden yaratılan odadaki okumayla kapatılmış: %+v", got)
+	}
+}
+
+// Codex review round 7: a send can stall and be logged AFTER the boundary while
+// still carrying the older stamped generation. It survived physically, so a
+// read in the new generation must be able to match it.
+func TestAnalyzeHandlesSurvivorSentLoggedAfterReset(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 5))
+		// Stored above the watermark before the clear, but logged after it.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 9),
+			Int(AttrRoomGeneration, 0))
+		tick(time.Second)
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrRoomGeneration, 1), Int(AttrReadMaxID, 9),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{9})))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("geç loglanan sağ kalan mesaj okunmuş sayılmadı: %+v", got)
+	}
+
+	t.Run("eşiğin altındaki mesaj taşınmaz", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			room := String(AttrConversationID, "r1")
+			l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+				Int(AttrRoomResetMaxID, 5))
+			l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+				String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 3),
+				Int(AttrRoomGeneration, 0))
+			l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+				Int(AttrRoomGeneration, 1), Int(AttrReadMaxID, 3),
+				Ints(AttrReadIDRanges, EncodeIDRanges([]int{3})))
+		})
+		if got := analyzeDir(t, dir).Unread; len(got) != 1 {
+			t.Errorf("silinen mesaj yeni kuşaktaki okumayla kapatılmış: %+v", got)
+		}
+	})
+}
+
+// Codex review round 7: a run that started AND ended before the cutoff lost its
+// events outside the selected interval.
+func TestAnalyzeExcludesCompletedPreWindowRuns(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 100))
+		l.Log(EventHubStopped, Uint64(AttrEventsDropped, 100), Bool(AttrPersistOK, true))
+		tick(time.Minute)
+		l.Log(EventHubStarted) // tur tamamen pencere öncesinde kapandı
+		tick(10 * time.Hour)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+	})
+
+	cut := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.Dropped != 0 {
+		t.Errorf("Dropped = %d, want 0 (tur pencereden önce başlayıp bitti)", rep.Dropped)
+	}
+}
+
+// Codex review round 7: the design promises per-outage impact, not just a total.
+func TestAnalyzeAttributesLegacyFailuresToOutages(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted) // 09:00
+		tick(time.Hour)        //
+		l.Log(EventHubStopped) // 10:00
+		tick(time.Hour)        //
+		l.Log(EventHubStarted) // 11:00
+	})
+
+	// The plain-text log stamps LOCAL time (standard log package), while the
+	// stream is UTC — so derive the lines from the same instants rather than
+	// hardcoding an offset.
+	base := time.Date(2026, 9, 8, 9, 0, 0, 0, time.UTC)
+	legacyLine := func(at time.Time, msg string) string {
+		return "[MCP] " + at.In(time.Local).Format(legacyTimeLayout) + " x.go:1: " + msg + "\n"
+	}
+	legacy := filepath.Join(dir, "mcp-server.log")
+	lines := legacyLine(base.Add(90*time.Minute), "Hub discovery failed: hub.port not found") +
+		legacyLine(base.Add(105*time.Minute), "Hub discovery failed: hub.port not found") +
+		legacyLine(base.Add(3*time.Hour), "connect: connection refused") // kesinti dışı
+	if err := os.WriteFile(legacy, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, LegacyLog: legacy})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1", len(rep.Outages))
+	}
+	if rep.Outages[0].LegacyHits != 2 {
+		t.Errorf("kesinti etkisi = %d, want 2", rep.Outages[0].LegacyHits)
+	}
+	if rep.LegacyOutsideOutages != 1 {
+		t.Errorf("kesinti dışı = %d, want 1 (hub ayaktayken ulaşılamamış)", rep.LegacyOutsideOutages)
+	}
+}
