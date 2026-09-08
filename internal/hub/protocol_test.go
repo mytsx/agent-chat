@@ -2,9 +2,11 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1192,5 +1194,1076 @@ func TestWriteAllMessagesLineFormatsExistingCases(t *testing.T) {
 				t.Fatalf("formatted line mismatch\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// #108/4: the connection-bound observer flag was only ever set. A desktop that
+// revoked the authorization left the socket read-only for its whole life: the
+// roster said worker, send_message still bounced, and nothing short of a
+// reconnect could reconcile the two.
+func TestObserverToWorkerRejoinClearsConnectionState(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	join := func(role string) types.Response {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: "join-" + role, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": role}),
+		})
+		return readResponse(t, c, "join_room")
+	}
+
+	if resp := join("observer"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	if !c.isObserver.Load() {
+		t.Fatal("observer join sonrası bağlantı observer işaretlenmedi")
+	}
+
+	// Authorization revoked; the agent rejoins as an ordinary worker.
+	h.setConfiguredObservers("r1", nil)
+	if resp := join(""); !resp.Success {
+		t.Fatalf("worker rejoin başarısız: %s", resp.Error)
+	}
+	if c.isObserver.Load() {
+		t.Fatal("worker olarak yeniden join sonrası bağlantı hâlâ observer; send_message reddedilmeye devam eder")
+	}
+
+	h.handleSendMessage(c, types.Request{
+		ID: "msg-1", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "merhaba"}),
+	})
+	if resp := readResponse(t, c, "send_message"); !resp.Success {
+		t.Fatalf("send_message reddedildi: %s", resp.Error)
+	}
+}
+
+// #108/5: a promotion racing set_manager (which configures the new name and
+// clears the old lock as two steps) used to be told it had become manager while
+// the seat stayed with the old one — and the reset then cleared that seat,
+// leaving the room with a manager and no routing gateway.
+func TestJoinAsManagerRejectedWhileSeatHeldByLiveManager(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	// A worker already in the roster, on its own connection.
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
+
+	// set_manager's first step lands: the configuration names the worker, but
+	// the old lock has not been cleared yet.
+	h.setConfiguredManager("r1", "isci")
+
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	resp := readResponse(t, worker, "join_room")
+	if resp.Success {
+		t.Fatal("koltuk doluyken manager join başarı döndü; kilitsiz manager oluşur")
+	}
+	if !strings.Contains(resp.Error, "aktif manager") {
+		t.Errorf("hata = %q, want aktif manager teşhisi", resp.Error)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "yonetici" {
+		t.Errorf("manager kilidi = %q, want yonetici", got)
+	}
+
+	// set_manager's remaining step lands. The refused claim is remembered, so
+	// the seat is handed over without anyone rejoining — nothing on the client
+	// side retries a protocol rejection, and the room must not be left
+	// configured-with-a-manager but gateway-less.
+	h.getOrCreateRoom("r1").HandoffManager("isci")
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
+		t.Errorf("devir sonrası manager kilidi = %q, want isci", got)
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("devir sonrası roster rolü = %q, want manager", got)
+	}
+}
+
+// The seat follows the CONFIGURATION, so a handoff to somebody else must not
+// seat the agent that was refused a moment earlier — not on the handoff, and
+// not on its next join either.
+func TestHandoffToAnotherAgentDoesNotSeatTheRefusedOne(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "isci")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	if resp := readResponse(t, worker, "join_room"); resp.Success {
+		t.Fatal("kurulum hatası: koltuk doluyken manager join başarı döndü")
+	}
+
+	room := h.getOrCreateRoom("r1")
+
+	// Handing the seat to a third name voids the claim rather than granting it.
+	room.HandoffManager("baskasi")
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("manager kilidi = %q, want boş", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got == "manager" {
+		t.Error("iddia sahibi olmayan devirde rol manager yapıldı")
+	}
+
+	// Nor may its next join quietly take the seat: the configuration names
+	// somebody else now.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w3", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("yapılandırılmamış agent koltuğu aldı: manager kilidi = %q", got)
+	}
+}
+
+// Codex review round 2, PR #113: the deferred claim was recorded only on the
+// takeover path. A manager that is not in the roster yet takes the fresh-join
+// path, is rejected there, and the handoff that follows would clear the old lock
+// without granting the new one — leaving the room gateway-less all the same.
+func TestFirstTimeManagerJoinRejectionIsRememberedForHandoff(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	// The new manager is not in the roster at all: the fresh-join path.
+	h.setConfiguredManager("r1", "yeni")
+	fresh := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(fresh, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": "manager"}),
+	})
+	if resp := readResponse(t, fresh, "join_room"); resp.Success {
+		t.Fatal("koltuk doluyken ilk kez manager join başarı döndü")
+	}
+
+	// It enters the room with the lesser role its client fell back to — the
+	// manager join was refused, so that is all it has.
+	h.handleJoinRoom(fresh, types.Request{
+		ID: "join-new-worker", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	if resp := readResponse(t, fresh, "join_room"); !resp.Success {
+		t.Fatalf("worker join başarısız: %s", resp.Error)
+	}
+
+	// The handoff must honour the claim recorded on the FRESH-join path, exactly
+	// as it does the one recorded on takeover.
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("yeni")
+	if got := room.GetActiveManager(); got != "yeni" {
+		t.Errorf("manager kilidi = %q, want yeni (ilk kez katılanın reddi de hatırlanmalı)", got)
+	}
+	if got := room.GetAgents()["yeni"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 2, PR #113: manager identity is case-insensitive
+// everywhere else, so the handoff must resolve the roster key rather than index
+// it with the configured spelling — otherwise it clears the old lock and
+// installs nothing.
+func TestHandoffMatchesRosterNameCaseInsensitively(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "Pilot", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "Pilot")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "Pilot", "role": "manager"}),
+	})
+	if resp := readResponse(t, worker, "join_room"); resp.Success {
+		t.Fatal("kurulum hatası: koltuk doluyken manager join başarı döndü")
+	}
+
+	// Configured with a different casing than the roster key.
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("pilot")
+	if got := room.GetActiveManager(); !sameAgentName(got, "Pilot") {
+		t.Errorf("manager kilidi = %q, want Pilot (kimlik büyük/küçük harften bağımsız)", got)
+	}
+	if got := room.GetAgents()["Pilot"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 2, PR #113: a deferred handoff promotes a roster entry
+// whose CLIENT recorded the lesser role, because its own manager join had been
+// refused. Its next reconnect replays "worker", and an authoritative downgrade
+// there would take the gateway away again — on every reconnect.
+func TestReplayedWorkerRoleDoesNotUndoConfiguredManagerPromotion(t *testing.T) {
+	h, mgr, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.setConfiguredManager("r1", "isci")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": "manager"}),
+	})
+	readResponse(t, worker, "join_room")
+
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("isci")
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Fatalf("kurulum hatası: devir sonrası manager = %q", got)
+	}
+
+	// The reconnect replays the role the client still has recorded.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w3", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma join'i başarısız: %s", resp.Error)
+	}
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (bayat worker replay'i terfiyi bozmamalı)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+
+	// A genuine downgrade still works: once the desktop names someone else,
+	// the replayed worker role is authoritative again.
+	h.setConfiguredManager("r1", "baskasi")
+	room.HandoffManager("baskasi")
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w4", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	if got := room.GetAgents()["isci"].Role; got != "" {
+		t.Errorf("gerçek düşürme sonrası rol = %q, want boş", got)
+	}
+}
+
+// Codex review round 3, PR #113: after a hub restart the roster role is
+// restored but neither lock field is, and an MCP supervisor can replay its
+// worker role before the desktop gets to set_manager. The replay overwrites the
+// persisted manager role, and the configuration that arrives afterwards must
+// still install a gateway.
+func TestManagerGatewayRecoversAfterHubRestartOrdering(t *testing.T) {
+	h, worker, _ := newEventHub(t)
+
+	// Post-restart shape: the roster remembers the role, the locks are empty and
+	// the desktop has not re-configured the room yet.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.agents["isci"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	room.mu.Unlock()
+
+	// The agent reconnects first, replaying the lesser role its client recorded.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma join'i başarısız: %s", resp.Error)
+	}
+
+	// Only now does the desktop re-configure the room.
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci")
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (restart sonrası gateway kurtarılmalı)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+
+	// And a later reconnect replaying "worker" must not undo it.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("sonraki replay gateway'i bozdu: manager kilidi = %q", got)
+	}
+}
+
+// A configured manager whose seat is free takes it even when its client replays
+// the lesser role — after a restart there is no lock to preserve, so without
+// this the room comes back with a configured manager and no gateway.
+func TestConfiguredManagerReclaimsFreeSeatOnLesserReplay(t *testing.T) {
+	h, worker, _ := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("isci") // desktop configured it; nobody is seated
+
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, worker, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+	// The fresh-join path seats nobody implicitly; the reconnect takeover does.
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w2", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (boş koltuk yapılandırılmış manager'a ait)", got)
+	}
+}
+
+// The implicit claim must not turn an observer join into a manager one: the
+// roles are mutually exclusive, and an observer holding the routing seat would
+// be a read-only agent every message is routed through.
+func TestConfiguredManagerJoiningAsObserverDoesNotTakeSeat(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"cift"})
+	room := h.getOrCreateRoom("r1")
+	room.HandoffManager("cift") // aynı ad manager olarak da yapılandırılmış
+
+	join := func(id string) types.Response {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "cift", "role": "observer"}),
+		})
+		return readResponse(t, c, "join_room")
+	}
+	if resp := join("j1"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	// İkinci join devralma yolundan geçer — örtük iddianın uygulandığı yer.
+	if resp := join("j2"); !resp.Success {
+		t.Fatalf("observer yeniden join başarısız: %s", resp.Error)
+	}
+
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("observer manager koltuğunu aldı: %q", got)
+	}
+	if got := room.GetAgents()["cift"].Role; got != "observer" {
+		t.Errorf("rol = %q, want observer", got)
+	}
+}
+
+// Codex review round 4, PR #113: promoting a LIVE observer to manager left its
+// connection-bound read-only flag in place — only a fresh join clears it, and
+// its client replays "observer" anyway. The room would route every message
+// through a manager whose send_message the hub kept rejecting.
+func TestPromotedObserverCanSendAfterSetManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	if resp := readResponse(t, obs, "join_room"); !resp.Success {
+		t.Fatalf("observer join başarısız: %s", resp.Error)
+	}
+	if !obs.isObserver.Load() {
+		t.Fatal("kurulum hatası: bağlantı observer işaretlenmedi")
+	}
+
+	// The desktop promotes it. set_manager arrives BEFORE the allow-list is
+	// cleared, exactly as SetTeamManager sends them.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	if resp := readResponse(t, desktop, "set_manager"); !resp.Success {
+		t.Fatalf("set_manager başarısız: %s", resp.Error)
+	}
+
+	if obs.isObserver.Load() {
+		t.Error("terfi sonrası bağlantı hâlâ salt-okunur; manager cevap veremez")
+	}
+
+	// The desktop's second step: the allow-list drops the promoted agent.
+	h.setConfiguredObservers("r1", nil)
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "merhaba"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); !resp.Success {
+		t.Fatalf("terfi edilmiş manager mesaj gönderemedi: %s", resp.Error)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "gozcu" {
+		t.Errorf("manager kilidi = %q, want gozcu", got)
+	}
+}
+
+// The sibling path: after the promotion the allow-list no longer holds the
+// agent, but its client still replays role "observer" on every reconnect.
+// Rejecting that would fail the restore forever — the agent would never get
+// back into the room at all.
+func TestPromotedObserverRejoinIsNotLockedOutByTheObserverGate(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	h.setConfiguredManager("r1", "gozcu") // terfi etti; observer izni kaldırıldı
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	resp := readResponse(t, c, "join_room")
+	if !resp.Success {
+		t.Fatalf("terfi edilmiş agent'ın replay join'i reddedildi: %s", resp.Error)
+	}
+	if c.isObserver.Load() {
+		t.Error("düşürülen rol yine de observer olarak bağlandı")
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["gozcu"].Role; got == "observer" {
+		t.Error("roster rolü observer kaldı")
+	}
+}
+
+// Codex review round 5, PR #113: a promoted agent whose roster entry aged out
+// while it was away comes back through the FRESH-join path, replaying its lesser
+// role. Seating the configured manager only in Takeover left the room configured
+// with a manager and no gateway until some later reconnect found an entry to
+// take over.
+func TestConfiguredManagerTakesFreeSeatOnFreshJoin(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci") // odada kimse yok: koltuk boş kalır
+
+	// Roster'da hiç kayıt yok — taze join yolu.
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (taze join yolunda da koltuk verilmeli)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 5, PR #113: promoting a live observer writes another
+// client's connection-bound flag from the desktop's goroutine while that
+// client's own goroutine may be reading it inside send_message.
+//
+// The race is real by inspection (the write is under h.mu, the read is not) and
+// the flag is now atomic. This exercise reproduces it only sometimes — with the
+// non-atomic field it took ~10 runs to get one detector report — so treat a
+// single green run as a smoke test, not as proof of absence.
+func TestPromotionRaceWithConcurrentSend(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 4096), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			h.handleSendMessage(obs, types.Request{
+				ID: fmt.Sprintf("m%d", i), Type: "send_message", Room: "r1",
+				Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		h.handleSetManager(desktop, types.Request{
+			ID: "sm", Type: "set_manager", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+		})
+	}()
+	wg.Wait()
+
+	if obs.isObserver.Load() {
+		t.Error("terfi sonrası bağlantı hâlâ salt-okunur")
+	}
+}
+
+// Codex review round 6, PR #113: the desktop re-sends the same manager on every
+// team edit, and the client replays it after each reconnect. Letting either
+// reset the 300s heartbeat would keep routing through a manager that has done
+// nothing for hours.
+func TestSetManagerDoesNotRefreshAnIdleManagersHeartbeat(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "yonetici")
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	// The manager goes quiet past the routing timeout.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	stale := room.managerLastSeen
+	room.mu.Unlock()
+
+	// A team edit re-sends the very same manager.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yonetici"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	room.mu.Lock()
+	got := room.managerLastSeen
+	room.mu.Unlock()
+	if got != stale {
+		t.Errorf("managerLastSeen = %v, want %v (aynı manager'ın yeniden gönderimi kalp atışını tazelememeli)", got, stale)
+	}
+	if active := room.GetActiveManager(); active != "" {
+		t.Errorf("aktif manager = %q, want boş (zaman aşımı geçmiş olmalı)", active)
+	}
+}
+
+// A promotion that changes the roster must be published, or the desktop keeps
+// showing the agent with the role it had before.
+func TestPromotionBroadcastsUpdatedRoster(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	sub := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.mu.Lock()
+	if h.subs["r1"] == nil {
+		h.subs["r1"] = make(map[*Client]bool)
+	}
+	h.subs["r1"][sub] = true
+	h.mu.Unlock()
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	drain(sub)
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "isci"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case payload := <-sub.send:
+			var ev struct {
+				Event string `json:"event"`
+				Data  struct {
+					Agents map[string]types.Agent `json:"agents"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(payload, &ev) != nil || ev.Event != "agent_joined" {
+				continue
+			}
+			if ev.Data.Agents["isci"].Role == "manager" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("terfi sonrası roster yayını gelmedi; arayüz eski rolü göstermeye devam eder")
+		}
+	}
+}
+
+// drain empties a client's pending frames so a test can assert on what comes
+// after a specific action.
+func drain(c *Client) {
+	for {
+		select {
+		case <-c.send:
+		default:
+			return
+		}
+	}
+}
+
+// Codex review round 7, PR #113: the desktop promotes in two calls. A reconnect
+// landing between them still finds the agent on the OLD observer allow-list;
+// accepting "observer" there would restore the read-only binding and roster role
+// while the manager lock stayed, leaving the room routing through a connection
+// send_message rejects.
+func TestPromotedObserverReconnectInsideTheTwoCallWindow(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// Step one of the promotion only: the allow-list still holds the agent.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	// The agent's client replays its join here, carrying the role it recorded
+	// before the promotion (the supervisor replays on the same socket).
+	h.handleJoinRoom(obs, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	if resp := readResponse(t, obs, "join_room"); !resp.Success {
+		t.Fatalf("yeniden bağlanma reddedildi: %s", resp.Error)
+	}
+	if obs.isObserver.Load() {
+		t.Error("iki-çağrı penceresinde salt-okunur bağ geri geldi")
+	}
+	if got := h.getOrCreateRoom("r1").GetAgents()["gozcu"].Role; got == "observer" {
+		t.Error("roster rolü observer'a geri döndü")
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "gozcu" {
+		t.Errorf("manager kilidi = %q, want gozcu", got)
+	}
+}
+
+// Codex review round 7, PR #113: the promotion reads another client's agentName.
+// identify and leave_room write it, so those writes must take the same lock or
+// the atomic observer flag just moves the race elsewhere.
+func TestPromotionRaceWithIdentityChanges(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 512), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			h.handleIdentify(obs, types.Request{
+				ID: fmt.Sprintf("id%d", i), Type: "identify",
+				Data: mustRawJSON(t, map[string]string{"client_type": "mcp", "agent_name": "gozcu", "room": "r1"}),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			h.clearObserverBinding("r1", "gozcu")
+		}
+	}()
+	wg.Wait()
+}
+
+// Codex review round 8, PR #113: a connection that joined room A and merely
+// SUBSCRIBES to B is in B's subscriber map too. Clearing its connection-wide
+// observer flag from B's promotion would let it send in A the moment A's
+// allow-list was revoked — without ever rejoining, which is exactly what the
+// lifetime binding prevents.
+func TestPromotionInAnotherRoomDoesNotUnbindAnObserver(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("A", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "A",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// It also subscribes to B without joining it.
+	h.mu.Lock()
+	if h.subs["B"] == nil {
+		h.subs["B"] = make(map[*Client]bool)
+	}
+	h.subs["B"][obs] = true
+	h.mu.Unlock()
+
+	// B names the same identity as ITS manager.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "B",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if !obs.isObserver.Load() {
+		t.Fatal("başka odanın terfisi observer bağını çözdü")
+	}
+
+	// And with A's allow-list revoked, it still cannot send in A.
+	h.setConfiguredObservers("A", nil)
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "A",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Error("salt-okunur bağlantı yeniden katılmadan mesaj gönderebildi")
+	}
+}
+
+// Codex review round 9, PR #113: the outgoing manager's ROSTER role goes with
+// the lock. Clearing only the lock left the old agent listed as a manager next
+// to the new one, so the UI and the persisted roster showed two.
+func TestHandoffDowngradesThePreviousManagerInTheRoster(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "eski")
+
+	oldMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(oldMgr, types.Request{
+		ID: "join-old", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "eski", "role": "manager"}),
+	})
+	readResponse(t, oldMgr, "join_room")
+
+	newMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(newMgr, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	readResponse(t, newMgr, "join_room")
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yeni"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	agents := h.getOrCreateRoom("r1").GetAgents()
+	if got := agents["eski"].Role; got == "manager" {
+		t.Error("devir sonrası eski manager roster'da hâlâ manager; arayüz iki manager gösterir")
+	}
+	if got := agents["yeni"].Role; got != "manager" {
+		t.Errorf("yeni manager rolü = %q, want manager", got)
+	}
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "yeni" {
+		t.Errorf("manager kilidi = %q, want yeni", got)
+	}
+}
+
+// Codex review round 10, PR #113: in the two-RPC promotion window the agent is
+// already seated as manager, but the allow-list still holds it — rejecting its
+// sends there means a worker's message is routed to a manager whose reply is
+// dropped.
+func TestPromotedManagerCanSendWhileTheAllowListIsStale(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// Only the FIRST of the desktop's two calls has landed.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "cevap"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); !resp.Success {
+		t.Fatalf("iki-çağrı penceresinde terfi edilmiş manager mesaj gönderemedi: %s", resp.Error)
+	}
+}
+
+// And the mirror: an ordinary observer, not named as manager, still cannot send.
+func TestPlainObserverStillCannotSend(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Error("observer mesaj gönderebildi")
+	}
+}
+
+// Codex review round 10, PR #113: if the old manager's heartbeat already expired
+// and a routing check cleared the lock, the outgoing identity cannot be read
+// from the lock any more — the timed-out agent would stay listed as a manager
+// beside its replacement.
+func TestHandoffDemotesAManagerWhoseLockAlreadyTimedOut(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "eski")
+
+	oldMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(oldMgr, types.Request{
+		ID: "join-old", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "eski", "role": "manager"}),
+	})
+	readResponse(t, oldMgr, "join_room")
+
+	newMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(newMgr, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	readResponse(t, newMgr, "join_room")
+
+	// The old manager goes quiet past the routing timeout and a routing check
+	// clears the seat.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	room.mu.Unlock()
+	if got := room.GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: kilit hâlâ %q", got)
+	}
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yeni"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	agents := room.GetAgents()
+	if got := agents["eski"].Role; got == "manager" {
+		t.Error("zaman aşımına uğramış manager roster'da manager kaldı; iki manager görünür")
+	}
+	if got := agents["yeni"].Role; got != "manager" {
+		t.Errorf("yeni manager rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 11, PR #113: manager precedence has to cover the RECIPIENT
+// check too. In the promotion window the target already holds the seat while the
+// old allow-list still names it, so a worker's direct message was dropped before
+// routing ever saw it.
+func TestDirectMessageToPromotedManagerIsNotRejected(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	// Only the first of the desktop's two calls has landed.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	h.handleSendMessage(worker, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "isci", "to": "gozcu", "content": "soru"}),
+	})
+	if resp := readResponse(t, worker, "send_message"); !resp.Success {
+		t.Fatalf("terfi edilmiş manager'a doğrudan mesaj reddedildi: %s", resp.Error)
+	}
+}
+
+// A direct message to a plain observer is still refused.
+func TestDirectMessageToPlainObserverIsRejected(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join-w", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.handleSendMessage(worker, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "isci", "to": "gozcu", "content": "soru"}),
+	})
+	if resp := readResponse(t, worker, "send_message"); resp.Success {
+		t.Error("observer'a doğrudan mesaj kabul edildi")
+	}
+}
+
+// Codex review round 12, PR #113: once a routing check has expired the seat,
+// BOTH lock fields are empty, so a configuration that merely repeats itself
+// looked like a fresh handoff and handed the idle agent a new heartbeat. The
+// app re-sends it on every team edit and the client replays it after every
+// reconnect, so the gateway could be kept alive indefinitely.
+func TestReaffirmingConfigurationDoesNotReviveATimedOutManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "yonetici")
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	room := h.getOrCreateRoom("r1")
+	// The manager has been idle past the routing timeout AND a routing check has
+	// already released the seat — both lock fields are empty by now.
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	agent := room.agents["yonetici"]
+	agent.LastSeen = types.Now() - 400
+	room.agents["yonetici"] = agent
+	room.mu.Unlock()
+	if got := room.GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: kilit hâlâ %q", got)
+	}
+
+	// The desktop re-sends the very same configuration.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yonetici"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("aktif manager = %q, want boş (zaman aşımına uğramış gateway diriltilmemeli)", got)
+	}
+}
+
+// The mirror: an agent that is actually working keeps (or takes) its seat.
+func TestConfigurationSeatsAnActiveManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "isci"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
+		t.Errorf("aktif manager = %q, want isci", got)
 	}
 }

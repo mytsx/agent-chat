@@ -2,10 +2,15 @@ package hubclient
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,9 +37,18 @@ type fakeHub struct {
 	// rejectJoin makes the hub refuse join_room at the protocol level (success
 	// false, no transport error) — the shape a manager authorization failure has.
 	rejectJoin bool
+	// rejectLeave does the same for leave_room — the shape an identity mismatch
+	// has, where the agent stays in the room.
+	rejectLeave bool
+	// rejectJoinRole refuses join_room only when it carries this role — the shape
+	// an authorization the desktop withdrew has.
+	rejectJoinRole string
 	// dropOn severs the connection as soon as a request of this type arrives,
 	// WITHOUT answering — the "hub applied it but the response was lost" shape.
 	dropOn string
+	// onRequest runs before the response is written, so a test can change client
+	// state at a point the client cannot have observed yet.
+	onRequest func(types.Request)
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -69,9 +83,21 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 		h.mu.Unlock()
 
 		h.mu.Lock()
-		reject := h.rejectJoin && req.Type == "join_room"
+		reject := (h.rejectJoin && req.Type == "join_room") || (h.rejectLeave && req.Type == "leave_room")
+		if !reject && h.rejectJoinRole != "" && req.Type == "join_room" {
+			var payload struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal(req.Data, &payload) == nil && payload.Role == h.rejectJoinRole {
+				reject = true
+			}
+		}
 		drop := h.dropOn != "" && req.Type == h.dropOn
+		hook := h.onRequest
 		h.mu.Unlock()
+		if hook != nil {
+			hook(req)
+		}
 		if drop {
 			conn.Close()
 			return
@@ -79,7 +105,7 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 
 		resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: json.RawMessage(`{"ok":true}`)}
 		if reject {
-			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "manager rolü atanmadı"}
+			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "istek reddedildi"}
 		}
 		payload, _ := json.Marshal(resp)
 		if conn.WriteMessage(websocket.TextMessage, payload) != nil {
@@ -109,6 +135,16 @@ func (h *fakeHub) acceptedCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.accepted
+}
+
+// requestsAfter returns the requests received after the first n, oldest first.
+func (h *fakeHub) requestsAfter(n int) []types.Request {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n >= len(h.requests) {
+		return nil
+	}
+	return append([]types.Request(nil), h.requests[n:]...)
 }
 
 // requestTypes returns the types received so far, oldest first.
@@ -349,7 +385,7 @@ func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
 
 	var calls int
 	var mu sync.Mutex
-	c.SetBootstrap(func(cl *HubClient) error {
+	c.SetBootstrap(func(cl Bootstrap) error {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -737,15 +773,814 @@ func TestConcurrentLeaveBeatsInFlightJoin(t *testing.T) {
 	c.sess.joined = false
 	c.sess.joinEstablished = false
 	stale := c.sess.gen
+	rev := c.sess.rev
 	c.sess.gen++ // araya giren bir leave
 	c.mu.Unlock()
 
-	c.recordJoinIfCurrent(stale, "r1", "alice", "", true)
+	c.recordJoinIfCurrent(stale, rev, "r1", "alice", "", true, true)
 
 	c.mu.Lock()
 	joined := c.sess.joined
 	c.mu.Unlock()
 	if joined {
 		t.Error("bayat bir join, araya giren leave'in temizlediği niyeti geri diriltti")
+	}
+}
+
+// #108/1: AGENT_CHAT_HUB_PORT cannot change while the process runs and outranks
+// hub.port, so a malformed value is permanent — the MCP server would serve stdio
+// and retry the same bad port forever. A missing hub.port is the opposite and
+// must stay transient, or startup would go back to exiting on a hub that simply
+// had not written the file yet.
+func TestDiscoverHubAddrSeparatesPermanentConfigFromTransient(t *testing.T) {
+	t.Run("invalid env override is permanent", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "70000")
+
+		_, err := DiscoverHubAddr(t.TempDir())
+		if !errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, want ErrInvalidHubPortConfig", err)
+		}
+	})
+
+	t.Run("missing hub.port is transient", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "")
+
+		_, err := DiscoverHubAddr(t.TempDir())
+		if err == nil {
+			t.Fatal("DiscoverHubAddr() error = nil, want hub.port not found")
+		}
+		if errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, must NOT be permanent: the desktop writes hub.port moments later", err)
+		}
+	})
+
+	t.Run("malformed hub.port file is transient", func(t *testing.T) {
+		t.Setenv("AGENT_CHAT_HUB_PORT", "")
+		dataDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dataDir, "hub.port"), []byte("abc"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := DiscoverHubAddr(dataDir)
+		if err == nil {
+			t.Fatal("DiscoverHubAddr() error = nil, want invalid port")
+		}
+		// The file is rewritten on every hub start, so a torn read is worth
+		// retrying — unlike the env var.
+		if errors.Is(err, ErrInvalidHubPortConfig) {
+			t.Fatalf("DiscoverHubAddr() error = %v, must NOT be permanent for a file source", err)
+		}
+	})
+}
+
+// #108/2: a write can see a half-open connection before the read loop does. The
+// write path used to return the error and leave the dead socket installed, so
+// isConnected() stayed true, the supervisor stayed asleep, and every later RPC
+// went to the same unusable connection until the 90s read deadline expired.
+//
+// The socket is installed WITHOUT a read loop on purpose: that isolates the
+// write path, so a pass cannot be the read loop's cleanup doing the work.
+func TestWriteFailureDropsSocketAndTriggersReconnect(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	conn, _, err := websocket.DefaultDialer.Dial(h.url(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.mu.Lock()
+	c.conn = conn
+	c.connEpoch++
+	c.mu.Unlock()
+
+	// Kill the transport under gorilla so the next write fails while nothing is
+	// reading — the half-open shape.
+	if err := conn.UnderlyingConn().Close(); err != nil {
+		t.Fatalf("underlying close: %v", err)
+	}
+
+	if _, err := c.ListRooms(); err == nil {
+		t.Fatal("ListRooms() error = nil, want write failure")
+	}
+	if c.isConnected() {
+		t.Fatal("yazma hatasından sonra soket hâlâ kurulu; süpervizör uyanmaz")
+	}
+	waitFor(t, "yazma hatasından sonra yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+}
+
+// #108/3: the raw socket used to become visible before identify/join/subscribe
+// replayed onto it, so an ordinary tool call racing the reconnect landed on an
+// unidentified connection and got a protocol rejection instead of its result.
+func TestOrdinarySendsWaitForSessionRestore(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		// Session-building traffic passes the gate: it is what opens it.
+		return cl.Identify("mcp", "alice", "r1", "")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if _, err := c.ListRooms(); err == nil || !strings.Contains(err.Error(), "geri yükleniyor") {
+		t.Fatalf("ListRooms() during restore = %v, want gated", err)
+	}
+
+	close(release)
+	waitFor(t, "oturum hazır", func() bool {
+		_, err := c.ListRooms()
+		return err == nil
+	})
+
+	// The gate must not have swallowed the bootstrap's own request.
+	if !slices.Contains(h.requestTypes(), "identify") {
+		t.Errorf("hub istekleri = %v, identify bekleniyordu", h.requestTypes())
+	}
+}
+
+// Codex review, PR #113: a join turned away by the restore gate still records
+// its intent. If the replay had already taken its snapshot, that intent was not
+// carried — restore reported success, the supervisor stopped, and the client sat
+// connected but outside the room until the next disconnect. In the startup race
+// that is the whole session.
+func TestJoinRecordedDuringRestoreIsStillReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		return cl.Identify("mcp", "alice", "r1", "")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	// The agent's own join lands while the session is being restored: refused
+	// here, but recorded as intent.
+	if _, err := c.JoinRoom("r1", "alice", ""); err == nil {
+		t.Fatal("JoinRoom() during restore = nil, want gated")
+	}
+	close(release)
+
+	// No second disconnect: the same restore has to notice and replay it.
+	waitFor(t, "kapının reddettiği join'in replay edilmesi", func() bool {
+		return slices.Contains(h.requestTypes(), "join_room")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1 (replay yeni bağlantı gerektirmemeli)", got)
+	}
+}
+
+// Codex review, PR #113: the gate used to be armed only after Connect returned,
+// so a request scheduled between the socket being published and the replay
+// starting saw a live socket and an open gate — and reached the hub before
+// identify replayed, collecting the protocol rejection the gate exists to
+// prevent. The window is a few instructions wide, so it is pinned at its source:
+// the address resolver runs inside Connect, before the dial.
+func TestGateIsArmedBeforeTheDial(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	var mu sync.Mutex
+	var gatedAtDial []bool
+	c.SetAddrResolver(func() (string, error) {
+		mu.Lock()
+		gatedAtDial = append(gatedAtDial, c.isRestoring())
+		mu.Unlock()
+		return h.url(), nil
+	})
+
+	c.StartBackgroundConnect()
+	waitFor(t, "bağlantı", func() bool { return h.acceptedCount() >= 1 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gatedAtDial) == 0 {
+		t.Fatal("çözümleyici hiç çağrılmadı")
+	}
+	for i, gated := range gatedAtDial {
+		if !gated {
+			t.Fatalf("dial #%d kapı açıkken yapıldı; soket replay'den önce trafiğe açılır", i+1)
+		}
+	}
+}
+
+// Codex review round 2, PR #113: a replayed join for room A can land after the
+// caller corrected itself to room B behind the gate. Writing A back would make
+// the next pass replay A and lose B for good.
+func TestStaleReplaySuccessDoesNotOverwriteNewerJoinIntent(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	startGen := c.sess.gen
+	replayRev := c.sess.joinRev // the replay of A snapshotted this
+	// The corrected join for B reserves the membership revision before sending,
+	// exactly as joinRoom does for a caller's own join.
+	c.sess.joinRev++
+	externalRev := c.sess.joinRev
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(startGen, externalRev, "B", "alice", "", false, true, true)
+
+	// The in-flight replay of A now succeeds, carrying the older revision.
+	c.recordJoinIfCurrent(startGen, replayRev, "A", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRoom != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (bayat replay yeni niyeti ezmemeli)", c.sess.joinRoom)
+	}
+}
+
+// Codex review round 2, PR #113: a leave the gate turned away never reached the
+// hub, while the replay running at that moment may have just put the agent back
+// in the room. Nothing would rejoin — but nothing would take it out either.
+func TestLeaveRefusedByGateIsPerformedAfterRestore(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		if err := cl.Identify("mcp", "alice", "r1", ""); err != nil {
+			return err
+		}
+		_, err := cl.JoinRoom("r1", "alice", "")
+		return err
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if _, err := c.LeaveRoom("r1", "alice"); err == nil {
+		t.Fatal("LeaveRoom() during restore = nil, want gated")
+	}
+	close(release)
+
+	waitFor(t, "kapının reddettiği leave'in tamamlanması", func() bool {
+		return slices.Contains(h.requestTypes(), "leave_room")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1 (telafi yeni bağlantı gerektirmemeli)", got)
+	}
+}
+
+// Codex review round 2, PR #113: if the session keeps changing, the last pass
+// used to fall through and report success — stopping the supervisor with work
+// still unreplayed and no reconnect scheduled.
+func TestRestoreThatNeverSettlesFailsInsteadOfReportingSuccess(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub bumps the revision as each replayed identify arrives — before its
+	// response, so the client cannot yet have finished the pass. Every pass
+	// therefore ends with the session changed underneath it.
+	h.mu.Lock()
+	h.onRequest = func(req types.Request) {
+		if req.Type != "identify" {
+			return
+		}
+		c.mu.Lock()
+		c.sess.rev++
+		c.mu.Unlock()
+	}
+	h.mu.Unlock()
+
+	c.mu.Lock()
+	c.sess.identified = true
+	c.sess.clientType = "mcp"
+	c.mu.Unlock()
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	err := c.restoreOnto()
+	if err == nil {
+		t.Fatal("restoreOnto() = nil, want failure: oturum kararlı hâle gelmedi")
+	}
+	if !strings.Contains(err.Error(), "kararlı") {
+		t.Errorf("hata = %v, want kararsız oturum teşhisi", err)
+	}
+	if c.isRestoring() {
+		t.Error("başarısız restore sonrası kapı açık kaldı")
+	}
+}
+
+// Codex review round 3, PR #113: a caller's newer join must cancel a departure
+// that never reached the hub. Flushing it after the join would take the agent
+// straight back out while sess.joined still said it was in.
+func TestNewerJoinCancelsQueuedLeave(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, true)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave != nil {
+		t.Error("yeni join kuyruktaki leave'i iptal etmedi; replay sonrası agent odadan çıkarılırdı")
+	}
+}
+
+// The mirror of it: a REPLAY is putting back a membership that predates the
+// leave, which is exactly what the queued departure exists to undo.
+func TestReplayedJoinDoesNotCancelQueuedLeave(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave == nil {
+		t.Error("replay kuyruktaki leave'i iptal etti; agent odada kalırdı")
+	}
+}
+
+// Codex review round 3, PR #113: the stale-replay guard must key on membership,
+// not on every session revision. An unrelated Subscribe completing concurrently
+// would otherwise discard a good join result, leaving the socket in the room
+// with nothing recorded to replay.
+func TestConcurrentSubscribeDoesNotDiscardJoinResult(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	c.mu.Unlock()
+
+	// Something unrelated advances the session while the join is in flight.
+	c.rememberSubscriptions([]string{"other"}, true)
+
+	c.recordJoinIfCurrent(startGen, startJoinRev, "r1", "alice", "", true, true)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.sess.joined || c.sess.joinRoom != "r1" {
+		t.Errorf("join kaydı = (joined:%v room:%q), want kaydedilmiş r1", c.sess.joined, c.sess.joinRoom)
+	}
+}
+
+// Codex review round 3, PR #113: a compensating leave the hub REFUSES leaves
+// the agent in the room. Clearing the queue there would end restoration out of
+// step with the hub, with nothing left to repair it.
+func TestRefusedCompensatingLeaveStaysQueued(t *testing.T) {
+	h := newFakeHub(t)
+	h.mu.Lock()
+	h.rejectLeave = true
+	h.mu.Unlock()
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.mu.Lock()
+	c.sess.pendingLeave = &pendingLeave{room: "r1", agent: "alice"}
+	c.mu.Unlock()
+
+	if err := c.flushPendingLeave(); err == nil {
+		t.Fatal("flushPendingLeave() = nil, want refusal")
+	}
+	c.mu.Lock()
+	queued := c.sess.pendingLeave != nil
+	c.mu.Unlock()
+	if !queued {
+		t.Error("reddedilen telafi leave kuyruktan düştü")
+	}
+
+	// But a refusal that never stops being one must not fail every restore
+	// forever: the client would reconnect in a loop instead of working.
+	for i := 1; i < maxPendingLeaveAttempts; i++ {
+		if err := c.flushPendingLeave(); err != nil {
+			continue
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave != nil {
+		t.Errorf("kalıcı ret sonrası leave hâlâ kuyrukta; her restore düşerdi (deneme sınırı %d)", maxPendingLeaveAttempts)
+	}
+}
+
+// Codex review round 3, PR #113: on a FAILED restore the gate must stay armed
+// until the caller has dropped the socket. Clearing it as restoreOnto returns
+// exposes a half-restored connection to ordinary traffic for as long as the
+// caller takes to disown it.
+func TestGateStaysArmedWhenRestoreFails(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	c.SetBootstrap(func(cl Bootstrap) error { return fmt.Errorf("kasıtlı hata") })
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	// The supervisor arms the gate before dialling; mirror that here.
+	c.setRestoring(true)
+	if err := c.restoreOnto(); err == nil {
+		t.Fatal("restoreOnto() = nil, want failure")
+	}
+	if !c.isRestoring() {
+		t.Error("başarısız restore kapıyı açtı; soket düşürülene kadar kapalı kalmalı")
+	}
+	if _, err := c.ListRooms(); !errors.Is(err, errRestoreGate) {
+		t.Errorf("ListRooms() = %v, want gated", err)
+	}
+}
+
+// Codex review round 4, PR #113: a leave that pauses before its send can be
+// overtaken by a newer join. Queueing it unconditionally afterwards would flush
+// a stale departure right after the replay put the agent in.
+func TestQueuedLeaveLosesToANewerJoin(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+
+	c.mu.Lock()
+	atJoinRev := c.sess.joinRev
+	c.sess.joinRev++ // araya giren yeni bir üyelik kaydı
+	c.mu.Unlock()
+
+	c.queueLeaveIfCurrent("r1", "alice", atJoinRev)
+
+	c.mu.Lock()
+	queued := c.sess.pendingLeave
+	c.mu.Unlock()
+	if queued != nil {
+		t.Fatal("bayat leave kuyruğa alındı; replay agent'ı odaya koyduktan sonra çıkarırdı")
+	}
+
+	// Nothing newer: it must still queue.
+	c.mu.Lock()
+	current := c.sess.joinRev
+	c.mu.Unlock()
+	c.queueLeaveIfCurrent("r1", "alice", current)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.pendingLeave == nil {
+		t.Error("güncel leave kuyruğa alınmadı")
+	}
+}
+
+// Codex review round 4, PR #113: the hub holds the desktop's per-room
+// configuration in memory only, and the desktop re-sends it just when the hub
+// PROCESS restarts. A socket-level reconnect must put it back, or a room
+// silently loses its manager gateway for the rest of the session.
+func TestDesktopConfigurationIsReplayedOnReconnect(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("desktop", "", "", "tok"); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if err := c.SetManager("r1", "yonetici"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.SetObservers("r1", []string{"gozcu"}); err != nil {
+		t.Fatalf("SetObservers: %v", err)
+	}
+
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	waitFor(t, "yapılandırmanın replay edilmesi", func() bool {
+		var manager, observers int
+		for _, ty := range h.requestTypes() {
+			switch ty {
+			case "set_manager":
+				manager++
+			case "set_observers":
+				observers++
+			}
+		}
+		return manager >= 2 && observers >= 2
+	})
+}
+
+// And a configuration the gate turned away is worth replaying for the same
+// reason: the hub never saw it, while the desktop reported it as applied.
+func TestConfigurationRefusedByGateIsReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	c.SetBootstrap(func(cl Bootstrap) error {
+		close(started)
+		<-release
+		return cl.Identify("desktop", "", "", "tok")
+	})
+
+	c.StartBackgroundConnect()
+	<-started
+
+	if err := c.SetManager("r1", "yonetici"); err == nil {
+		t.Fatal("SetManager() during restore = nil, want gated")
+	}
+	close(release)
+
+	waitFor(t, "kapının reddettiği yapılandırmanın replay edilmesi", func() bool {
+		return slices.Contains(h.requestTypes(), "set_manager")
+	})
+	if got := h.acceptedCount(); got != 1 {
+		t.Errorf("kabul edilen bağlantı = %d, want 1", got)
+	}
+}
+
+// Codex review round 5, PR #113: a replay must not write configuration intent.
+// A newer value recorded behind the gate while the replay was in flight would be
+// overwritten by the older one, and the next pass would replay the stale value
+// and settle on it — the app persists a manager the hub never routes through.
+func TestReplayedConfigurationDoesNotOverwriteNewerValue(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.SetManager("r1", "eski"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+
+	// The caller updates the configuration; then a replay of the OLD value
+	// (bypassing the gate, as restoration does) lands afterwards.
+	if err := c.SetManager("r1", "yeni"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.setManager("r1", "eski", true); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.sess.managers["r1"]; got != "yeni" {
+		t.Errorf("kayıtlı manager = %q, want yeni (replay yeni değeri ezmemeli)", got)
+	}
+}
+
+// Codex review round 5, PR #113: a caller's join must reserve the membership
+// revision BEFORE sending. Advancing it only when the outcome is recorded let a
+// replay record first and made the later external call look stale — and since a
+// replay's record does not advance sess.rev, restoration saw no change and
+// opened the gate on the old membership.
+func TestExternalJoinIsNotDiscardedByAnEarlierReplayRecord(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	c.mu.Lock()
+	startGen := c.sess.gen
+	replayRev := c.sess.joinRev
+	c.mu.Unlock()
+
+	// The caller's join for B is invoked (and reserves) while the replay of A is
+	// still awaiting its response.
+	if _, err := c.joinRoom("B", "alice", "", false); err == nil {
+		t.Fatal("JoinRoom() = nil error, want transport failure (bağlantı yok)")
+	}
+
+	// The replay of A now records its success, carrying the older revision.
+	c.recordJoinIfCurrent(startGen, replayRev, "A", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRoom != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (sonradan çağrılan join bayat sayılmamalı)", c.sess.joinRoom)
+	}
+}
+
+// Codex review round 6, PR #113: two SetManager calls for the same room can
+// reach the hub as A then B while B's goroutine resumes first. Without a
+// reservation A wins the replay cache, and the next reconnect silently reverts
+// the newer choice.
+func TestOverlappingConfigurationRecordsInCallOrder(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// A reserves first, B second — B is the newer call.
+	revA := c.reserveConfig("manager:r1", true)
+	revB := c.reserveConfig("manager:r1", true)
+
+	// B's outcome is recorded first, A's afterwards (reversed completion).
+	c.rememberManager("r1", "B", revB)
+	c.rememberManager("r1", "A", revA)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.sess.managers["r1"]; got != "B" {
+		t.Errorf("kayıtlı manager = %q, want B (sonra çağrılan kazanmalı)", got)
+	}
+}
+
+// Codex review round 6, PR #113: the hub creates a room on demand, so replaying
+// a deleted room's configuration resurrects it — the deletion would not survive
+// a socket blip.
+func TestDeletedRoomIsNotResurrectedByReplay(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("desktop", "", "", "tok"); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if err := c.SetManager("olu-oda", "yonetici"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.Subscribe([]string{"olu-oda"}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if err := c.DeleteRoom("olu-oda"); err != nil {
+		t.Fatalf("DeleteRoom: %v", err)
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	waitFor(t, "oturumun geri yüklenmesi", func() bool {
+		for _, r := range h.requestTypes()[before:] {
+			if r == "identify" {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	for _, r := range h.requestsAfter(before) {
+		if (r.Type == "set_manager" || r.Type == "set_observers" || r.Type == "subscribe") && r.Room == "olu-oda" {
+			t.Fatalf("silinmiş oda replay edildi: %s room=%s", r.Type, r.Room)
+		}
+		if r.Type == "subscribe" && strings.Contains(string(r.Data), "olu-oda") {
+			t.Fatal("silinmiş oda abonelik replay'inde geri geldi")
+		}
+	}
+}
+
+// Codex review round 7, PR #113: a recorded role can outlive its authorization
+// — an observer promoted to manager whose assignment is later cleared is
+// neither. Replaying it would fail every restore, with the gate armed, for the
+// life of the process: the agent could not even submit a corrective join.
+func TestReplayedRoleRefusedByHubFallsBackToPlainMembership(t *testing.T) {
+	h := newFakeHub(t)
+	h.mu.Lock()
+	h.rejectJoinRole = "observer" // hub artık bu rolü vermiyor
+	h.mu.Unlock()
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.mu.Lock()
+	c.sess.joined, c.sess.joinEstablished = true, true
+	c.sess.joinRoom, c.sess.joinAgent, c.sess.joinRole = "r1", "gozcu", "observer"
+	c.mu.Unlock()
+
+	if err := c.restoreSession(); err != nil {
+		t.Fatalf("restoreSession: %v (bayat rol oturumu kilitlememeli)", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRole != "" {
+		t.Errorf("kayıtlı rol = %q, want boş (reddedilen rol düşürülmeli)", c.sess.joinRole)
+	}
+}
+
+// Codex review round 7, PR #113: the revision check and opening the gate happen
+// under ONE hold, so a join landing in between cannot have its recorded intent
+// stranded by a gate that opened anyway.
+//
+// The interleaving itself is not reproducible on demand — that part is by
+// inspection (one critical section). What this pins is the observable contract:
+// a restore that never settles fails AND leaves the gate armed for the caller
+// that drops the socket.
+func TestExhaustedRestoreFailsWithTheGateStillArmed(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	// The hub advances the session as the identify replay arrives — before its
+	// response, so the pass cannot have finished yet.
+	h.mu.Lock()
+	h.onRequest = func(req types.Request) {
+		if req.Type != "identify" {
+			return
+		}
+		c.mu.Lock()
+		c.sess.rev++
+		c.mu.Unlock()
+	}
+	h.mu.Unlock()
+
+	c.mu.Lock()
+	c.sess.identified, c.sess.clientType = true, "mcp"
+	c.mu.Unlock()
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	c.setRestoring(true)
+
+	if err := c.restoreOnto(); err == nil {
+		t.Fatal("restoreOnto() = nil, want failure: oturum kararlı hâle gelmedi")
+	}
+	// The gate stays armed on failure: the caller drops the socket first, and an
+	// ordinary request must not reach a half-restored connection in between.
+	if !c.isRestoring() {
+		t.Error("başarısız restore kapıyı açtı; soket düşürülene kadar kapalı kalmalı")
+	}
+}
+
+// Codex review round 8, PR #113: validateHubPort trims a local copy, so a padded
+// AGENT_CHAT_HUB_PORT passed the check and was then interpolated verbatim into
+// an unusable ws:// address the background connector would retry forever.
+func TestDiscoverHubAddrTrimsEnvironmentPort(t *testing.T) {
+	t.Setenv("AGENT_CHAT_HUB_PORT", "  4321\n")
+
+	addr, err := DiscoverHubAddr(t.TempDir())
+	if err != nil {
+		t.Fatalf("DiscoverHubAddr: %v", err)
+	}
+	if addr != "ws://localhost:4321/ws" {
+		t.Errorf("adres = %q, want ws://localhost:4321/ws", addr)
+	}
+}
+
+// Codex review round 9, PR #113: a whitespace-only override must not look
+// unset. Trimming before the emptiness check made it fall back to hub.port
+// instead of being the permanent configuration error it is.
+func TestDiscoverHubAddrRejectsWhitespaceOnlyEnvOverride(t *testing.T) {
+	t.Setenv("AGENT_CHAT_HUB_PORT", "   ")
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "hub.port"), []byte("4321"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := DiscoverHubAddr(dataDir)
+	if !errors.Is(err, ErrInvalidHubPortConfig) {
+		t.Fatalf("DiscoverHubAddr() error = %v, want ErrInvalidHubPortConfig (hub.port'a düşmemeli)", err)
+	}
+}
+
+// Codex review round 11, PR #113: a gated mutation used to record its intent
+// AFTER releasing the mutex, so restoreOnto could take it in that gap, see the
+// old revision, open the gate and stop the supervisor. The revision now advances
+// as part of the refusal itself, in the same critical section.
+//
+// The ORDERING is by inspection — the bump moved inside the gate's own lock —
+// because the gated path touches no network and offers nothing to interleave
+// with deterministically. What this pins is the split the fix introduced: a
+// refused mutation advances the revision, and a refused ordinary read does not
+// (every gated read would otherwise cost the restore a pass).
+func TestGatedMutationAdvancesTheRevisionButAReadDoesNot(t *testing.T) {
+	c := newTestClient(t, newFakeHub(t))
+	c.setRestoring(true)
+
+	c.mu.Lock()
+	before := c.sess.rev
+	c.mu.Unlock()
+
+	// No connection is needed: the gate refuses before anything is written.
+	if _, err := c.JoinRoom("r1", "alice", ""); !errors.Is(err, errRestoreGate) {
+		t.Fatalf("JoinRoom() = %v, want gated", err)
+	}
+
+	c.mu.Lock()
+	after := c.sess.rev
+	c.mu.Unlock()
+	if after == before {
+		t.Error("kapı reddederken sürüm ilerlemedi; restore niyeti görmeden kapıyı açabilir")
+	}
+
+	// An ordinary read must NOT advance it: every gated read would otherwise
+	// cost the restore a pass.
+	c.mu.Lock()
+	before = c.sess.rev
+	c.mu.Unlock()
+	if _, err := c.ListRooms(); !errors.Is(err, errRestoreGate) {
+		t.Fatalf("ListRooms() = %v, want gated", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.rev != before {
+		t.Error("sıradan okuma sürümü ilerletti; her okuma restore'a bir tur maliyeti çıkarır")
 	}
 }

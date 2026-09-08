@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"desktop/internal/types"
@@ -42,11 +43,15 @@ type Client struct {
 	// roster without touching connections) must not leave a claim that can never
 	// be released.
 	livenessKey string
-	// isObserver is set once at a gated observer join (#17). It is connection-bound,
-	// so an observer can never send_message for the life of this connection even if
-	// the desktop later removes it from the allow-list or clear_room wipes the roster
-	// — it would have to reconnect (and not as an observer) to send.
-	isObserver bool
+	// isObserver is the connection-bound observer flag (#17): a connection that
+	// joined as an observer cannot send_message, independently of the roster or
+	// the allow-list.
+	//
+	// ATOMIC because it is written across goroutines: the desktop promoting a
+	// live observer to manager clears it from the desktop's own request
+	// goroutine, while the observer's goroutine may be reading it inside
+	// send_message at that moment.
+	isObserver atomic.Bool
 }
 
 func newClient(hub *Hub, conn *websocket.Conn) *Client {

@@ -1043,14 +1043,24 @@ func TestManagerTakeoverDoesNotDisplaceLiveManager(t *testing.T) {
 	// and reconnects claiming the manager role.
 	roomState := h.getOrCreateRoom("r1")
 	roomState.mu.Lock()
-	roomState.agents["sahte"] = types.Agent{Role: "manager", LastSeen: types.Now()}
+	roomState.agents["sahte"] = types.Agent{Role: "worker", LastSeen: types.Now()}
 	roomState.mu.Unlock()
 
-	if _, ok := roomState.Takeover("sahte", "manager", nil, nil); !ok {
-		t.Fatal("kurulum hatası: devralma gerçekleşmedi")
+	// Rejected outright: reporting success while quietly failing to take the
+	// seat is what left the room with a manager and no routing gateway (#108).
+	agents, ok, err := roomState.Takeover("sahte", "manager", nil, nil)
+	if err == nil || ok || agents != nil {
+		t.Fatalf("Takeover() = (%v, %v, %v), want rejection while another manager is live", agents, ok, err)
 	}
 	if got := roomState.GetActiveManager(); got != "yonetici" {
 		t.Errorf("manager kilidi = %q, want yonetici (canlı manager devrilmemeli)", got)
+	}
+	// The rejected role must not have been written either.
+	roomState.mu.Lock()
+	gotRole := roomState.agents["sahte"].Role
+	roomState.mu.Unlock()
+	if gotRole != "worker" {
+		t.Errorf("roster rolü = %q, want worker (reddedilen rol yazılmamalı)", gotRole)
 	}
 }
 
@@ -1333,5 +1343,64 @@ func TestTakeoverAppliesRoleDowngrade(t *testing.T) {
 	}
 	if got := roomState.GetAgents()["alice"].Role; got != "" {
 		t.Errorf("roster rolü = %q, want boş — roster ile kilit birlikte hareket etmeli", got)
+	}
+}
+
+// Codex review round 11, PR #113: a configured manager replaying its cached
+// lesser role is seated as manager by Takeover. Logging the REQUESTED role there
+// made role-based reconnect telemetry disagree with how the room actually routes.
+func TestRejoinEventLogsTheEffectiveRole(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci")
+
+	join := func(id string) {
+		t.Helper()
+		h.handleJoinRoom(c, types.Request{
+			ID: id, Type: "join_room", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+		})
+		if resp := readResponse(t, c, "join_room"); !resp.Success {
+			t.Fatalf("join başarısız: %s", resp.Error)
+		}
+	}
+	join("j1")
+	join("j2") // ikincisi devralma yolundan geçer: rejoined olayı burada
+
+	var found bool
+	for _, ev := range loggedEvents(t, h, dir) {
+		if ev[eventlog.AttrEventName] != eventlog.EventAgentRejoined {
+			continue
+		}
+		found = true
+		if got := ev[eventlog.AttrAgentRole]; got != "manager" {
+			t.Errorf("rejoined olayındaki rol = %v, want manager (odanın gerçekten yönlendirdiği rol)", got)
+		}
+	}
+	if !found {
+		t.Fatal("rejoined olayı bulunamadı")
+	}
+}
+
+// Codex review round 12, PR #113: a configured manager whose roster entry aged
+// out rejoins through the FRESH-join path with its cached lesser role and is
+// seated as manager there too — the joined event must say so.
+func TestFreshJoinEventLogsTheEffectiveRole(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.setConfiguredManager("r1", "isci")
+	h.getOrCreateRoom("r1").HandoffManager("isci") // roster boş: koltuk boş kalır
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventAgentJoined)
+	if got := e[eventlog.AttrAgentRole]; got != "manager" {
+		t.Errorf("joined olayındaki rol = %v, want manager (odanın gerçekten yönlendirdiği rol)", got)
 	}
 }

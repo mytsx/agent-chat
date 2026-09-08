@@ -68,6 +68,12 @@ type RoomState struct {
 	// before a concurrent clear would otherwise be logged after the boundary and
 	// attributed to the fresh room.
 	generation int
+	// configuredManager is who the desktop last named as this room's manager.
+	// The hub keeps the same value, but the room needs its own copy to decide,
+	// under this lock, whether a lesser role arriving from a client is a real
+	// downgrade or a stale replay — and to seat the manager without waiting for
+	// a claim that a rejected join could never repeat.
+	configuredManager string
 }
 
 // SetArchiveFn installs the callback that receives messages leaving the room.
@@ -211,15 +217,52 @@ func (r *RoomState) JoinWithClaim(agentName, role string, claim func()) (types.M
 // and checking only for the entry's existence would let both succeed — two live
 // clients under one identity. It must exclude the requesting connection, so a
 // socket repeating a join it already owns still reclaims its own entry.
-func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, claim func()) (map[string]types.Agent, bool) {
+func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, claim func()) (map[string]types.Agent, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.agents[agentName]; !exists {
-		return nil, false
+		return nil, false, nil
 	}
 	if heldByOther != nil && heldByOther() {
-		return nil, false
+		return nil, false, nil
 	}
+
+	// The manager seat is decided BEFORE anything is written. Taking the seat
+	// only when it happens to be free, but reporting success either way, left a
+	// "manager" whose routing gateway nobody held: set_manager configures the
+	// new name and clears the old lock as two steps, and a promotion landing
+	// between them saw the old manager still seated. The role was written
+	// authoritatively, the lock silently was not, and the reset then wiped the
+	// old lock — leaving the room with a connected manager and no gateway.
+	// Rejecting is the honest answer; the client retries and succeeds once the
+	// seat is actually free.
+	wantsManager := strings.EqualFold(strings.TrimSpace(role), "manager")
+	// The desktop's configuration counts as a claim of its own. A promoted agent
+	// whose manager join had been refused still has the LESSER role recorded
+	// client-side, so it replays that on every reconnect — and after a hub
+	// restart the seat is empty, so there is no lock to preserve either: without
+	// this the room would come back with a configured manager, a connected
+	// agent, and no gateway, and nothing would ever repair it.
+	isConfiguredManager := sameAgentName(r.configuredManager, agentName)
+	seatFree := func() bool {
+		active := r.getActiveManagerLocked()
+		return active == "" || sameAgentName(active, agentName)
+	}
+
+	if wantsManager && !seatFree() {
+		return nil, false, fmt.Errorf("bu odada aktif manager var: %s", r.getActiveManagerLocked())
+	}
+	// An IMPLICIT claim never rejects the join: the agent asked for the lesser
+	// role and is entitled to it. It simply does not take the seat now — the
+	// configuration still names it, so HandoffManager seats it when the current
+	// manager lets go.
+	// An observer join is never turned into a manager one. The two roles are
+	// mutually exclusive by construction (a team has one or the other), and an
+	// observer that took the routing seat would be a read-only agent every
+	// message is routed through.
+	wantsObserver := strings.EqualFold(strings.TrimSpace(role), roleObserver)
+	takesSeat := wantsManager || (isConfiguredManager && !wantsObserver && seatFree())
+
 	r.touchAgentLastSeenLocked(agentName)
 
 	// The requested role is authoritative — join_room with role X means "I am X"
@@ -228,20 +271,28 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	// still holding the lock, with the room routing through it while the client
 	// had already recorded the lesser role for its next replay.
 	agent := r.agents[agentName]
-	agent.Role = role
+	if takesSeat {
+		// The configuration outranks a stale replayed role.
+		agent.Role = "manager"
+	} else {
+		agent.Role = role
+	}
 	r.agents[agentName] = agent
 	r.dirty = true
 
-	if strings.EqualFold(strings.TrimSpace(role), "manager") {
-		// Only when the seat is free or already ours: a live manager under a
-		// different name must not be displaced by a reconnect.
-		if active := r.getActiveManagerLocked(); active == "" || sameAgentName(active, agentName) {
-			r.managerAgent = agentName
-			r.managerLastSeen = types.Now()
-		}
-	} else if sameAgentName(r.managerAgent, agentName) {
+	if takesSeat {
+		r.managerAgent = agentName
+		r.managerLastSeen = types.Now()
+	} else if sameAgentName(r.managerAgent, agentName) && !isConfiguredManager {
 		// Downgrade: give up the lock rather than keep routing through an agent
 		// that no longer claims the role.
+		//
+		// Not when the desktop still names this agent as the manager. A deferred
+		// handoff promotes a roster entry whose CLIENT recorded the lesser role
+		// (its own manager join had been refused), so its next reconnect replays
+		// "worker" — and an authoritative downgrade there would take the gateway
+		// away again, on every reconnect, for as long as the configuration says
+		// otherwise.
 		r.managerAgent = ""
 		r.managerLastSeen = 0
 	}
@@ -249,7 +300,7 @@ func (r *RoomState) Takeover(agentName, role string, heldByOther func() bool, cl
 	if claim != nil {
 		claim()
 	}
-	return r.copyAgentsLocked(), true
+	return r.copyAgentsLocked(), true, nil
 }
 
 // LeaveIfDisconnected removes an agent only if it still has no live connection,
@@ -282,6 +333,19 @@ func (r *RoomState) join(agentName, role string, claim func()) (types.Message, m
 			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
+	}
+	// The configured manager takes a free seat here too, not only on the
+	// takeover path. A promoted agent whose roster entry aged out while it was
+	// away comes back through THIS path replaying its lesser role; seating it
+	// only in Takeover left the room configured with a manager and no gateway
+	// until some later reconnect happened to find an entry to take over.
+	if !isObserver && !isManager && sameAgentName(r.configuredManager, agentName) {
+		if active := r.getActiveManagerLocked(); active == "" || sameAgentName(active, agentName) {
+			isManager = true
+			role = "manager"
+		}
+	}
+	if isManager {
 		r.managerAgent = agentName
 		r.managerLastSeen = types.Now()
 	}
@@ -661,6 +725,118 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 		return true
 	}
 	return false
+}
+
+// HandoffManager moves the manager seat to managerAgent as ONE locked step:
+// the stale lock is cleared and, if that agent already asked for the seat and
+// was refused, it is granted immediately.
+//
+// The two halves must not be separate. set_manager configures the new name and
+// then clears the old lock; a promotion arriving between them is refused
+// (correctly — the seat is still taken), and the reset that follows leaves the
+// room with a configured manager, a connected agent, and no gateway. Nothing
+// retries: the client treats the refusal as a protocol rejection and keeps its
+// worker role, so even a reconnect replays the lesser role.
+// The bool reports whether the roster actually changed, so the caller can
+// publish it: the desktop UI refreshes its agent cache from roster events, and a
+// promotion that emits none leaves the agent displayed with its old role until
+// something unrelated happens in the room.
+func (r *RoomState) HandoffManager(managerAgent string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Remembered so Takeover can tell a genuine downgrade from a reconnect
+	// replaying a role that predates the promotion (see below).
+	r.configuredManager = managerAgent
+
+	heldBySameAgent := sameAgentName(r.managerAgent, managerAgent) && r.managerLastSeen != 0
+	if !sameAgentName(r.managerAgent, managerAgent) {
+		if r.managerAgent != "" || r.managerLastSeen != 0 {
+			r.managerAgent = ""
+			r.managerLastSeen = 0
+			r.dirty = true
+		}
+	}
+
+	// At most ONE roster entry may carry the manager role. Deriving the outgoing
+	// identity from the lock alone was not enough: a manager whose heartbeat had
+	// already expired has no lock to read, and a hub restart leaves no configured
+	// name either — in both cases the old agent stayed listed as a manager beside
+	// its replacement, and the UI and the persisted roster showed two.
+	rosterChanged := false
+	for name, agent := range r.agents {
+		if sameAgentName(name, managerAgent) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(agent.Role), "manager") {
+			agent.Role = ""
+			r.agents[name] = agent
+			rosterChanged = true
+			r.dirty = true
+		}
+	}
+
+	if managerAgent == "" {
+		return rosterChanged
+	}
+
+	// The CONFIGURATION is the claim. Waiting for a refused join to leave one
+	// behind could not work: that join returns a protocol rejection the client
+	// treats as final, an agent that is not in the roster yet leaves nothing to
+	// act on at all, and after a hub restart neither lock field is persisted, so
+	// a replayed worker role would land before the desktop ever re-configured
+	// the room. Seating whoever the desktop names — if they are here and
+	// connected — is the only version of this that survives all three.
+	//
+	// Only for an agent that is actually in the room and still connected.
+	// Manager identity is case-insensitive everywhere else, so the roster key is
+	// resolved rather than indexed with the configured spelling: a room keyed
+	// "Pilot" and a set_manager("pilot") would otherwise clear the old lock and
+	// install nothing.
+	key, inRoom := r.rosterKeyLocked(managerAgent)
+	if !inRoom {
+		return rosterChanged
+	}
+	if r.connectedFn != nil && !r.connectedFn(key) {
+		return rosterChanged
+	}
+	agent := r.agents[key]
+	changed := rosterChanged || !strings.EqualFold(strings.TrimSpace(agent.Role), "manager")
+	agent.Role = "manager"
+	r.agents[key] = agent
+	// The heartbeat is NOT refreshed when the seat is already this agent's. The
+	// app re-sends the same manager on every team edit, and the client replays it
+	// after each desktop reconnect; letting either reset the 300s timer would
+	// keep routing through a manager that has done nothing for hours.
+	if !heldBySameAgent {
+		// The seat's heartbeat inherits the AGENT's last activity, not "now".
+		// Stamping now would let a configuration that merely repeats itself
+		// resurrect a manager the routing timeout had already released — the app
+		// re-sends it on every team edit and the client replays it after every
+		// reconnect, so an idle gateway could be kept alive indefinitely. An
+		// agent that is actually working has a fresh LastSeen and keeps its seat.
+		r.managerLastSeen = agent.LastSeen
+		if r.managerLastSeen == 0 {
+			r.managerLastSeen = types.Now()
+		}
+	}
+	r.managerAgent = key
+	r.dirty = true
+	return changed
+}
+
+// rosterKeyLocked returns the roster key that denotes agentName, matching the
+// case-insensitive identity rule the rest of the manager path uses. Must hold mu.
+func (r *RoomState) rosterKeyLocked(agentName string) (string, bool) {
+	if _, ok := r.agents[agentName]; ok {
+		return agentName, true
+	}
+	for name := range r.agents {
+		if sameAgentName(name, agentName) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // ResetManagerLockIfDifferent clears active manager lock unless it matches managerAgent.

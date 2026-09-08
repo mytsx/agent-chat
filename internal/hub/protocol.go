@@ -101,7 +101,12 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 			c.sendError(req.ID, req.Type, fmt.Sprintf("join_room sonrası agent adı değiştirilemez (mevcut: %s)", c.agentName))
 			return
 		}
+		// Under h.mu: clearObserverBinding reads this field on ANOTHER client's
+		// behalf (the desktop's goroutine), so the identity has to be published
+		// under the same lock or the atomic observer flag just moves the race.
+		h.mu.Lock()
 		c.agentName = data.AgentName
+		h.mu.Unlock()
 	}
 	if data.Room != "" {
 		c.rooms[data.Room] = true
@@ -232,7 +237,14 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	h.setConfiguredManager(room, managerAgent)
 
 	roomState := h.getOrCreateRoom(room)
-	roomState.ResetManagerLockIfDifferent(managerAgent)
+	rosterChanged := roomState.HandoffManager(managerAgent)
+
+	// A live observer promoted to manager keeps its CONNECTION-bound read-only
+	// flag, which only a fresh join clears — and its client replays "observer"
+	// anyway, so it would never clear itself. The room would route every message
+	// through a manager whose send_message the hub kept rejecting. The desktop
+	// has just named this agent the manager, so the binding follows.
+	h.clearObserverBinding(room, managerAgent)
 
 	var text string
 	if managerAgent == "" {
@@ -241,6 +253,16 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 		text = fmt.Sprintf("'%s' odası manager'ı '%s' olarak ayarlandı.", room, managerAgent)
 	}
 	c.sendText(req.ID, req.Type, text)
+
+	// A promotion that changed the roster must be published: the desktop
+	// refreshes its agent cache from roster events, so without one the agent
+	// keeps its old role on screen until something unrelated happens in the room.
+	if rosterChanged {
+		h.broadcastEvent(room, "agent_joined", map[string]any{
+			"agent_name": managerAgent,
+			"agents":     roomState.GetAgents(),
+		})
+	}
 }
 
 // handleSetObservers replaces the desktop-authorized observer set for a room (#17).
@@ -310,13 +332,37 @@ func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
 	// Bind the observer role to the connection (#17): a gated observer join makes
 	// this connection permanently read-only, independent of later allow-list/roster
 	// changes.
-	if role == roleObserver {
-		c.isObserver = true
-	}
+	// Authoritative in BOTH directions, like the roster role Takeover writes.
+	// Only ever setting it left a revoked observer read-only for the life of the
+	// socket: the roster said worker, the connection still refused send_message,
+	// and nothing but a reconnect could reconcile them. The observer role is a
+	// restriction, not a privilege — dropping it grants nothing that the
+	// desktop-gated join did not already allow.
+	c.isObserver.Store(role == roleObserver)
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
 	h.subs[room][c] = true
+}
+
+// clearObserverBinding drops the read-only flag from every live connection in
+// room that answers to agentName. Guarded by h.mu, the same lock that sets it.
+func (h *Hub) clearObserverBinding(room, agentName string) {
+	if strings.TrimSpace(agentName) == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.subs[room] {
+		// JOINED to this room, not merely subscribed to it. A connection that
+		// joined room A and subscribes to B is in this map for B too; clearing
+		// its connection-wide observer flag from B's promotion would let it send
+		// in A the moment A's allow-list was revoked — without ever rejoining,
+		// which is exactly what the lifetime binding prevents.
+		if c.joinedRoom == room && sameAgentName(c.agentName, agentName) {
+			c.isObserver.Store(false)
+		}
+	}
 }
 
 func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
@@ -369,9 +415,29 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// Observer is desktop-gated like manager (#17 P1): role "observer" grants read-all
 	// transcript access, so a client must not be able to self-assert it. Only an agent
 	// the desktop registered as an observer for this room may join with that role.
-	if role == "observer" && !h.isConfiguredObserver(room, data.AgentName) {
-		c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
-		return
+	if role == "observer" {
+		// The configured manager outranks the observer allow-list, and it is
+		// checked FIRST. The desktop promotes in two calls (set_manager, then
+		// set_observers), and a reconnect landing between them still finds the
+		// agent on the old allow-list: accepting "observer" there would restore
+		// the read-only binding and roster role while the manager lock stayed,
+		// leaving the room routing through a connection send_message rejects.
+		//
+		// Its client replays "observer" because that is what it recorded before
+		// the promotion; rejecting it outright would fail the restore forever and
+		// the agent would never get back into the room. Falling back to the
+		// lesser role grants nothing the gate protects (observer is read-all
+		// access), and the takeover below seats it as the manager it is
+		// configured to be.
+		switch {
+		case sameAgentName(h.getConfiguredManager(room), data.AgentName):
+			h.logger.Printf("join_room: agent=%q oda %q için manager olarak yapılandırılmış; bayat observer rolü düşürülüyor", data.AgentName, room)
+			role = ""
+			data.Role = ""
+		case !h.isConfiguredObserver(room, data.AgentName):
+			c.sendError(req.ID, req.Type, "observer rolü atanmadı; önce desktop üzerinden observer belirlenmeli")
+			return
+		}
 	}
 
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
@@ -396,12 +462,34 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	//
 	// Barred when ANOTHER live socket answers to the name — a genuine clash.
 	if !h.isAgentHeldByOther(c, room, data.AgentName) {
-		if agents, ok := roomState.Takeover(data.AgentName, role, heldByOther, claim); ok {
-			h.bindClientToRoom(c, room, data.AgentName, role)
+		agents, ok, err := roomState.Takeover(data.AgentName, role, heldByOther, claim)
+		if err != nil {
+			// The reclaim itself is legitimate; the role it asked for is not
+			// available. Say so instead of falling through to the fresh-join
+			// path, which would answer with a misleading "name already in use".
+			h.events.Log(eventlog.EventError,
+				eventlog.String(eventlog.AttrConversationID, room),
+				eventlog.String(eventlog.AttrAgentName, data.AgentName),
+				eventlog.String(eventlog.AttrMCPMethod, req.Type),
+				eventlog.String(eventlog.AttrErrorType, "join_rejected"),
+			)
+			c.sendError(req.ID, req.Type, err.Error())
+			return
+		}
+		if ok {
+			// The EFFECTIVE role, not the requested one: a configured manager
+			// replaying its cached lesser role is seated as manager by Takeover,
+			// and logging "worker" there would make role-based reconnect
+			// telemetry disagree with how the room actually routes.
+			effectiveRole := role
+			if a, ok := agents[data.AgentName]; ok {
+				effectiveRole = a.Role
+			}
+			h.bindClientToRoom(c, room, data.AgentName, effectiveRole)
 			h.events.Log(eventlog.EventAgentRejoined,
 				eventlog.String(eventlog.AttrConversationID, room),
 				eventlog.String(eventlog.AttrAgentName, data.AgentName),
-				eventlog.String(eventlog.AttrAgentRole, role),
+				eventlog.String(eventlog.AttrAgentRole, effectiveRole),
 				eventlog.String(eventlog.AttrRequestID, req.ID),
 			)
 			c.sendSuccess(req.ID, req.Type, map[string]any{
@@ -436,14 +524,23 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// no longer looks like a departure (#98).
 	h.claimLiveness(c, room, data.AgentName)
 
+	// The EFFECTIVE role, like the takeover path: a configured manager whose
+	// roster entry aged out rejoins HERE with its cached lesser role and is
+	// seated as manager, so logging the requested role would make role-based
+	// telemetry disagree with how the room routes.
+	joinedRole := role
+	if a, ok := agents[data.AgentName]; ok {
+		joinedRole = a.Role
+	}
+
 	h.events.Log(eventlog.EventAgentJoined,
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrAgentName, data.AgentName),
-		eventlog.String(eventlog.AttrAgentRole, role),
+		eventlog.String(eventlog.AttrAgentRole, joinedRole),
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 	)
 
-	h.bindClientToRoom(c, room, data.AgentName, role)
+	h.bindClientToRoom(c, room, data.AgentName, joinedRole)
 
 	// Build response text
 	var otherAgents []string
@@ -523,7 +620,13 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	//     a different role.
 	// Both key on join-bound identity (c.agentName, pinned by the from== check), so a
 	// forged `from` can't bypass the gate.
-	if c.isObserver || h.isConfiguredObserver(room, c.agentName) {
+	// The configured MANAGER outranks a stale observer allow-list entry, here as
+	// at the join gate. The desktop promotes in two calls, and in between the
+	// agent is already seated as manager with its binding cleared — rejecting its
+	// sends in that window means a worker's message is routed to a manager whose
+	// reply is dropped.
+	promoted := sameAgentName(h.getConfiguredManager(room), c.agentName)
+	if !promoted && (c.isObserver.Load() || h.isConfiguredObserver(room, c.agentName)) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}
@@ -533,7 +636,13 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	// still protected: the desktop allow-list (configured) OR the live roster role
 	// (joined as observer, even if just de-configured). Broadcasts (to="all") are
 	// fine — the observer just watches them — so only a direct recipient is checked.
-	if data.To != "all" && (h.isConfiguredObserver(room, data.To) || roomState.IsObserver(data.To)) {
+	// Manager precedence applies to the RECIPIENT too. In the promotion window
+	// the target already holds the manager seat while the old allow-list still
+	// names it; rejecting here would drop a worker's direct message before
+	// routing ever saw it.
+	toIsConfiguredManager := sameAgentName(h.getConfiguredManager(room), data.To)
+	if data.To != "all" && !toIsConfiguredManager &&
+		(h.isConfiguredObserver(room, data.To) || roomState.IsObserver(data.To)) {
 		c.sendError(req.ID, req.Type, "observer'a doğrudan mesaj gönderilemez; observer yalnızca odayı izler ve kullanıcıyla konuşur")
 		return
 	}
@@ -915,8 +1024,11 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 	)
 
 	c.sendText(req.ID, req.Type, fmt.Sprintf("\U0001f44b '%s' odadan ayrıldı.", data.AgentName))
+	// Same lock as the identity's other writers, for the same reason.
+	h.mu.Lock()
 	c.agentName = ""
 	c.joinedRoom = ""
+	h.mu.Unlock()
 
 	agents := roomState.GetAgents()
 	h.broadcastEvent(room, "message_new", map[string]any{"message": sysMsg})

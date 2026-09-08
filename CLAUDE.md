@@ -112,7 +112,49 @@ Liveness claims are per-connection (`Client.livenessKey`), not per join:
 same socket must not add a claim nothing will ever release.
 
 Client-side read deadline is 90s with a ping handler, so a half-open socket is
-detected instead of hanging `readLoop` forever.
+detected instead of hanging `readLoop` forever. A **write** can notice the same
+half-open socket sooner, so a write failure tears the connection down and wakes
+the supervisor (`dropConnIf`) rather than leaving a dead socket installed.
+
+A reconnecting socket is **gated** while its session replays: only
+identity/join/subscribe pass (`HubClient.restoring`, and the `Bootstrap` view
+handed to `SetBootstrap`), so an ordinary tool call cannot land on a connection
+that has not identified yet and collect a protocol rejection. The gate is armed
+**before the dial**, not after it, and the replay repeats while `sess.rev`
+changed underneath it — a gated join still records its intent, and a pass that
+had already snapshotted would otherwise leave that membership unmade until the
+next disconnect.
+
+`Takeover` **rejects** a manager role whose seat is held by a different live
+manager instead of writing the role and silently skipping the lock — that is how
+a room ended up with a connected manager and no routing gateway. The refused
+**configuration is the claim**: `set_manager`'s `HandoffManager` seats whoever
+the desktop names, if that agent is in the room and connected, in one locked step
+that also clears the stale lock (roster key resolved case-insensitively, like the
+rest of the manager path). Waiting for a refused join to leave a claim behind
+cannot work — the client treats a protocol rejection as final, an agent not yet
+in the roster leaves nothing to act on, and after a hub restart neither lock
+field is persisted, so a replayed worker role lands before the desktop
+re-configures the room. For the same reason `Takeover` neither downgrades an
+agent the desktop still names as manager (`RoomState.configuredManager`) nor
+leaves a free seat unclaimed by one — except for an observer join, which is
+never converted into a manager one.
+
+Promoting a **live observer** also clears its connection-bound read-only flag
+(`Hub.clearObserverBinding`), and a promoted agent whose client still replays
+`role="observer"` is admitted with the lesser role instead of being rejected:
+otherwise the room routes through a manager the hub keeps silencing, or the
+agent's restore fails forever.
+
+The desktop's per-room configuration (`set_manager`, `set_observers`) lives in
+hub memory only and is re-sent by the app just when the hub PROCESS restarts, so
+`HubClient` records it as session state and replays it on every reconnect. The
+connection-bound observer flag is likewise authoritative in both directions, so a
+revoked observer is not stuck read-only for the life of its socket.
+
+`AGENT_CHAT_HUB_PORT` is fixed for the process lifetime and outranks `hub.port`,
+so a malformed value is fatal at startup (`ErrInvalidHubPortConfig`). A missing
+or torn `hub.port` stays transient and is waited out in the background.
 
 ### Hub Internals
 
