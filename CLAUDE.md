@@ -40,7 +40,7 @@ Wails v2 desktop app (Go backend + React frontend) that orchestrates multiple AI
 
 1. **Desktop App** (`main.go` / `app.go`): Wails application — UI, PTY terminals, hub lifecycle, orchestrator
 2. **Hub Server** (`internal/hub/`): WebSocket server for in-memory room state, spawned as child process (`mcp-server-bin --hub`)
-3. **MCP Server** (`cmd/mcp-server/main.go`): Dual-mode Go binary embedded via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin`. Flag `--hub` → WebSocket server; no flag → stdio MCP server + WebSocket client connecting to hub.
+3. **MCP Server** (`cmd/mcp-server/main.go`): Tri-mode Go binary embedded via `//go:embed`, extracted to `~/.agent-chat/mcp-server-bin`. Flag `--hub` → WebSocket server; `--analyze` → print event-log reports and exit; no flag → stdio MCP server + WebSocket client connecting to hub.
 
 ### Communication Flow
 
@@ -74,6 +74,7 @@ CLI Agent (Claude/Gemini/Copilot)
 | `internal/team/` | Team CRUD persistence (teams.json) |
 | `internal/prompt/` | Prompt template storage with variable substitution |
 | `internal/validation/` | Name validation (path traversal, forbidden chars, emoji) |
+| `internal/eventlog/` | Structured JSONL event stream + `--analyze` reports (OTel semconv field names) |
 
 ### Hub Internals
 
@@ -106,6 +107,38 @@ A read-only "outside eye" agent (`role="observer"`), distinct from manager — i
 - **Notification-isolated:** observers are NOT registered with the orchestrator and are skipped in `broadcastToSessions` (via `broadcastRoleLookup` → `AgentConfig.Role`), so no automatic PTY notifications reach them (user-driven).
 - **Mode plumbing:** a single `agentMode` string ("manager"/"observer"/"") flows `resolveAgentMode → composeAgentPrompt → ComposeStartupPrompt`. Role is persisted as `AgentConfig.Role="observer"` (`SetTeamObserver`), mutually exclusive with `Team.ManagerAgent`.
 
+### Structured Event Log (#101)
+
+The hub — and only the hub — writes `~/.agent-chat/events.jsonl`, a JSON-lines
+stream of room events (`agent_chat.hub.started`, `.agent.joined/left/evicted`,
+`.message.sent/rerouted`, `.messages.read`, `.client.connected/disconnected`).
+It is the measurement layer for the drop (#98) and addressing (#99) bugs; the
+plain-text `mcp-server.log` stays alongside it as a fallback.
+
+- **Field names are OpenTelemetry semantic conventions**, not invented ones:
+  `gen_ai.conversation.id` (room), `gen_ai.agent.name`, `gen_ai.input.messages`
+  (content), `mcp.method.name`, `jsonrpc.request.id`, `network.transport`,
+  `error.type`. Only attributes OTel has no name for take the `agent_chat.`
+  prefix. `trace_id` / `span_id` are reserved for #100. See `internal/eventlog/semconv.go`.
+- **Logging never blocks the hub.** `Log` is a non-blocking channel send; a full
+  buffer drops the event and increments a counter reported on `hub.stopped`.
+  This is why `RoomState.evictFn` may be called under the room lock, unlike
+  `archiveFn`.
+- **`eventlog.New` never fails fatally** — it returns a working `NopLogger`
+  alongside its error, and a hub without a data dir gets one by default.
+- **Message content is captured by default** but gated by an explicit env var:
+  `AGENT_CHAT_CAPTURE_MESSAGE_CONTENT=false` (OTel's
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too).
+  Truncated at 8 KB on a rune boundary. Deliberate deviation from OTel's
+  default-off stance — documented in the design spec.
+- **Reports:** `mcp-server-bin --analyze [--room X] [--since 24h] [--legacy-log] [--json]`
+  answers: drops by mechanism, messages to absent recipients, messages never
+  read, and hub outage windows. `--legacy-log` additionally scans the old
+  plain-text log for "could not reach the hub at all" lines, which by definition
+  cannot appear in the structured stream.
+
+Design: `docs/superpowers/specs/2026-09-08-structured-agent-log-design.md`
+
 ### MCP Config Management
 
 The desktop app writes MCP server config to CLI config files at startup and per-terminal creation:
@@ -119,10 +152,11 @@ MCP config includes `AGENT_CHAT_DATA_DIR` env var pointing to `~/.agent-chat/` s
 
 ### Data Directory (`~/.agent-chat/`)
 
-- `mcp-server-bin` — extracted dual-mode Go binary
+- `mcp-server-bin` — extracted tri-mode Go binary
 - `mcp-server.log` — shared log (hub and all MCP instances append here)
 - `hub.port` — current hub WebSocket port (deleted before hub start to prevent stale reads)
 - `hub-state/{room}.json` — persisted room state (messages + agents)
+- `events.jsonl` — structured event stream (rotated via lumberjack; `events-*.jsonl[.gz]` backups)
 - `teams.json`, `prompts.json`, `global_prompt.md` — app config
 
 ### Frontend
