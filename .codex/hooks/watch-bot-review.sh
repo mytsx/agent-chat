@@ -101,9 +101,16 @@ T=$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
 # --paginate emits one JSON document PER PAGE, so the pages are streamed as bare
 # objects and slurped into a single array here; piping a per-page "[...]" into
 # `jq length` yields one integer per line and breaks the numeric test below.
+# Commit AND time. The commit alone is not enough on a cold start: with no
+# marker yet, a tag-only or already-up-to-date push while a PR is open records
+# the PR's existing head, and an arbitrarily old review for that commit would be
+# surfaced as this push's result. Requiring the review to be newer than the
+# window makes that case time out — which is correct, since such a push starts
+# no review round. (A PENDING review carries submitted_at null; jq orders null
+# below any string, so it is excluded here, as it should be.)
 fetch_reviews() {
   gh api --paginate "repos/$REPO/pulls/$n/reviews" --jq \
-    ".[] | select(.commit_id == \"$SHA\") | select(.user.login == \"$LOGIN\")" 2>/dev/null \
+    ".[] | select(.commit_id == \"$SHA\") | select(.submitted_at > \"$T\") | select(.user.login == \"$LOGIN\")" 2>/dev/null \
     | jq -s '.'
 }
 
