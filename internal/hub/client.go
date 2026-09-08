@@ -36,6 +36,12 @@ type Client struct {
 	// the whole question #98 asks. Written by readPump, read by the client
 	// manager after readPump has returned, so no lock is needed.
 	closeCause string
+	// livenessKey is the room+agent this connection has claimed as live, or ""
+	// if none. Holding it on the connection makes the claim per-SOCKET: joining
+	// twice on one socket (which clear_room makes possible, since it empties the
+	// roster without touching connections) must not leave a claim that can never
+	// be released.
+	livenessKey string
 	// isObserver is set once at a gated observer join (#17). It is connection-bound,
 	// so an observer can never send_message for the life of this connection even if
 	// the desktop later removes it from the allow-list or clear_room wipes the roster

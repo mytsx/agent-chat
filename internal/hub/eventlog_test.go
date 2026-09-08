@@ -829,3 +829,69 @@ func TestAgentGoneAfterGraceWindow(t *testing.T) {
 		t.Errorf("%s = %v, want %q", eventlog.AttrLeaveReason, got[0][eventlog.AttrLeaveReason], eventlog.LeaveReasonDisconnect)
 	}
 }
+
+// Codex review, PR #107: the grace window and the client's session replay were
+// on a collision course. The window keeps the roster entry alive for five
+// seconds; RoomState.Join rejects a name that is already present. So the very
+// reconnect the window exists to smooth over was refused — leaving the agent
+// connected but permanently outside the room.
+func TestRejoinDuringGraceWindowIsTakeover(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+	msgsAfterJoin := len(h.getOrCreateRoom("r1").GetMessages())
+
+	// Socket dies; the roster entry is deliberately retained for the window.
+	h.releaseAgent("r1", "alice")
+
+	// The replacement connection replays its join immediately.
+	replacement := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	resp := readResponse(t, replacement, "join_room")
+	if !resp.Success {
+		t.Fatalf("pencere içindeki yeniden katılım reddedildi: %s", resp.Error)
+	}
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("devralma sonrası agent roster'da yok")
+	}
+	if !h.isAgentConnected("r1", "alice") {
+		t.Error("devralan bağlantı canlılık kaydı bırakmadı")
+	}
+	// A takeover is not an arrival: it must not announce itself to the room.
+	if got := len(h.getOrCreateRoom("r1").GetMessages()); got != msgsAfterJoin {
+		t.Errorf("mesaj sayısı %d → %d; devralma odaya katılım mesajı yazdı", msgsAfterJoin, got)
+	}
+	if got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventAgentJoined); len(got) != 1 {
+		t.Errorf("agent.joined olayı %d kez yazıldı, want 1 (devralma yeni katılım değil)", len(got))
+	}
+}
+
+// Codex review, PR #107: the liveness counter counted successful joins, not
+// sockets. clear_room wipes the roster without releasing connection claims, so
+// a still-connected agent that joined again raised its own count to two — and a
+// single later release could never bring it back to zero. That name would then
+// look permanently connected: neither departure cleanup nor stale eviction
+// could ever remove it.
+func TestLivenessClaimIsPerConnectionNotPerJoin(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	// clear_room empties the roster; the socket is untouched and rejoins.
+	h.getOrCreateRoom("r1").ClearArchived(0)
+	h.handleJoinRoom(c, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("clear sonrası yeniden katılım başarısız: %s", resp.Error)
+	}
+
+	// One socket, one claim — however many times it joined.
+	h.releaseAgent("r1", "alice")
+	if h.isAgentConnected("r1", "alice") {
+		t.Error("tek soket birden fazla canlılık hakkı bıraktı; isim kalıcı olarak 'bağlı' kalırdı")
+	}
+}

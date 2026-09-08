@@ -110,11 +110,16 @@ const (
 	EventClientConnected    = "agent_chat.client.connected"
 	EventClientDisconnected = "agent_chat.client.disconnected"
 	EventAgentJoined        = "agent_chat.agent.joined"
-	EventAgentLeft          = "agent_chat.agent.left"
-	EventAgentEvicted       = "agent_chat.agent.evicted"
-	EventMessageSent        = "agent_chat.message.sent"
-	EventMessageRerouted    = "agent_chat.message.rerouted"
-	EventMessagesRead       = "agent_chat.messages.read"
+	// EventAgentRejoined is a reconnecting client reclaiming its own roster
+	// entry inside the grace window. Distinct from a join because nobody new
+	// arrived — and distinguishing them is what makes reconnect churn
+	// measurable rather than invisible.
+	EventAgentRejoined   = "agent_chat.agent.rejoined"
+	EventAgentLeft       = "agent_chat.agent.left"
+	EventAgentEvicted    = "agent_chat.agent.evicted"
+	EventMessageSent     = "agent_chat.message.sent"
+	EventMessageRerouted = "agent_chat.message.rerouted"
+	EventMessagesRead    = "agent_chat.messages.read"
 	// EventRoomReset marks a room whose message IDs restart from 1 (clear_room)
 	// or that ceased to exist (delete_room). The analyzer drops its accumulated
 	// read state for that room when it sees one.

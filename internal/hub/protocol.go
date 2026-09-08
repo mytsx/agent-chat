@@ -298,6 +298,27 @@ func (h *Hub) handleSubscribe(c *Client, req types.Request) {
 	c.sendOK(req.ID, req.Type)
 }
 
+// bindClientToRoom attaches a connection to a room: identity, subscription and
+// the connection-bound observer role. Shared by a first join and a reconnect
+// takeover so the two cannot drift.
+func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.rooms[room] = true
+	c.agentName = agentName
+	c.joinedRoom = room
+	// Bind the observer role to the connection (#17): a gated observer join makes
+	// this connection permanently read-only, independent of later allow-list/roster
+	// changes.
+	if role == roleObserver {
+		c.isObserver = true
+	}
+	if h.subs[room] == nil {
+		h.subs[room] = make(map[*Client]bool)
+	}
+	h.subs[room][c] = true
+}
+
 func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	var data struct {
 		AgentName string `json:"agent_name"`
@@ -356,6 +377,31 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	h.logger.Printf("join_room: agent=%q role=%q room=%q", data.AgentName, data.Role, room)
 
 	roomState := h.getOrCreateRoom(room)
+
+	// A reconnecting client finds its own roster entry still held by the grace
+	// window (releaseAgent). That is a takeover, not a name collision: refresh
+	// the entry, bind the new connection, and stay silent — announcing an
+	// arrival for a client that never really left is exactly the noise the
+	// window exists to prevent. Guarded on the entry being DISCONNECTED, so a
+	// genuine name clash with a live agent still fails.
+	if !h.isAgentConnected(room, data.AgentName) {
+		if agents, ok := roomState.Takeover(data.AgentName); ok {
+			h.bindClientToRoom(c, room, data.AgentName, role)
+			h.claimLiveness(c, room, data.AgentName)
+			h.events.Log(eventlog.EventAgentRejoined,
+				eventlog.String(eventlog.AttrConversationID, room),
+				eventlog.String(eventlog.AttrAgentName, data.AgentName),
+				eventlog.String(eventlog.AttrAgentRole, role),
+				eventlog.String(eventlog.AttrRequestID, req.ID),
+			)
+			c.sendSuccess(req.ID, req.Type, map[string]any{
+				"text":   fmt.Sprintf("\U0001f501 '%s' odaya yeniden bağlandı.", data.AgentName),
+				"agents": agents,
+			})
+			return
+		}
+	}
+
 	sysMsg, agents, err := roomState.Join(data.AgentName, data.Role)
 	if err != nil {
 		h.events.Log(eventlog.EventError,
@@ -370,7 +416,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 
 	// This connection now vouches for the agent's liveness, so a quiet stretch
 	// no longer looks like a departure (#98).
-	h.agentConnected(room, data.AgentName)
+	h.claimLiveness(c, room, data.AgentName)
 
 	h.events.Log(eventlog.EventAgentJoined,
 		eventlog.String(eventlog.AttrConversationID, room),
@@ -379,22 +425,7 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 	)
 
-	// Also subscribe the client to this room
-	h.mu.Lock()
-	c.rooms[room] = true
-	c.agentName = data.AgentName
-	c.joinedRoom = room
-	// Bind the observer role to the connection (#17): a gated observer join makes
-	// this connection permanently read-only, independent of later allow-list/roster
-	// changes.
-	if role == roleObserver {
-		c.isObserver = true
-	}
-	if h.subs[room] == nil {
-		h.subs[room] = make(map[*Client]bool)
-	}
-	h.subs[room][c] = true
-	h.mu.Unlock()
+	h.bindClientToRoom(c, room, data.AgentName, role)
 
 	// Build response text
 	var otherAgents []string
@@ -842,7 +873,7 @@ func (h *Hub) handleLeaveRoom(c *Client, req types.Request) {
 		return
 	}
 
-	h.agentDisconnected(room, data.AgentName)
+	h.releaseClientLiveness(c)
 
 	h.events.Log(eventlog.EventAgentLeft,
 		eventlog.String(eventlog.AttrConversationID, room),

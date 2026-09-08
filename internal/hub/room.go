@@ -159,6 +159,27 @@ func (r *RoomState) touchAgentLastSeenByIdentityLocked(agentName string) {
 
 // Join adds an agent to the room, returning the system message and current agents.
 func (r *RoomState) Join(agentName, role string) (types.Message, map[string]types.Agent, error) {
+	return r.join(agentName, role, false)
+}
+
+// Takeover reclaims a roster entry the same agent already owns, for a
+// reconnecting client whose previous socket is gone but whose entry is still
+// held by the grace window. It refreshes liveness and returns the roster
+// WITHOUT announcing an arrival: nobody new showed up.
+//
+// Returns false when there is no entry to reclaim, in which case the caller
+// should perform a normal join.
+func (r *RoomState) Takeover(agentName string) (map[string]types.Agent, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.agents[agentName]; !exists {
+		return nil, false
+	}
+	r.touchAgentLastSeenLocked(agentName)
+	return r.copyAgentsLocked(), true
+}
+
+func (r *RoomState) join(agentName, role string, _ bool) (types.Message, map[string]types.Agent, error) {
 	r.mu.Lock()
 
 	r.cleanupStaleLocked()

@@ -242,7 +242,7 @@ func (c *HubClient) Connect() error {
 		return fmt.Errorf("hub client closed")
 	}
 
-	go c.readLoop()
+	go c.readLoop(conn)
 
 	c.logger.Printf("Connected to hub at %s", addr)
 	return nil
@@ -310,6 +310,20 @@ func (c *HubClient) superviseReconnect() {
 		// ever made (the hub was down at startup), so the session still has to
 		// be established.
 		c.runBootstrap()
+
+		// The socket can die WHILE the session is being replayed. Its read loop
+		// calls superviseReconnect, which this still-running supervisor would
+		// swallow as a duplicate — so returning blindly here can leave the
+		// client disconnected with nobody scheduled to redial. Only exit if the
+		// connection actually survived.
+		c.mu.Lock()
+		live := c.conn != nil
+		c.mu.Unlock()
+		if !live {
+			c.logger.Printf("Hub connection lost during restore, retrying")
+			continue
+		}
+
 		c.logger.Printf("Hub connection restored")
 		return
 	}
@@ -342,8 +356,16 @@ func (c *HubClient) restoreSession() error {
 		}
 	}
 	if s.joined {
-		if _, err := c.JoinRoom(s.joinRoom, s.joinAgent, s.joinRole); err != nil {
+		// A protocol-level rejection returns a nil error with Success=false, so
+		// checking err alone would report the session restored while the agent
+		// sat outside the room — with no further transport failure to trigger
+		// another attempt.
+		resp, err := c.JoinRoom(s.joinRoom, s.joinAgent, s.joinRole)
+		if err != nil {
 			return fmt.Errorf("join_room: %w", err)
+		}
+		if err := ensureSuccess("join_room", resp); err != nil {
+			return err
 		}
 	}
 	if len(subs) > 0 {
@@ -484,10 +506,20 @@ func (c *HubClient) Send(req types.Request) (*types.Response, error) {
 	}
 }
 
-func (c *HubClient) readLoop() {
+// readLoop reads from the socket it was started for.
+//
+// It takes the connection as a parameter rather than reading c.conn: a
+// replacement dial can install a new socket while this loop is still winding
+// down, and touching the shared field would then read from — or clear — the
+// wrong one.
+func (c *HubClient) readLoop(conn *websocket.Conn) {
 	defer func() {
 		c.mu.Lock()
-		c.conn = nil
+		// Only disown the socket if it is still the current one; a newer dial
+		// may already have replaced it.
+		if c.conn == conn {
+			c.conn = nil
+		}
 		closed := c.closed
 		c.mu.Unlock()
 		// A read error used to end the client's life. Hand off to the supervisor
@@ -504,7 +536,7 @@ func (c *HubClient) readLoop() {
 		default:
 		}
 
-		_, message, err := c.conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				c.logger.Printf("Hub read error: %v", err)
@@ -623,17 +655,21 @@ func (c *HubClient) JoinRoom(room, agentName, role string) (*types.Response, err
 		"role":       role,
 	})
 	resp, err := c.Send(types.Request{Type: "join_room", Room: room, Data: data})
-	if err != nil || resp == nil || !resp.Success {
-		return resp, err
-	}
 
-	c.mu.Lock()
-	c.sess.joined = true
-	c.sess.joinRoom = room
-	c.sess.joinAgent = agentName
-	c.sess.joinRole = role
-	c.mu.Unlock()
-	return resp, nil
+	// Remember the intent when the request never reached the hub, not only when
+	// it succeeded. With a background connect the agent can call join_room
+	// before the first dial lands; dropping that intent would leave it outside
+	// the room until the model happened to retry. A hub that REJECTED the join
+	// is different — replaying that would just fail the same way forever.
+	if err != nil || (resp != nil && resp.Success) {
+		c.mu.Lock()
+		c.sess.joined = true
+		c.sess.joinRoom = room
+		c.sess.joinAgent = agentName
+		c.sess.joinRole = role
+		c.mu.Unlock()
+	}
+	return resp, err
 }
 
 // SendMessage sends a message to a room.

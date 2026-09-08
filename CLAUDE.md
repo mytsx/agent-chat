@@ -102,7 +102,14 @@ Three distinct mechanisms used to look like one bug ("agent odadan düştü"):
 
 Departures are deferred by `graceWindow` (5s): the room's system messages are
 read by the other agents, so a blip must not tell the team that someone left and
-a stranger arrived.
+a stranger arrived. Because the roster entry is retained, a reconnecting client's
+replayed `join_room` finds its own name still present — that is a **takeover**
+(`RoomState.Takeover`, `agent_chat.agent.rejoined`), not a name collision, and it
+announces nothing. A clash with a still-CONNECTED agent is still rejected.
+
+Liveness claims are per-connection (`Client.livenessKey`), not per join:
+`clear_room` empties the roster without touching sockets, so a second join on the
+same socket must not add a claim nothing will ever release.
 
 Client-side read deadline is 90s with a ping handler, so a half-open socket is
 detected instead of hanging `readLoop` forever.

@@ -29,6 +29,9 @@ type fakeHub struct {
 	requests []types.Request
 	conns    []*websocket.Conn
 	accepted int
+	// rejectJoin makes the hub refuse join_room at the protocol level (success
+	// false, no transport error) — the shape a manager authorization failure has.
+	rejectJoin bool
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -62,7 +65,14 @@ func (h *fakeHub) handle(w http.ResponseWriter, r *http.Request) {
 		h.requests = append(h.requests, req)
 		h.mu.Unlock()
 
+		h.mu.Lock()
+		reject := h.rejectJoin && req.Type == "join_room"
+		h.mu.Unlock()
+
 		resp := types.Response{ID: req.ID, RequestType: req.Type, Success: true, Data: json.RawMessage(`{"ok":true}`)}
+		if reject {
+			resp = types.Response{ID: req.ID, RequestType: req.Type, Success: false, Error: "manager rolü atanmadı"}
+		}
 		payload, _ := json.Marshal(resp)
 		if conn.WriteMessage(websocket.TextMessage, payload) != nil {
 			return
@@ -356,5 +366,74 @@ func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Errorf("bootstrap %d kez çalıştı, want 1", calls)
+	}
+}
+
+// Codex review, PR #107: with a background connect the agent can call join_room
+// before the first dial lands. Dropping that intent would leave it outside the
+// room until the model happened to retry on its own.
+func TestJoinBeforeConnectIsReplayedOnceHubAppears(t *testing.T) {
+	h := newFakeHub(t)
+	var addrMu sync.Mutex
+	addr := "ws://127.0.0.1:1/ws"
+
+	c := New(addr, log.New(io.Discard, "", 0))
+	c.minBackoff = 5 * time.Millisecond
+	c.maxBackoff = 20 * time.Millisecond
+	c.SetAddrResolver(func() (string, error) {
+		addrMu.Lock()
+		defer addrMu.Unlock()
+		return addr, nil
+	})
+	t.Cleanup(c.Close)
+
+	c.StartBackgroundConnect()
+
+	// The hub is not up yet, so this fails at the transport.
+	if _, err := c.JoinRoom("r1", "alice", ""); err == nil {
+		t.Fatal("bağlantı yokken join başarılı görünmemeli")
+	}
+
+	addrMu.Lock()
+	addr = h.url()
+	addrMu.Unlock()
+
+	waitFor(t, "hub açılınca join'in replay edilmesi", func() bool {
+		for _, typ := range h.requestTypes() {
+			if typ == "join_room" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// A join the hub REJECTED must not be replayed: it would fail the same way on
+// every reconnect forever.
+func TestRejectedJoinIsNotReplayed(t *testing.T) {
+	h := newFakeHub(t)
+	h.rejectJoin = true
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	resp, err := c.JoinRoom("r1", "alice", "manager")
+	if err != nil {
+		t.Fatalf("JoinRoom transport error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("kurulum hatası: sahte hub join'i reddetmeliydi")
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	time.Sleep(100 * time.Millisecond)
+
+	for _, typ := range h.requestTypes()[before:] {
+		if typ == "join_room" {
+			t.Fatal("hub'ın reddettiği join replay edildi; her turda aynı şekilde başarısız olurdu")
+		}
 	}
 }

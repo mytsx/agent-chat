@@ -356,7 +356,7 @@ func (h *Hub) runClientManager() {
 
 			// If this client had joined as an agent, remove it immediately
 			// so name re-use and manager lock cleanup do not wait for stale timeout.
-			h.releaseAgent(joinedRoom, agentName)
+			h.releaseAgentForClient(client, joinedRoom, agentName)
 
 			h.events.Log(eventlog.EventClientDisconnected,
 				eventlog.String(eventlog.AttrAgentName, agentName),
@@ -383,7 +383,29 @@ const defaultGraceWindow = 5 * time.Second
 // connKey identifies one agent's presence in one room.
 func connKey(room, agentName string) string { return room + "\x00" + agentName }
 
-// agentConnected registers a live connection for an agent in a room.
+// claimLiveness records that this connection vouches for an agent, at most once
+// per connection. A second join on the same socket is a no-op rather than a
+// second claim that nothing will ever release.
+func (h *Hub) claimLiveness(c *Client, room, agentName string) {
+	if c == nil || room == "" || agentName == "" {
+		return
+	}
+	key := connKey(room, agentName)
+	if c.livenessKey == key {
+		return // already claimed by this connection
+	}
+	if c.livenessKey != "" {
+		h.releaseLivenessKey(c.livenessKey)
+	}
+	c.livenessKey = key
+	h.connMu.Lock()
+	h.connectedAgents[key]++
+	h.connMu.Unlock()
+}
+
+// agentConnected registers a live connection for an agent in a room. Prefer
+// claimLiveness when a *Client is available; this exists for the paths that
+// only know the names.
 func (h *Hub) agentConnected(room, agentName string) {
 	if room == "" || agentName == "" {
 		return
@@ -393,19 +415,32 @@ func (h *Hub) agentConnected(room, agentName string) {
 	h.connMu.Unlock()
 }
 
+// releaseLivenessKey drops one claim on an already-built key.
+func (h *Hub) releaseLivenessKey(key string) {
+	h.connMu.Lock()
+	if n := h.connectedAgents[key] - 1; n > 0 {
+		h.connectedAgents[key] = n
+	} else {
+		delete(h.connectedAgents, key)
+	}
+	h.connMu.Unlock()
+}
+
 // agentDisconnected releases one, removing the entry at zero.
 func (h *Hub) agentDisconnected(room, agentName string) {
 	if room == "" || agentName == "" {
 		return
 	}
-	k := connKey(room, agentName)
-	h.connMu.Lock()
-	if n := h.connectedAgents[k] - 1; n > 0 {
-		h.connectedAgents[k] = n
-	} else {
-		delete(h.connectedAgents, k)
+	h.releaseLivenessKey(connKey(room, agentName))
+}
+
+// releaseClientLiveness drops whatever claim this connection holds, if any.
+func (h *Hub) releaseClientLiveness(c *Client) {
+	if c == nil || c.livenessKey == "" {
+		return
 	}
-	h.connMu.Unlock()
+	h.releaseLivenessKey(c.livenessKey)
+	c.livenessKey = ""
 }
 
 // isAgentConnected reports whether any live socket holds this agent in this
@@ -433,11 +468,28 @@ func (h *Hub) connectedFnFor(room string) func(string) bool {
 // lands inside the window should be invisible: previously every blip wrote a
 // leave and a join into the room, which the other agents read as a teammate
 // leaving and a stranger arriving.
+// releaseAgentForClient releases the claim this connection holds and then runs
+// the shared departure path.
+func (h *Hub) releaseAgentForClient(c *Client, room, agentName string) {
+	if room == "" || agentName == "" {
+		return
+	}
+	h.releaseClientLiveness(c)
+	h.scheduleDeparture(room, agentName)
+}
+
+// releaseAgent releases one claim by name. Kept for callers without a *Client.
 func (h *Hub) releaseAgent(room, agentName string) {
 	if room == "" || agentName == "" {
 		return
 	}
 	h.agentDisconnected(room, agentName)
+	h.scheduleDeparture(room, agentName)
+}
+
+// scheduleDeparture defers the removal so a reconnect inside the window is
+// invisible.
+func (h *Hub) scheduleDeparture(room, agentName string) {
 	if h.isAgentConnected(room, agentName) {
 		return // another connection still holds this agent
 	}
