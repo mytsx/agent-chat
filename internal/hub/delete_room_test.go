@@ -1,8 +1,6 @@
 package hub
 
 import (
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +11,7 @@ import (
 // authedDesktop builds a hub (with a real temp dataDir) + an authorized desktop client.
 func authedDesktop(t *testing.T) (*Hub, *Client) {
 	t.Helper()
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 	h.desktopAuthToken = "secret"
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 	h.handleRequest(c, types.Request{
@@ -53,7 +51,7 @@ func TestRawSnapshots_DoNotReviveMissingRooms(t *testing.T) {
 }
 
 func TestTombstone_PersistSkipsAndRecreateClears(t *testing.T) {
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 
 	// Dirty bir oda + tombstone → persistDirtyRooms onu YAZMAMALI.
 	rs := h.getOrCreateRoom("doomed")
@@ -94,7 +92,7 @@ func TestTombstone_PersistSkipsAndRecreateClears(t *testing.T) {
 
 func TestHandleDeleteRoom(t *testing.T) {
 	t.Run("requires desktop auth", func(t *testing.T) {
-		h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+		h, _ := newTestHubDir(t)
 		guest := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 		h.handleRequest(guest, types.Request{ID: "1", Type: "delete_room", Room: "x"})
 		if readResponse(t, guest, "delete_room").Success {

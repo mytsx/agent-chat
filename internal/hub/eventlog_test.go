@@ -14,13 +14,27 @@ import (
 	"desktop/internal/types"
 )
 
-// newEventHub builds a hub whose event stream lands in a temp dir, plus one
-// unattached client to drive handlers with.
-func newEventHub(t *testing.T) (*Hub, *Client, string) {
+// newTestHubDir builds a hub over a temp data dir and ties the event logger's
+// lifetime to the test.
+//
+// A hub owns an async event writer; only Shutdown closes it. A test that
+// abandons the hub leaves that goroutine running, and its next write recreates
+// events.jsonl underneath t.TempDir()'s cleanup — which then fails with
+// "directory not empty". Production is unaffected (Shutdown closes it), so the
+// fix belongs here.
+func newTestHubDir(t *testing.T) (*Hub, string) {
 	t.Helper()
 	dir := t.TempDir()
 	h := New(dir, "default", log.New(io.Discard, "", 0))
 	t.Cleanup(func() { _ = h.events.Close() })
+	return h, dir
+}
+
+// newEventHub builds a hub whose event stream lands in a temp dir, plus one
+// unattached client to drive handlers with.
+func newEventHub(t *testing.T) (*Hub, *Client, string) {
+	t.Helper()
+	h, dir := newTestHubDir(t)
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 	return h, c, dir
 }

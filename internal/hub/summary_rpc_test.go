@@ -122,7 +122,7 @@ func TestHandleLogMessage_TruncatesOverlongContent(t *testing.T) {
 }
 
 func TestHandleReadSummary_NoSummary(t *testing.T) {
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 	c := desktopClient(h)
 	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
 	h.handleRequest(c, req)
@@ -234,7 +234,7 @@ func TestHandleReadSummary_RefreshesAgentLastSeen(t *testing.T) {
 }
 
 func TestHandleReadSummary_WrongRoomRejected(t *testing.T) {
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 	c.agentName = "alice"
 	c.joinedRoom = "other-room"
@@ -248,7 +248,7 @@ func TestHandleReadSummary_WrongRoomRejected(t *testing.T) {
 }
 
 func TestHandleReadSummary_UnidentifiedRejected(t *testing.T) {
-	h := New(t.TempDir(), "default", log.New(io.Discard, "", 0))
+	h, _ := newTestHubDir(t)
 	c := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
 	req := types.Request{ID: "1", Type: "read_summary", Room: "r1"}
 	h.handleRequest(c, req)
