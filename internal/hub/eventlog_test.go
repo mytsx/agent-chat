@@ -851,7 +851,7 @@ func TestRejoinDuringGraceWindowIsTakeover(t *testing.T) {
 	msgsAfterJoin := len(h.getOrCreateRoom("r1").GetMessages())
 
 	// Socket dies; the roster entry is deliberately retained for the window.
-	h.releaseAgent("r1", "alice")
+	h.releaseAgentForClient(c, "r1", "alice")
 
 	// The replacement connection replays its join immediately.
 	replacement := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
@@ -900,7 +900,7 @@ func TestLivenessClaimIsPerConnectionNotPerJoin(t *testing.T) {
 	}
 
 	// One socket, one claim — however many times it joined.
-	h.releaseAgent("r1", "alice")
+	h.releaseAgentForClient(c, "r1", "alice")
 	if h.isAgentConnected("r1", "alice") {
 		t.Error("tek soket birden fazla canlılık hakkı bıraktı; isim kalıcı olarak 'bağlı' kalırdı")
 	}
@@ -1168,5 +1168,28 @@ func TestSupersededTimerDoesNotStealNewGraceWindow(t *testing.T) {
 	h.connMu.RUnlock()
 	if !stillSet {
 		t.Error("eski timer yeni kopuşun penceresini sildi")
+	}
+}
+
+// Symmetry audit after round 5: the idempotent-rejoin shortcut keys on the
+// CONNECTION's belief that it is joined. clear_room empties the roster without
+// touching connections, so that belief can outlive the entry — and the shortcut
+// would report success while leaving the agent out of the room for good.
+func TestRepeatJoinAfterClearActuallyRejoins(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	h.getOrCreateRoom("r1").ClearArchived(0) // roster boşaldı, bağlantı duruyor
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "again", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("clear sonrası yeniden katılım reddedildi: %s", resp.Error)
+	}
+
+	if !h.getOrCreateRoom("r1").HasAgent("alice") {
+		t.Error("idempotent kısayol başarı dönüp agent'ı roster'a geri koymadı")
 	}
 }

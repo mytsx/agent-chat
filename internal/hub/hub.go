@@ -414,9 +414,9 @@ func (h *Hub) claimLiveness(c *Client, room, agentName string) {
 	h.connMu.Unlock()
 }
 
-// agentConnected registers a live connection for an agent in a room. Prefer
-// claimLiveness when a *Client is available; this exists for the paths that
-// only know the names.
+// agentConnected registers a live connection by name. Production code claims
+// through claimLiveness, which is per-connection; this raw form exists for tests
+// that exercise the counter's semantics directly.
 func (h *Hub) agentConnected(room, agentName string) {
 	if room == "" || agentName == "" {
 		return
@@ -521,15 +521,6 @@ func (h *Hub) releaseAgentForClient(c *Client, room, agentName string) {
 		return
 	}
 	h.releaseClientLiveness(c)
-	h.scheduleDeparture(room, agentName)
-}
-
-// releaseAgent releases one claim by name. Kept for callers without a *Client.
-func (h *Hub) releaseAgent(room, agentName string) {
-	if room == "" || agentName == "" {
-		return
-	}
-	h.agentDisconnected(room, agentName)
 	h.scheduleDeparture(room, agentName)
 }
 

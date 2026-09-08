@@ -383,12 +383,17 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// leaves a window in which another socket sees the entry as unclaimed.
 	claim := func() { h.claimLiveness(c, room, data.AgentName) }
 
-	// (2) A repeat of the join this very socket already owns is idempotent, not
-	// a collision. It happens on the normal startup path: join_room called
-	// before the background dial returns a transport error, the supervisor
-	// replays it successfully, and the agent — having only seen the error —
-	// tries again. Falling through to Join would tell it its own name is taken.
-	if c.agentName == data.AgentName && c.joinedRoom == room {
+	// A repeat of the join this very socket already owns is idempotent, not a
+	// collision. It happens on the normal startup path: join_room called before
+	// the background dial returns a transport error, the supervisor replays it
+	// successfully, and the agent — having only seen the error — tries again.
+	// Falling through to Join would tell it its own name is taken.
+	//
+	// The roster check is not redundant: clear_room empties the roster without
+	// touching connections, so this socket can still believe it is joined while
+	// its entry is gone. Short-circuiting then would report success and leave the
+	// agent out of the room for good.
+	if c.agentName == data.AgentName && c.joinedRoom == room && roomState.HasAgent(data.AgentName) {
 		h.claimLiveness(c, room, data.AgentName)
 		c.sendSuccess(req.ID, req.Type, map[string]any{
 			"text":   fmt.Sprintf("\u2705 '%s' zaten '%s' odasında.", data.AgentName, room),
