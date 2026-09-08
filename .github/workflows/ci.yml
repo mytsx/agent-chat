@@ -34,6 +34,19 @@ jobs:
         with:
           node-version: '22'
 
+      - name: gofmt
+        # go vet biçimlendirmeye bakmaz: #103'ün review döngüsünde biçimlendirilmemiş
+        # dosya iki kez CI'dan yeşil geçip elle yakalandı (#104).
+        # npm install'dan ÖNCE: hem en hızlı geri bildirim, hem de `gofmt -l .`
+        # henüz var olmayan frontend/node_modules'ü taramaz.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt gerekli:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Frontend kur + build (tsc && vite build → frontend/dist)
         # Repo package-lock.json'ı takip etmiyor (.gitignore) → npm ci değil
         # npm install. setup-node'un npm cache'i de lockfile istediği için yok.
