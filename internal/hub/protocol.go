@@ -524,14 +524,23 @@ func (h *Hub) handleJoinRoom(c *Client, req types.Request) {
 	// no longer looks like a departure (#98).
 	h.claimLiveness(c, room, data.AgentName)
 
+	// The EFFECTIVE role, like the takeover path: a configured manager whose
+	// roster entry aged out rejoins HERE with its cached lesser role and is
+	// seated as manager, so logging the requested role would make role-based
+	// telemetry disagree with how the room routes.
+	joinedRole := role
+	if a, ok := agents[data.AgentName]; ok {
+		joinedRole = a.Role
+	}
+
 	h.events.Log(eventlog.EventAgentJoined,
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrAgentName, data.AgentName),
-		eventlog.String(eventlog.AttrAgentRole, role),
+		eventlog.String(eventlog.AttrAgentRole, joinedRole),
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 	)
 
-	h.bindClientToRoom(c, room, data.AgentName, role)
+	h.bindClientToRoom(c, room, data.AgentName, joinedRole)
 
 	// Build response text
 	var otherAgents []string

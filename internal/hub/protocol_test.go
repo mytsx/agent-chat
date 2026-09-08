@@ -2200,3 +2200,70 @@ func TestDirectMessageToPlainObserverIsRejected(t *testing.T) {
 		t.Error("observer'a doğrudan mesaj kabul edildi")
 	}
 }
+
+// Codex review round 12, PR #113: once a routing check has expired the seat,
+// BOTH lock fields are empty, so a configuration that merely repeats itself
+// looked like a fresh handoff and handed the idle agent a new heartbeat. The
+// app re-sends it on every team edit and the client replays it after every
+// reconnect, so the gateway could be kept alive indefinitely.
+func TestReaffirmingConfigurationDoesNotReviveATimedOutManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "yonetici")
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	room := h.getOrCreateRoom("r1")
+	// The manager has been idle past the routing timeout AND a routing check has
+	// already released the seat — both lock fields are empty by now.
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	agent := room.agents["yonetici"]
+	agent.LastSeen = types.Now() - 400
+	room.agents["yonetici"] = agent
+	room.mu.Unlock()
+	if got := room.GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: kilit hâlâ %q", got)
+	}
+
+	// The desktop re-sends the very same configuration.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yonetici"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if got := room.GetActiveManager(); got != "" {
+		t.Errorf("aktif manager = %q, want boş (zaman aşımına uğramış gateway diriltilmemeli)", got)
+	}
+}
+
+// The mirror: an agent that is actually working keeps (or takes) its seat.
+func TestConfigurationSeatsAnActiveManager(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "isci"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	if got := h.getOrCreateRoom("r1").GetActiveManager(); got != "isci" {
+		t.Errorf("aktif manager = %q, want isci", got)
+	}
+}

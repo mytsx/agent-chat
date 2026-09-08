@@ -809,7 +809,16 @@ func (r *RoomState) HandoffManager(managerAgent string) bool {
 	// after each desktop reconnect; letting either reset the 300s timer would
 	// keep routing through a manager that has done nothing for hours.
 	if !heldBySameAgent {
-		r.managerLastSeen = types.Now()
+		// The seat's heartbeat inherits the AGENT's last activity, not "now".
+		// Stamping now would let a configuration that merely repeats itself
+		// resurrect a manager the routing timeout had already released — the app
+		// re-sends it on every team edit and the client replays it after every
+		// reconnect, so an idle gateway could be kept alive indefinitely. An
+		// agent that is actually working has a fresh LastSeen and keeps its seat.
+		r.managerLastSeen = agent.LastSeen
+		if r.managerLastSeen == 0 {
+			r.managerLastSeen = types.Now()
+		}
 	}
 	r.managerAgent = key
 	r.dirty = true

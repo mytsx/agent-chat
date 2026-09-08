@@ -1382,3 +1382,25 @@ func TestRejoinEventLogsTheEffectiveRole(t *testing.T) {
 		t.Fatal("rejoined olayı bulunamadı")
 	}
 }
+
+// Codex review round 12, PR #113: a configured manager whose roster entry aged
+// out rejoins through the FRESH-join path with its cached lesser role and is
+// seated as manager there too — the joined event must say so.
+func TestFreshJoinEventLogsTheEffectiveRole(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	h.setConfiguredManager("r1", "isci")
+	h.getOrCreateRoom("r1").HandoffManager("isci") // roster boş: koltuk boş kalır
+
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventAgentJoined)
+	if got := e[eventlog.AttrAgentRole]; got != "manager" {
+		t.Errorf("joined olayındaki rol = %v, want manager (odanın gerçekten yönlendirdiği rol)", got)
+	}
+}
