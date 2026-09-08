@@ -99,9 +99,19 @@ fi
 # cannot both win and emit duplicate wake-ups — a read-then-write pair can.
 # A lock left behind by a force-killed watcher (its EXIT trap never ran) is
 # reclaimed by age; otherwise that SHA would be blocked forever.
+# GNU stat FIRST, and each form in its own assignment. Chaining them with `||`
+# inside one substitution is what breaks on Linux: there `-f` means "file system
+# status", so `stat -f %m` prints a filesystem report on stdout before failing,
+# the BSD fallback appends to it, the arithmetic blows up, the age test does not
+# exit — and the code below then removes a LIVE lock and starts a second
+# watcher. Anything non-numeric is treated as "just created", which errs toward
+# keeping a lock rather than stealing one.
 lock_age() {
   now=$(date +%s)
-  mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
+  mtime=$(stat -c %Y "$LOCK" 2>/dev/null) || mtime=$(stat -f %m "$LOCK" 2>/dev/null) || mtime=""
+  case "$mtime" in
+    ''|*[!0-9]*) mtime="$now" ;;
+  esac
   echo $(( now - mtime ))
 }
 if ! mkdir "$LOCK" 2>/dev/null; then
