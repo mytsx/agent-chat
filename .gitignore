@@ -56,3 +56,8 @@ dist/
 # (//go:embed prompts/*.md) — do NOT put local prompts there.
 /.prompts/*
 !/.prompts/.gitkeep
+
+# wails'in npm bağımlılık önbelleği için ürettiği damga: her `wails build` onu
+# yeniden yazıyor, yani izlenmesi her derlemeden sonra ağacı kirletiyor ve
+# release script'inin istediği temiz ağacı bozuyordu. Türetilmiş dosya.
+frontend/package.json.md5
