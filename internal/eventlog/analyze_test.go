@@ -450,3 +450,77 @@ func TestAnalyzeLegacyLogHonoursSince(t *testing.T) {
 		t.Errorf("since sınırı uygulanmadı: %d satır sayıldı, want 1", rep.LegacyUnreachable)
 	}
 }
+
+// Codex review round 2, PR #103: the room-reset fix must not erase history.
+// Messages the clear wiped while still unread are among the most interesting
+// findings the report has, so a reset starts a new generation instead.
+func TestAnalyzeKeepsUnreadFromBeforeRoomReset(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 7))
+		tick(time.Minute)
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared))
+		tick(time.Minute)
+		// Fresh generation reuses ID 7 and bob reads it; the old one stays unread.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 7))
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 7), Ints(AttrReadMessageIDs, []int{7}))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 {
+		t.Fatalf("okunmamış sayısı = %d, want 1 (sıfırlama öncesi mesaj korunmalı): %+v", len(got), got)
+	}
+	if got[0].MessageID != 7 {
+		t.Errorf("okunmamış id = %d, want 7", got[0].MessageID)
+	}
+}
+
+// Codex review round 2: an outage that spans the --since boundary must still be
+// reported; the stop that opens it lies before the cutoff.
+func TestAnalyzeOutageSpanningSinceCutoff(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Hour)
+		l.Log(EventHubStopped) // 10:00 — kesim noktasından önce
+		tick(4 * time.Hour)
+		l.Log(EventHubStarted) // 14:00 — kesim noktasından sonra
+	})
+
+	// Cutoff between the stop and the restart.
+	cut := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1 (kesim noktasını aşan kesinti): %+v", len(rep.Outages), rep.Outages)
+	}
+	if got := rep.Outages[0].Duration; got != 4*time.Hour {
+		t.Errorf("süre = %v, want 4h", got)
+	}
+}
+
+func TestAnalyzeDropsOutagesEntirelyBeforeCutoff(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		l.Log(EventHubStopped)
+		tick(time.Minute)
+		l.Log(EventHubStarted) // kesinti tamamen kesim noktasından önce
+		tick(10 * time.Hour)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+	})
+
+	cut := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Outages) != 0 {
+		t.Errorf("pencere dışı kesinti raporlanmış: %+v", rep.Outages)
+	}
+}

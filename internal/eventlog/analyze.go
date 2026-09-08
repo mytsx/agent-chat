@@ -245,7 +245,11 @@ type AnalyzeOptions struct {
 
 // Analyze reads the stream and builds the report.
 func Analyze(opts AnalyzeOptions) (Report, error) {
-	recs, err := Read(opts.Dir, opts.Since)
+	// Read everything, then apply the cutoff per record below. Filtering at read
+	// time would discard the hub lifecycle events an outage spanning the cutoff
+	// is reconstructed from: a stop 25 hours ago followed by a restart one hour
+	// ago must still show up under --since 24h.
+	recs, err := Read(opts.Dir, time.Time{})
 	if err != nil {
 		return Report{}, err
 	}
@@ -253,25 +257,41 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		kept := recs[:0]
 		for _, r := range recs {
 			// Hub lifecycle events belong to no room but bound every room's outages.
-			if r.Room() == opts.Room || r.Name == EventHubStarted || r.Name == EventHubStopped {
+			if r.Room() == opts.Room || isHubLifecycle(r.Name) {
 				kept = append(kept, r)
 			}
 		}
 		recs = kept
 	}
 
-	rep := Report{Events: len(recs)}
-	if len(recs) > 0 {
-		rep.From, rep.To = recs[0].Time, recs[len(recs)-1].Time
+	// inWindow reports whether a record counts toward the report's contents.
+	// Lifecycle events outside it still drive state, but never contribute
+	// findings or move the reported time range.
+	inWindow := func(r Record) bool {
+		return opts.Since.IsZero() || !r.Time.Before(opts.Since)
+	}
+
+	rep := Report{}
+	for _, r := range recs {
+		if !inWindow(r) {
+			continue
+		}
+		rep.Events++
+		if rep.From.IsZero() {
+			rep.From = r.Time
+		}
+		rep.To = r.Time
 	}
 
 	drops := map[string]*AgentDrops{}
 	dropFor := func(r Record) *AgentDrops {
-		key := r.Room() + "\x00" + r.Str(AttrAgentName)
-		d, ok := drops[key]
+		// Drops are counted per room across generations: clearing a room does not
+		// undo the fact that an agent fell out of it.
+		k := r.Room() + "\x00" + r.Str(AttrAgentName)
+		d, ok := drops[k]
 		if !ok {
 			d = &AgentDrops{Room: r.Room(), Agent: r.Str(AttrAgentName)}
-			drops[key] = d
+			drops[k] = d
 		}
 		return d
 	}
@@ -283,6 +303,17 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		id     int
 		target string
 	}
+	// generation numbers a room's lifetime. clear_room restarts message IDs at 1,
+	// so read progress must not cross that boundary — but deleting the room's
+	// pending sends would erase genuinely unread messages from before the clear,
+	// which are among the most interesting findings the report has. Keying by
+	// generation keeps that history while making old IDs unmatchable by new reads.
+	generation := map[string]int{}
+	genOf := func(room string) int { return generation[room] }
+	key := func(room string, agent string) string {
+		return fmt.Sprintf("%s\x00%d\x00%s", room, genOf(room), agent)
+	}
+
 	sent := map[string][]sentMsg{}
 	// readState per (room, agent): the exact IDs a read returned, plus a coarse
 	// watermark for records written before read.message_ids existed (or whose
@@ -308,6 +339,16 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	var lastEventAt time.Time
 
 	for _, r := range recs {
+		// Outside the window only hub lifecycle records are processed, and only
+		// to keep outage reconstruction correct across the boundary.
+		if !inWindow(r) && !isHubLifecycle(r.Name) {
+			continue
+		}
+		if !inWindow(r) {
+			applyHubLifecycle(r, &stoppedAt, &hubRunning)
+			lastEventAt = r.Time
+			continue
+		}
 		switch r.Name {
 		case EventAgentLeft:
 			d := dropFor(r)
@@ -351,12 +392,12 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// message did reach the manager regardless of the addressee.
 			undelivered := target == to && !r.Bool(AttrRecipientInRoom)
 			if target != "" && target != "all" && !undelivered {
-				key := r.Room() + "\x00" + target
-				sent[key] = append(sent[key], sentMsg{rec: r, id: r.Int(AttrMessageID), target: target})
+				k := key(r.Room(), target)
+				sent[k] = append(sent[k], sentMsg{rec: r, id: r.Int(AttrMessageID), target: target})
 			}
 
 		case EventMessagesRead:
-			rs := readFor(r.Room() + "\x00" + r.Str(AttrAgentName))
+			rs := readFor(key(r.Room(), r.Str(AttrAgentName)))
 			ids := r.Ints(AttrReadMessageIDs)
 			for _, id := range ids {
 				rs.ids[id] = true
@@ -372,19 +413,10 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			}
 
 		case EventRoomReset:
-			// clear_room restarts message IDs at 1. Without dropping the read
-			// state here, reused IDs in the fresh room would look already read.
-			prefix := r.Room() + "\x00"
-			for k := range reads {
-				if strings.HasPrefix(k, prefix) {
-					delete(reads, k)
-				}
-			}
-			for k := range sent {
-				if strings.HasPrefix(k, prefix) {
-					delete(sent, k)
-				}
-			}
+			// Start a new generation rather than discarding state: messages the
+			// clear wiped unread stay reportable, while their IDs can no longer
+			// be matched by reads in the fresh room.
+			generation[r.Room()]++
 
 		case EventHubStopped:
 			stoppedAt = r.Time
@@ -421,8 +453,20 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		rep.Outages = append(rep.Outages, Outage{Start: stoppedAt, Ongoing: true})
 	}
 
-	for key, msgs := range sent {
-		rs := reads[key]
+	// An outage reconstructed from a pre-cutoff stop belongs in the report only
+	// if it reached into the window.
+	if !opts.Since.IsZero() {
+		kept := rep.Outages[:0]
+		for _, o := range rep.Outages {
+			if o.Ongoing || !o.End.Before(opts.Since) {
+				kept = append(kept, o)
+			}
+		}
+		rep.Outages = kept
+	}
+
+	for k, msgs := range sent {
+		rs := reads[k]
 		for _, m := range msgs {
 			read := rs != nil && (rs.ids[m.id] || m.id <= rs.watermark)
 			if !read {
@@ -460,6 +504,24 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		}
 	}
 	return rep, nil
+}
+
+// isHubLifecycle reports whether a record drives hub up/down state.
+func isHubLifecycle(name string) bool {
+	return name == EventHubStarted || name == EventHubStopped
+}
+
+// applyHubLifecycle advances outage-reconstruction state without recording a
+// finding. Used for records that fall outside the --since window.
+func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool) {
+	switch r.Name {
+	case EventHubStopped:
+		*stoppedAt = r.Time
+		*hubRunning = false
+	case EventHubStarted:
+		*stoppedAt = time.Time{}
+		*hubRunning = true
+	}
 }
 
 // legacyTimeLayout matches the standard log package's LstdFlags output, which

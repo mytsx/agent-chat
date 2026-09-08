@@ -396,3 +396,72 @@ func TestNewWithEmptyDirUsesCurrentDirectory(t *testing.T) {
 		t.Errorf("boş Dir geçerli dizine yazmadı: %v", err)
 	}
 }
+
+// Codex review round 2, PR #103: waiting for hub.stopped to report the drop
+// count loses it entirely when the hub crashes — exactly the case this log is
+// meant to investigate. The writer must make the loss durable as it happens.
+func TestDropsAreAnnouncedWithoutGracefulShutdown(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	l, dir := newTestLogger(t, func(o *Options) {
+		o.BufferSize = 1
+		o.beforeWrite = func() { once.Do(func() { <-release }) }
+	})
+
+	for range 50 {
+		l.Log(EventMessageSent)
+	}
+	if l.Dropped() == 0 {
+		t.Fatal("kurulum hatası: hiç olay düşmedi")
+	}
+	close(release) // yazar serbest; Close ÇAĞRILMIYOR
+	l.Flush()
+
+	var found bool
+	for _, e := range readEvents(t, dir) {
+		if e[AttrEventName] == EventEventsDropped {
+			found = true
+			if n, ok := e[AttrEventsDropped].(float64); !ok || n == 0 {
+				t.Errorf("%s = %v, want > 0", AttrEventsDropped, e[AttrEventsDropped])
+			}
+		}
+	}
+	if !found {
+		t.Error("düşen olaylar akışa kalıcı olarak işaretlenmedi; çökme sonrası kayıp görünmez olurdu")
+	}
+}
+
+// Codex review round 2: a sink that starts failing after New must not be
+// silent. The desktop starts the hub with stderr unset, so the failure has to
+// reach the injected reporter and be counted as loss.
+func TestSinkWriteFailureIsCountedAndReported(t *testing.T) {
+	var reported []error
+	l, dir := newTestLogger(t, func(o *Options) {
+		o.OnError = func(err error) { reported = append(reported, err) }
+	})
+
+	l.Log(EventHubStarted)
+	l.Flush()
+
+	// Break the sink underneath the logger, then keep logging.
+	if err := l.sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("artık dizin değil"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := l.Dropped()
+	l.Log(EventMessageSent)
+	l.Flush()
+
+	if l.Dropped() <= before {
+		t.Errorf("yazma hatası kayıp olarak sayılmadı: %d → %d", before, l.Dropped())
+	}
+	if len(reported) == 0 {
+		t.Error("yazma hatası OnError'a bildirilmedi")
+	}
+}

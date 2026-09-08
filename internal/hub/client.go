@@ -147,27 +147,32 @@ func (c *Client) drainQueuedTextMessages() error {
 }
 
 // sendJSON sends a JSON-encoded message to this client.
-func (c *Client) sendJSON(v any) {
+// sendJSON queues a response, reporting whether it was accepted for delivery.
+// A full buffer drops the response, and a caller that records side effects
+// (read progress) must not record them for a response the client never got.
+func (c *Client) sendJSON(v any) bool {
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("sendJSON marshal error: %v", err)
-		return
+		return false
 	}
 	select {
 	case c.send <- data:
+		return true
 	default:
 		// Client buffer full, drop
 		c.hub.logger.Printf("Client send buffer full, dropping message for %s", c.agentName)
+		return false
 	}
 }
 
 // sendSuccess sends a successful response with an optional JSON payload.
-func (c *Client) sendSuccess(id, reqType string, payload any) {
+func (c *Client) sendSuccess(id, reqType string, payload any) bool {
 	resp := types.Response{ID: id, RequestType: reqType, Success: true}
 	if payload != nil {
 		resp.Data, _ = json.Marshal(payload)
 	}
-	c.sendJSON(resp)
+	return c.sendJSON(resp)
 }
 
 // sendOK sends a standard ok=true success response.
@@ -176,8 +181,8 @@ func (c *Client) sendOK(id, reqType string) {
 }
 
 // sendText sends a text-only success response.
-func (c *Client) sendText(id, reqType, text string) {
-	c.sendSuccess(id, reqType, map[string]string{"text": text})
+func (c *Client) sendText(id, reqType, text string) bool {
+	return c.sendSuccess(id, reqType, map[string]string{"text": text})
 }
 
 // sendError sends an error response.

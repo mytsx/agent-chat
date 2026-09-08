@@ -497,7 +497,10 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		to = activeManager
 	}
 
-	msg, err := roomState.SendMessage(data.From, to, data.Content, data.ExpectsReply, data.Priority, opts)
+	// Presence is captured under the same lock as the store: a separate lookup
+	// afterwards could see a roster a concurrent join/leave already changed.
+	msg, recipientPresent, err := roomState.SendMessageWithPresence(
+		data.From, to, data.Content, data.ExpectsReply, data.Priority, opts, data.To)
 	if err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
 		return
@@ -512,7 +515,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrAgentName, data.From),
 		eventlog.String(eventlog.AttrRecipientName, data.To),
-		eventlog.Bool(eventlog.AttrRecipientInRoom, data.To == "all" || roomState.HasAgent(data.To)),
+		eventlog.Bool(eventlog.AttrRecipientInRoom, data.To == "all" || recipientPresent),
 		// The manager gateway can store the message for somebody other than the
 		// addressee; recording both keeps "wrote to an absent agent" and "nobody
 		// read this" answerable without either question corrupting the other.
@@ -574,14 +577,18 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	roomState.TouchManagerHeartbeat(c.agentName)
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
-	h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, filtered)
-
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, nil)
 		return
 	}
 
-	c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit))
+	// Record progress only once the response is accepted for delivery: a full
+	// client buffer drops it, and marking those IDs read would erase from the
+	// report the very messages the agent never received.
+	if c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit)) {
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, filtered)
+	}
 }
 
 // logMessagesRead records exactly which messages a read returned.
@@ -654,17 +661,17 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		filtered, totalCount = roomState.ReadAllMessages(data.SinceID, data.Limit)
 	}
 
-	// Managers are told to poll read_all_messages, so without recording progress
-	// here every message a manager actually read through its normal tool would
-	// still be reported as never read.
-	h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, filtered)
-
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, nil)
 		return
 	}
 
-	c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit))
+	// Managers are told to poll read_all_messages, so this path must record
+	// progress too — but, as above, only for a response that was actually queued.
+	if c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit)) {
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, filtered)
+	}
 }
 
 func formatAllMessages(messages []types.Message, totalCount, limit int) string {

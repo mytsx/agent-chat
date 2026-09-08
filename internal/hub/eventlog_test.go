@@ -377,3 +377,56 @@ func TestEventLogClientConnectedCarriesType(t *testing.T) {
 		t.Errorf("%s = %v, want mcp", eventlog.AttrClientType, e[eventlog.AttrClientType])
 	}
 }
+
+// Codex review round 2, PR #103: a full client buffer drops the response, so
+// recording those IDs as read would erase from the report exactly the messages
+// the agent never received.
+func TestEventLogSkipsReadWhenResponseIsDropped(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	// A client whose send buffer is already full cannot receive the response.
+	bob := &Client{hub: h, send: make(chan []byte, 1), rooms: make(map[string]bool)}
+	joinAgent(t, h, alice, "r1", "alice")
+
+	h.handleJoinRoom(bob, types.Request{
+		ID: "join-bob", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "bob"}),
+	})
+	// Leave the join response sitting in the buffer so it stays full.
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "bob", "content": "merhaba"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	h.handleGetMessages(bob, types.Request{
+		ID: "read", Type: "get_messages", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "bob"}),
+	})
+
+	for _, e := range eventsNamed(loggedEvents(t, h, dir), eventlog.EventMessagesRead) {
+		if ids, ok := e[eventlog.AttrReadMessageIDs].([]any); ok && len(ids) > 0 {
+			t.Errorf("yanıt kuyruğa girmediği hâlde okuma kaydedilmiş: %v", ids)
+		}
+	}
+}
+
+// Codex review round 2: presence must be captured under the same lock as the
+// store, or a concurrent join/leave changes the answer after the fact.
+func TestSendMessageWithPresenceReportsRosterAtStoreTime(t *testing.T) {
+	r := NewRoomState()
+	if _, _, err := r.Join("bob", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, present, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "bob"); err != nil || !present {
+		t.Errorf("odadaki alıcı için present=%v err=%v, want true/nil", present, err)
+	}
+	if _, present, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "hayalet"); err != nil || present {
+		t.Errorf("odada olmayan alıcı için present=%v err=%v, want false/nil", present, err)
+	}
+	// The plain SendMessage wrapper must stay behaviour-compatible.
+	if _, err := r.SendMessage("alice", "bob", "m", false, "", SendOptions{}); err != nil {
+		t.Errorf("SendMessage: %v", err)
+	}
+}

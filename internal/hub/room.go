@@ -182,6 +182,18 @@ func (r *RoomState) Join(agentName, role string) (types.Message, map[string]type
 
 // SendMessage adds a message to the room.
 func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, priority string, opts SendOptions) (types.Message, error) {
+	msg, _, err := r.SendMessageWithPresence(from, to, content, expectsReply, priority, opts, "")
+	return msg, err
+}
+
+// SendMessageWithPresence stores the message and, under the SAME room lock,
+// reports whether presenceOf was in the roster at that instant.
+//
+// Reading the roster in a separate call after the send lets a concurrent join or
+// leave change the answer, which would make the misaddressed-message report
+// (#99) record the opposite of the roster state at the actual send point. An
+// empty presenceOf reports false and is what the plain SendMessage passes.
+func (r *RoomState) SendMessageWithPresence(from, to, content string, expectsReply bool, priority string, opts SendOptions, presenceOf string) (types.Message, bool, error) {
 	r.mu.Lock()
 
 	// Update sender's last_seen
@@ -206,12 +218,17 @@ func (r *RoomState) SendMessage(from, to, content string, expectsReply bool, pri
 	}
 	dropped := r.appendMessageLocked(msg)
 
+	present := false
+	if presenceOf != "" {
+		_, present = r.agents[presenceOf]
+	}
+
 	r.dirty = true
 	fn := r.archiveFn
 	r.mu.Unlock()
 
 	archiveDropped(dropped, fn)
-	return msg, nil
+	return msg, present, nil
 }
 
 // LogUserPrompt records an out-of-band human→agent prompt in the transcript as a

@@ -21,6 +21,7 @@ package eventlog
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -96,6 +97,11 @@ type Options struct {
 	// explicit, documented env var either way.
 	CaptureContent ContentCapture
 	BufferSize     int
+	// OnError receives sink write failures. The hub passes its plain-text
+	// logger: the desktop starts the hub with its stderr unset, so a bare
+	// stderr write would vanish exactly when the disk is failing. Nil falls
+	// back to stderr.
+	OnError func(error)
 
 	// now and beforeWrite are test seams.
 	now         func() time.Time
@@ -130,14 +136,18 @@ type Logger struct {
 	closeMu sync.RWMutex
 	closed  bool
 
-	dropped        atomic.Uint64
-	captureContent bool
-	now            func() time.Time
-	beforeWrite    func()
+	dropped atomic.Uint64
+	// reportedDropped is what the writer goroutine has already announced in the
+	// stream, so a loss can be made durable without a marker per dropped event.
+	reportedDropped uint64
+	onError         func(error)
+	captureContent  bool
+	now             func() time.Time
+	beforeWrite     func()
 
 	closeOnce sync.Once
 	// reportedWriteErr keeps a failing sink from turning into a log storm: the
-	// first write error is reported to stderr, the rest are silent.
+	// first write error is reported, the rest are counted only.
 	reportedWriteErr atomic.Bool
 }
 
@@ -182,8 +192,14 @@ func New(opts Options) (*Logger, error) {
 		ch:             make(chan entry, orDefault(opts.BufferSize, defaultBufferSize)),
 		done:           make(chan struct{}),
 		captureContent: resolveCapture(opts.CaptureContent),
+		onError:        opts.OnError,
 		now:            opts.now,
 		beforeWrite:    opts.beforeWrite,
+	}
+	if l.onError == nil {
+		l.onError = func(err error) {
+			os.Stderr.WriteString("eventlog: " + err.Error() + "\n")
+		}
 	}
 	if l.now == nil {
 		l.now = time.Now
@@ -298,8 +314,32 @@ func (l *Logger) run() {
 		if l.beforeWrite != nil {
 			l.beforeWrite()
 		}
+		l.announceDropsLocked()
 		l.write(e)
 	}
+}
+
+// announceDropsLocked writes a marker when the drop count has grown since the
+// last announcement.
+//
+// Relying on the hub.stopped record alone loses this entirely when the hub
+// crashes or is killed — precisely the case this log exists to investigate, and
+// the analyzer would then present a gap-ridden stream as complete. The marker is
+// emitted from the writer goroutine, so the producers' hot path still never
+// touches disk. Only called from run.
+func (l *Logger) announceDropsLocked() {
+	n := l.dropped.Load()
+	if n == l.reportedDropped {
+		return
+	}
+	l.reportedDropped = n
+	l.write(entry{
+		t:    l.now(),
+		name: EventEventsDropped,
+		attrs: []Attr{
+			Uint64(AttrEventsDropped, n),
+		},
+	})
 }
 
 // write renders one event. Content policy (gate, truncation) lives here rather
@@ -327,9 +367,16 @@ func (l *Logger) write(e entry) {
 	err := l.handler.Handle(context.Background(), rec)
 	l.writeMu.Unlock()
 
-	// A broken sink must not become a log storm: report once, then stay quiet.
-	if err != nil && l.reportedWriteErr.CompareAndSwap(false, true) {
-		os.Stderr.WriteString("eventlog: yazma hatası (bundan sonrası susturuldu): " + err.Error() + "\n")
+	if err == nil {
+		return
+	}
+	// A failed write is a lost event, so it counts as a drop: that is what makes
+	// a disk-full or rotation failure visible in the report instead of the
+	// analyzer silently showing a partial stream as complete.
+	l.dropped.Add(1)
+	// A broken sink must not become a log storm: report once, then count only.
+	if l.reportedWriteErr.CompareAndSwap(false, true) {
+		l.onError(fmt.Errorf("olay yazılamadı (bundan sonrası susturuldu, düşen sayacına ekleniyor): %w", err))
 	}
 }
 

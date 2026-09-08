@@ -104,7 +104,13 @@ func New(dataDir, defaultRoom string, logger *log.Logger) *Hub {
 	events := eventlog.NopLogger()
 	if dataDir != "" {
 		var err error
-		if events, err = eventlog.New(eventlog.Options{Dir: dataDir}); err != nil {
+		// OnError routes sink failures into the plain-text log: the desktop
+		// starts the hub with its stderr unset, so a bare stderr write would
+		// vanish exactly when the disk is failing.
+		opts := eventlog.Options{Dir: dataDir, OnError: func(err error) {
+			logger.Printf("Olay logu yazma hatası: %v", err)
+		}}
+		if events, err = eventlog.New(opts); err != nil {
 			logger.Printf("Olay logu açılamadı, olay kaydı devre dışı: %v", err)
 		}
 	}

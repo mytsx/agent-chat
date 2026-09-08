@@ -98,7 +98,11 @@ const (
 	// or that ceased to exist (delete_room). The analyzer drops its accumulated
 	// read state for that room when it sees one.
 	EventRoomReset = "agent_chat.room.reset"
-	EventError     = "agent_chat.error"
+	// EventEventsDropped is a durable marker that the buffer discarded events.
+	// It is written as soon as the writer notices the count grew, so a crash
+	// cannot hide the loss the way waiting for hub.stopped would.
+	EventEventsDropped = "agent_chat.events.dropped"
+	EventError         = "agent_chat.error"
 )
 
 // Values for AttrLeaveReason. Eviction is a separate event, not a reason,

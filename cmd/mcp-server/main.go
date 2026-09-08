@@ -125,6 +125,15 @@ func runMCP() {
 
 	logger.Printf("Connected to hub at %s", hubAddr)
 
+	// Identify as an MCP client. Without this the hub only ever sees an
+	// anonymous socket: connection telemetry cannot tell MCP from desktop, and
+	// the connect event (emitted on identify) never fires for the CLI agents at
+	// all. Non-fatal — a hub that rejects it must not stop the agent from
+	// working, so the failure is logged and serving continues.
+	if err := client.Identify("mcp", "", defaultRoom, ""); err != nil {
+		logger.Printf("Identify failed (continuing unidentified): %v", err)
+	}
+
 	app := mcpserver.NewMCPServerApp(client, defaultRoom, logger)
 	if err := app.Serve(); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
