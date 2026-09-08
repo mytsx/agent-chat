@@ -603,7 +603,13 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	//     a different role.
 	// Both key on join-bound identity (c.agentName, pinned by the from== check), so a
 	// forged `from` can't bypass the gate.
-	if c.isObserver.Load() || h.isConfiguredObserver(room, c.agentName) {
+	// The configured MANAGER outranks a stale observer allow-list entry, here as
+	// at the join gate. The desktop promotes in two calls, and in between the
+	// agent is already seated as manager with its binding cleared — rejecting its
+	// sends in that window means a worker's message is routed to a manager whose
+	// reply is dropped.
+	promoted := sameAgentName(h.getConfiguredManager(room), c.agentName)
+	if !promoted && (c.isObserver.Load() || h.isConfiguredObserver(room, c.agentName)) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}

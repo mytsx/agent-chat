@@ -750,23 +750,29 @@ func (r *RoomState) HandoffManager(managerAgent string) bool {
 	r.configuredManager = managerAgent
 
 	heldBySameAgent := sameAgentName(r.managerAgent, managerAgent) && r.managerLastSeen != 0
-	rosterChanged := false
 	if !sameAgentName(r.managerAgent, managerAgent) {
-		previous := r.managerAgent
 		if r.managerAgent != "" || r.managerLastSeen != 0 {
 			r.managerAgent = ""
 			r.managerLastSeen = 0
 			r.dirty = true
 		}
-		// The outgoing manager's ROSTER role goes with the lock. Clearing only
-		// the lock left the old agent listed as a manager next to the new one, so
-		// the UI and the persisted roster showed two managers until it rejoined.
-		if key, inRoom := r.rosterKeyLocked(previous); inRoom {
-			if agent := r.agents[key]; strings.EqualFold(strings.TrimSpace(agent.Role), "manager") {
-				agent.Role = ""
-				r.agents[key] = agent
-				rosterChanged = true
-			}
+	}
+
+	// At most ONE roster entry may carry the manager role. Deriving the outgoing
+	// identity from the lock alone was not enough: a manager whose heartbeat had
+	// already expired has no lock to read, and a hub restart leaves no configured
+	// name either — in both cases the old agent stayed listed as a manager beside
+	// its replacement, and the UI and the persisted roster showed two.
+	rosterChanged := false
+	for name, agent := range r.agents {
+		if sameAgentName(name, managerAgent) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(agent.Role), "manager") {
+			agent.Role = ""
+			r.agents[name] = agent
+			rosterChanged = true
+			r.dirty = true
 		}
 	}
 

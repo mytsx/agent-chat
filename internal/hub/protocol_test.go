@@ -2031,3 +2031,105 @@ func TestHandoffDowngradesThePreviousManagerInTheRoster(t *testing.T) {
 		t.Errorf("manager kilidi = %q, want yeni", got)
 	}
 }
+
+// Codex review round 10, PR #113: in the two-RPC promotion window the agent is
+// already seated as manager, but the allow-list still holds it — rejecting its
+// sends there means a worker's message is routed to a manager whose reply is
+// dropped.
+func TestPromotedManagerCanSendWhileTheAllowListIsStale(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	// Only the FIRST of the desktop's two calls has landed.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "cevap"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); !resp.Success {
+		t.Fatalf("iki-çağrı penceresinde terfi edilmiş manager mesaj gönderemedi: %s", resp.Error)
+	}
+}
+
+// And the mirror: an ordinary observer, not named as manager, still cannot send.
+func TestPlainObserverStillCannotSend(t *testing.T) {
+	h, _, _ := newEventHub(t)
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+	obs := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	h.handleSendMessage(obs, types.Request{
+		ID: "msg", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+	})
+	if resp := readResponse(t, obs, "send_message"); resp.Success {
+		t.Error("observer mesaj gönderebildi")
+	}
+}
+
+// Codex review round 10, PR #113: if the old manager's heartbeat already expired
+// and a routing check cleared the lock, the outgoing identity cannot be read
+// from the lock any more — the timed-out agent would stay listed as a manager
+// beside its replacement.
+func TestHandoffDemotesAManagerWhoseLockAlreadyTimedOut(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "eski")
+
+	oldMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(oldMgr, types.Request{
+		ID: "join-old", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "eski", "role": "manager"}),
+	})
+	readResponse(t, oldMgr, "join_room")
+
+	newMgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(newMgr, types.Request{
+		ID: "join-new", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yeni", "role": ""}),
+	})
+	readResponse(t, newMgr, "join_room")
+
+	// The old manager goes quiet past the routing timeout and a routing check
+	// clears the seat.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	room.mu.Unlock()
+	if got := room.GetActiveManager(); got != "" {
+		t.Fatalf("kurulum hatası: kilit hâlâ %q", got)
+	}
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yeni"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	agents := room.GetAgents()
+	if got := agents["eski"].Role; got == "manager" {
+		t.Error("zaman aşımına uğramış manager roster'da manager kaldı; iki manager görünür")
+	}
+	if got := agents["yeni"].Role; got != "manager" {
+		t.Errorf("yeni manager rolü = %q, want manager", got)
+	}
+}
