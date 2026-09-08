@@ -331,3 +331,122 @@ func analyzeDir(t *testing.T, dir string) Report {
 	}
 	return rep
 }
+
+// Codex review, PR #103: a read returns only the newest matching tail once its
+// limit bites, so the highest returned ID does not prove the lower ones were
+// shown. Read progress is a set, not a watermark.
+func TestAnalyzeReadProgressIsPerMessageNotWatermark(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		for id := 1; id <= 3; id++ {
+			l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+				String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, id))
+			tick(time.Second)
+		}
+		// bob's read was limited and returned only 2 and 3; message 1 was never
+		// shown even though a higher ID came back.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadReturned, 2), Int(AttrReadMaxID, 3),
+			Ints(AttrReadMessageIDs, []int{2, 3}))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 {
+		t.Fatalf("okunmamış sayısı = %d, want 1 (%+v)", len(got), got)
+	}
+	if got[0].MessageID != 1 {
+		t.Errorf("okunmamış id = %d, want 1", got[0].MessageID)
+	}
+}
+
+func TestAnalyzeTruncatedReadFallsBackToWatermark(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		for id := 1; id <= 2; id++ {
+			l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+				String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, id))
+		}
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 2), Bool(AttrReadIDsTruncated, true))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("kırpılmış okuma watermark'a düşmedi: %+v", got)
+	}
+}
+
+// Codex review, PR #103: a crashed hub never logs its stop, so two starts with
+// nothing between them are exactly the failure the outage report must surface.
+func TestAnalyzeDetectsUncleanRestart(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Minute)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+		tick(3 * time.Minute)
+		l.Log(EventHubStarted) // stop yok: çökmüş
+	})
+
+	rep := analyzeDir(t, dir)
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1 (%+v)", len(rep.Outages), rep.Outages)
+	}
+	o := rep.Outages[0]
+	if !o.Unclean {
+		t.Errorf("kesinti Unclean işaretlenmedi: %+v", o)
+	}
+	// Start is only a lower bound: the last thing the dead instance managed to log.
+	if o.Duration != 3*time.Minute {
+		t.Errorf("süre = %v, want 3m (son olaydan yeni başlangıca)", o.Duration)
+	}
+}
+
+// Codex review, PR #103: clear_room restarts message IDs at 1, so read state
+// from the previous room generation must not carry over.
+func TestAnalyzeResetsReadStateOnRoomReset(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 100))
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 100), Ints(AttrReadMessageIDs, []int{100}))
+		tick(time.Minute)
+
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared))
+		tick(time.Minute)
+
+		// Fresh generation reuses low IDs; bob has read none of them.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 1))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 || got[0].MessageID != 1 {
+		t.Fatalf("oda sıfırlaması sonrası okunmamış = %+v, want id 1", got)
+	}
+}
+
+// Codex review, PR #103: --since must bound the legacy scan too, or a one-day
+// report silently includes months of historical unreachable-hub lines.
+func TestAnalyzeLegacyLogHonoursSince(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "mcp-server.log")
+	lines := "" +
+		"[MCP] 2026/01/01 09:00:00 main.go:1: Hub discovery failed: hub.port not found\n" +
+		"[MCP] 2026/09/08 09:00:00 main.go:1: Hub discovery failed: hub.port not found\n"
+	if err := os.WriteFile(legacy, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cut := time.Date(2026, 9, 1, 0, 0, 0, 0, time.Local)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, LegacyLog: legacy, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.LegacyUnreachable != 1 {
+		t.Errorf("since sınırı uygulanmadı: %d satır sayıldı, want 1", rep.LegacyUnreachable)
+	}
+}

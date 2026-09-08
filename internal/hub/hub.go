@@ -294,14 +294,13 @@ func (h *Hub) runClientManager() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
-			h.events.Log(eventlog.EventClientConnected,
-				eventlog.String(eventlog.AttrClientType, client.clientType),
-				eventlog.String(eventlog.AttrNetworkTransport, eventlog.TransportWebSocket),
-			)
+			// No connect event here: clientType is not assigned until identify
+			// runs, so this point can only ever record a blank one. The typed
+			// event is emitted from handleIdentify instead.
 			h.logger.Printf("Client connected (total: %d)", len(h.clients))
 
 		case client := <-h.unregister:
-			var joinedRoom, agentName string
+			var joinedRoom, agentName, clientType string
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
@@ -314,6 +313,7 @@ func (h *Hub) runClientManager() {
 				}
 				joinedRoom = client.joinedRoom
 				agentName = client.agentName
+				clientType = client.clientType
 			}
 			h.mu.Unlock()
 
@@ -338,6 +338,7 @@ func (h *Hub) runClientManager() {
 			h.events.Log(eventlog.EventClientDisconnected,
 				eventlog.String(eventlog.AttrAgentName, agentName),
 				eventlog.String(eventlog.AttrConversationID, joinedRoom),
+				eventlog.String(eventlog.AttrClientType, clientType),
 			)
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}

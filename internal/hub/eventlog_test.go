@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -280,5 +281,99 @@ func TestHubWithoutDataDirUsesNopEventLogger(t *testing.T) {
 	h.events.Flush()
 	if got := h.events.Dropped(); got != 0 {
 		t.Errorf("Dropped() = %d, want 0", got)
+	}
+}
+
+// Codex review, PR #103: a read is capped by its limit and returns only the
+// newest matching tail, so the record must carry the exact IDs it returned.
+func TestEventLogRecordsExactReadIDs(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	bob := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	joinAgent(t, h, alice, "r1", "alice")
+	joinAgent(t, h, bob, "r1", "bob")
+
+	for i := range 3 {
+		h.handleSendMessage(alice, types.Request{
+			ID: "send", Type: "send_message", Room: "r1",
+			Data: mustRawJSON(t, map[string]any{
+				"from": "alice", "to": "bob", "content": fmt.Sprintf("mesaj %d", i),
+			}),
+		})
+		readResponse(t, alice, "send_message")
+	}
+
+	// A limit smaller than the backlog: only the newest tail comes back.
+	h.handleGetMessages(bob, types.Request{
+		ID: "read", Type: "get_messages", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"agent_name": "bob", "limit": 2}),
+	})
+	readResponse(t, bob, "get_messages")
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventMessagesRead)
+	ids, ok := e[eventlog.AttrReadMessageIDs].([]any)
+	if !ok {
+		t.Fatalf("%s alanı yok veya liste değil: %v", eventlog.AttrReadMessageIDs, e[eventlog.AttrReadMessageIDs])
+	}
+	if len(ids) != 2 {
+		t.Errorf("kaydedilen id sayısı = %d, want 2 (limit kadar)", len(ids))
+	}
+	if got := e[eventlog.AttrReadReturned]; got != float64(len(ids)) {
+		t.Errorf("returned = %v, id listesi uzunluğu = %d", got, len(ids))
+	}
+}
+
+// Codex review, PR #103: managers are told to poll read_all_messages, so that
+// path must record progress too — otherwise everything a manager reads through
+// its normal tool is reported as never read.
+func TestEventLogRecordsReadAllProgress(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.setConfiguredManager("r1", "yonetici")
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join-mgr", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	if resp := readResponse(t, mgr, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+	joinAgent(t, h, alice, "r1", "alice")
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "bob", "content": "merhaba"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	h.handleGetAllMessages(mgr, types.Request{
+		ID: "readall", Type: "get_all_messages", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{}),
+	})
+	readResponse(t, mgr, "get_all_messages")
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventMessagesRead)
+	if e[eventlog.AttrAgentName] != "yonetici" {
+		t.Errorf("%s = %v, want yonetici", eventlog.AttrAgentName, e[eventlog.AttrAgentName])
+	}
+	if got, ok := e[eventlog.AttrReadMessageIDs].([]any); !ok || len(got) == 0 {
+		t.Errorf("read_all okuma ilerlemesi kaydetmedi: %v", e[eventlog.AttrReadMessageIDs])
+	}
+}
+
+// Codex review, PR #103: clientType is only assigned by identify, so the connect
+// event must be emitted there or it can never distinguish MCP from desktop.
+func TestEventLogClientConnectedCarriesType(t *testing.T) {
+	h, c, dir := newEventHub(t)
+
+	h.handleIdentify(c, types.Request{
+		ID: "id-1", Type: "identify",
+		Data: mustRawJSON(t, map[string]string{"client_type": "mcp", "agent_name": "alice"}),
+	})
+	if resp := readResponse(t, c, "identify"); !resp.Success {
+		t.Fatalf("identify başarısız: %s", resp.Error)
+	}
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventClientConnected)
+	if e[eventlog.AttrClientType] != "mcp" {
+		t.Errorf("%s = %v, want mcp", eventlog.AttrClientType, e[eventlog.AttrClientType])
 	}
 }

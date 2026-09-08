@@ -107,6 +107,16 @@ func (h *Hub) handleIdentify(c *Client, req types.Request) {
 		c.rooms[data.Room] = true
 	}
 
+	// The connect event is emitted here rather than at register: a raw WebSocket
+	// reaches the register case before identify runs, so the client type would
+	// always be blank there and the telemetry could not tell MCP from desktop.
+	h.events.Log(eventlog.EventClientConnected,
+		eventlog.String(eventlog.AttrClientType, c.clientType),
+		eventlog.String(eventlog.AttrAgentName, c.agentName),
+		eventlog.String(eventlog.AttrNetworkTransport, eventlog.TransportWebSocket),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
+
 	h.logger.Printf("Client identified: type=%s agent=%s", data.ClientType, data.AgentName)
 
 	c.sendOK(req.ID, req.Type)
@@ -564,20 +574,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	roomState.TouchManagerHeartbeat(c.agentName)
 	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
-	// max_id is the agent's high-water mark: the "sent but never read" report is
-	// built by comparing it against what was addressed to that agent.
-	maxID := 0
-	if len(filtered) > 0 {
-		maxID = filtered[len(filtered)-1].ID
-	}
-	h.events.Log(eventlog.EventMessagesRead,
-		eventlog.String(eventlog.AttrConversationID, room),
-		eventlog.String(eventlog.AttrAgentName, data.AgentName),
-		eventlog.Int(eventlog.AttrReadSinceID, data.SinceID),
-		eventlog.Int(eventlog.AttrReadReturned, len(filtered)),
-		eventlog.Int(eventlog.AttrReadMaxID, maxID),
-		eventlog.String(eventlog.AttrRequestID, req.ID),
-	)
+	h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, filtered)
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
@@ -585,6 +582,44 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	}
 
 	c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit))
+}
+
+// logMessagesRead records exactly which messages a read returned.
+//
+// The ID list — not just the highest ID — is what the analyzer needs: a read is
+// capped by its limit and returns only the newest matching tail, so an older
+// direct message can be pushed out by newer broadcasts. Treating the highest
+// returned ID as a watermark would mark that unseen message as read.
+func (h *Hub) logMessagesRead(room, agentName, requestID string, sinceID int, msgs []types.Message) {
+	if agentName == "" {
+		return // unauthenticated read: no agent whose progress this advances
+	}
+	attrs := []eventlog.Attr{
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, agentName),
+		eventlog.Int(eventlog.AttrReadSinceID, sinceID),
+		eventlog.Int(eventlog.AttrReadReturned, len(msgs)),
+		eventlog.String(eventlog.AttrRequestID, requestID),
+	}
+
+	maxID := 0
+	ids := make([]int, 0, len(msgs))
+	for _, m := range msgs {
+		if m.ID > maxID {
+			maxID = m.ID
+		}
+		ids = append(ids, m.ID)
+	}
+	attrs = append(attrs, eventlog.Int(eventlog.AttrReadMaxID, maxID))
+	// A read whose limit was huge would otherwise bloat one record; past the cap
+	// the analyzer is told to fall back to the watermark for this read only.
+	if len(ids) > eventlog.MaxReadIDs {
+		attrs = append(attrs, eventlog.Bool(eventlog.AttrReadIDsTruncated, true))
+	} else if len(ids) > 0 {
+		attrs = append(attrs, eventlog.Ints(eventlog.AttrReadMessageIDs, ids))
+	}
+
+	h.events.Log(eventlog.EventMessagesRead, attrs...)
 }
 
 func formatAgentMessages(messages []types.Message, totalCount, limit int) string {
@@ -618,6 +653,11 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 	if roomState != nil {
 		filtered, totalCount = roomState.ReadAllMessages(data.SinceID, data.Limit)
 	}
+
+	// Managers are told to poll read_all_messages, so without recording progress
+	// here every message a manager actually read through its normal tool would
+	// still be reported as never read.
+	h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, filtered)
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
@@ -845,6 +885,14 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 	// last-snapshot ID — otherwise the next session's coincidental ID match could
 	// wrongly skip its snapshot.
 	h.resetSessionTracking(room)
+
+	// Same reason the analyzer must forget its read state: with IDs restarting
+	// at 1, a recipient's earlier progress would make reused IDs look read.
+	h.events.Log(eventlog.EventRoomReset,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleCleared),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	text := fmt.Sprintf("\U0001f9f9 '%s' odası temizlendi. Tüm mesajlar ve agent kayıtları silindi.", room)
 	c.sendText(req.ID, req.Type, text)
@@ -1177,6 +1225,14 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 		h.logger.Printf("delete_room: state dosyası kaldırılamadı (%s): %v", room, err)
 	}
 	os.Remove(stateFile + ".tmp")
+
+	// A room recreated under this name starts its message IDs over, so the
+	// analyzer must drop the old room's read state along with it.
+	h.events.Log(eventlog.EventRoomReset,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleDeleted),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 
 	text := fmt.Sprintf("\U0001f5d1️ '%s' odası silindi.", room)
 	c.sendText(req.ID, req.Type, text)

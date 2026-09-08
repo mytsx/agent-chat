@@ -131,6 +131,15 @@ plain-text `mcp-server.log` stays alongside it as a fallback.
   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too).
   Truncated at 8 KB on a rune boundary. Deliberate deviation from OTel's
   default-off stance — documented in the design spec.
+- **Read progress is a set, not a watermark.** `agent_chat.read.message_ids`
+  lists exactly what a read returned, because `RoomState.ReadMessages` returns
+  only the newest matching tail once its limit bites. Both `get_messages` and
+  `get_all_messages` (which managers poll) record it. `agent_chat.room.reset`
+  makes the analyzer drop read state when `clear_room`/`delete_room` restarts
+  message IDs at 1.
+- **`agent_chat.delivery.target`** is who a message was actually stored for; the
+  manager gateway makes it differ from `recipient.name`. Report 2 (#99) uses the
+  addressee, report 3 uses the delivery target, so neither corrupts the other.
 - **Reports:** `mcp-server-bin --analyze [--room X] [--since 24h] [--legacy-log] [--json]`
   answers: drops by mechanism, messages to absent recipients, messages never
   read, and hub outage windows. `--legacy-log` additionally scans the old

@@ -38,6 +38,21 @@ func (r Record) Float(key string) float64 {
 	return f
 }
 
+// Ints reads a numeric list attribute. JSON decodes it as []any of float64.
+func (r Record) Ints(key string) []int {
+	raw, ok := r.Attrs[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(raw))
+	for _, v := range raw {
+		if f, ok := v.(float64); ok {
+			out = append(out, int(f))
+		}
+	}
+	return out
+}
+
 func (r Record) Bool(key string) bool {
 	b, _ := r.Attrs[key].(bool)
 	return b
@@ -154,14 +169,17 @@ type AgentDrops struct {
 // Total is every way this agent left, used for ranking.
 func (d AgentDrops) Total() int { return d.Disconnect + d.Explicit + d.Evicted }
 
-// Misaddressed is a message sent to somebody who was not in the room (#99).
+// Misaddressed is a message whose addressee was not in the room (#99).
+// DeliveredTo is set when the manager gateway rerouted it anyway: the addressing
+// mistake is still real and worth reporting, but the message was not lost.
 type Misaddressed struct {
-	Time      time.Time `json:"time"`
-	Room      string    `json:"room"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	MessageID int       `json:"message_id"`
-	Content   string    `json:"content,omitempty"`
+	Time        time.Time `json:"time"`
+	Room        string    `json:"room"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	DeliveredTo string    `json:"delivered_to,omitempty"`
+	MessageID   int       `json:"message_id"`
+	Content     string    `json:"content,omitempty"`
 }
 
 // Unread is a message whose delivery target never read that far. To is the
@@ -186,6 +204,11 @@ type Outage struct {
 	// Ongoing marks a hub that stopped and never started again within the
 	// analyzed window — the stream simply ends.
 	Ongoing bool `json:"ongoing"`
+	// Unclean marks an outage inferred from two starts with no stop between
+	// them: the hub crashed or was killed and never got to log its stop. Start
+	// is then only a lower bound (the last event the dead instance produced),
+	// which is precisely the failure this report exists to surface.
+	Unclean bool `json:"unclean"`
 }
 
 // Report answers the four questions #101 was opened to answer.
@@ -261,8 +284,28 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		target string
 	}
 	sent := map[string][]sentMsg{}
-	highWater := map[string]int{}
+	// readState per (room, agent): the exact IDs a read returned, plus a coarse
+	// watermark for records written before read.message_ids existed (or whose
+	// list was too large to record).
+	type readState struct {
+		ids       map[int]bool
+		watermark int
+	}
+	reads := map[string]*readState{}
+	readFor := func(key string) *readState {
+		rs, ok := reads[key]
+		if !ok {
+			rs = &readState{ids: map[int]bool{}}
+			reads[key] = rs
+		}
+		return rs
+	}
+
 	var stoppedAt time.Time
+	// hubRunning tracks whether a hub instance is believed to be up, so a start
+	// with no intervening stop can be reported as an unclean restart.
+	var hubRunning bool
+	var lastEventAt time.Time
 
 	for _, r := range recs {
 		switch r.Name {
@@ -290,10 +333,14 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 				target = to
 			}
 			if !r.Bool(AttrRecipientInRoom) {
-				rep.Misaddressed = append(rep.Misaddressed, Misaddressed{
+				m := Misaddressed{
 					Time: r.Time, Room: r.Room(), From: r.Str(AttrAgentName), To: to,
 					MessageID: r.Int(AttrMessageID), Content: r.Str(AttrInputMessages),
-				})
+				}
+				if target != to {
+					m.DeliveredTo = target
+				}
+				rep.Misaddressed = append(rep.Misaddressed, m)
 			}
 			// Unread counts messages that reached a real recipient who never
 			// read them. A broadcast has no single delivery target whose
@@ -309,26 +356,63 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			}
 
 		case EventMessagesRead:
-			key := r.Room() + "\x00" + r.Str(AttrAgentName)
-			if id := r.Int(AttrReadMaxID); id > highWater[key] {
-				highWater[key] = id
+			rs := readFor(r.Room() + "\x00" + r.Str(AttrAgentName))
+			ids := r.Ints(AttrReadMessageIDs)
+			for _, id := range ids {
+				rs.ids[id] = true
+			}
+			// Only a record that could not list its IDs contributes a watermark.
+			// A read returns just the newest matching tail, so treating its
+			// highest ID as "everything below was seen" would silently mark
+			// older direct messages read that the agent never saw.
+			if len(ids) == 0 || r.Bool(AttrReadIDsTruncated) {
+				if id := r.Int(AttrReadMaxID); id > rs.watermark {
+					rs.watermark = id
+				}
+			}
+
+		case EventRoomReset:
+			// clear_room restarts message IDs at 1. Without dropping the read
+			// state here, reused IDs in the fresh room would look already read.
+			prefix := r.Room() + "\x00"
+			for k := range reads {
+				if strings.HasPrefix(k, prefix) {
+					delete(reads, k)
+				}
+			}
+			for k := range sent {
+				if strings.HasPrefix(k, prefix) {
+					delete(sent, k)
+				}
 			}
 
 		case EventHubStopped:
 			stoppedAt = r.Time
+			hubRunning = false
 			if d := r.Attrs[AttrEventsDropped]; d != nil {
 				if f, ok := d.(float64); ok {
 					rep.Dropped += uint64(f)
 				}
 			}
 		case EventHubStarted:
-			if !stoppedAt.IsZero() {
+			switch {
+			case !stoppedAt.IsZero():
 				rep.Outages = append(rep.Outages, Outage{
 					Start: stoppedAt, End: r.Time, Duration: r.Time.Sub(stoppedAt),
 				})
 				stoppedAt = time.Time{}
+			case hubRunning:
+				// A start with no stop before it: the previous instance crashed
+				// or was killed and never logged its exit. We only know it was
+				// alive at its last event, so that bounds the outage from below.
+				rep.Outages = append(rep.Outages, Outage{
+					Start: lastEventAt, End: r.Time,
+					Duration: r.Time.Sub(lastEventAt), Unclean: true,
+				})
 			}
+			hubRunning = true
 		}
+		lastEventAt = r.Time
 	}
 
 	// A stop with no matching start means the hub is still down as far as this
@@ -338,9 +422,10 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	}
 
 	for key, msgs := range sent {
-		mark := highWater[key]
+		rs := reads[key]
 		for _, m := range msgs {
-			if m.id > mark {
+			read := rs != nil && (rs.ids[m.id] || m.id <= rs.watermark)
+			if !read {
 				u := Unread{
 					Time: m.rec.Time, Room: m.rec.Room(), From: m.rec.Str(AttrAgentName),
 					To: m.rec.Str(AttrRecipientName), MessageID: m.id,
@@ -367,7 +452,10 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	})
 
 	if opts.LegacyLog != "" {
-		if err := scanLegacyLog(opts.LegacyLog, &rep); err != nil {
+		// The cutoff must apply here too: without it a --since 24h report would
+		// mix one day of events with months of historical unreachable-hub lines
+		// and present the total as belonging to the selected window.
+		if err := scanLegacyLog(opts.LegacyLog, opts.Since, &rep); err != nil {
 			return rep, err
 		}
 	}
@@ -388,7 +476,7 @@ var legacyUnreachableMarkers = []string{
 
 // scanLegacyLog counts unreachable-hub lines in the old plain-text log. Best
 // effort by design: it is a bridge until the structured stream has history.
-func scanLegacyLog(path string, rep *Report) error {
+func scanLegacyLog(path string, since time.Time, rep *Report) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -412,22 +500,33 @@ func scanLegacyLog(path string, rep *Report) error {
 		if !hit {
 			continue
 		}
-		rep.LegacyUnreachable++
 
 		// Lines look like: "[MCP] 2026/09/08 09:02:00 main.go:108: ...".
+		var stamp time.Time
 		fields := strings.Fields(line)
 		for i := 0; i+1 < len(fields); i++ {
 			t, err := time.ParseInLocation(legacyTimeLayout, fields[i]+" "+fields[i+1], time.Local)
 			if err != nil {
 				continue
 			}
-			if rep.LegacyFirst.IsZero() || t.Before(rep.LegacyFirst) {
-				rep.LegacyFirst = t
-			}
-			if t.After(rep.LegacyLast) {
-				rep.LegacyLast = t
-			}
+			stamp = t
 			break
+		}
+		// An undated line cannot be placed in the window; with a cutoff in force
+		// it is excluded rather than silently counted as recent.
+		if !since.IsZero() && (stamp.IsZero() || stamp.Before(since)) {
+			continue
+		}
+
+		rep.LegacyUnreachable++
+		if stamp.IsZero() {
+			continue
+		}
+		if rep.LegacyFirst.IsZero() || stamp.Before(rep.LegacyFirst) {
+			rep.LegacyFirst = stamp
+		}
+		if stamp.After(rep.LegacyLast) {
+			rep.LegacyLast = stamp
 		}
 	}
 	return sc.Err()

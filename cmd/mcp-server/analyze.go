@@ -113,8 +113,14 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 				fmt.Fprintf(w, "   … %d mesaj daha\n", len(rep.Misaddressed)-limit)
 				break
 			}
+			to := m.To
+			if m.DeliveredTo != "" {
+				// Rerouted by the manager gateway: the addressing mistake is
+				// real, but the message was not lost — say so.
+				to = fmt.Sprintf("%s (manager'a yönlendirildi: %s)", m.To, m.DeliveredTo)
+			}
 			fmt.Fprintf(w, "   %s [%s] %s → %s (id %d) %s\n",
-				m.Time.Format("01-02 15:04:05"), m.Room, m.From, m.To, m.MessageID, snippet(m.Content))
+				m.Time.Format("01-02 15:04:05"), m.Room, m.From, to, m.MessageID, snippet(m.Content))
 		}
 	}
 
@@ -150,8 +156,13 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 				fmt.Fprintf(w, "   %s → (sürüyor)\n", o.Start.Format(time.RFC3339))
 				continue
 			}
-			fmt.Fprintf(w, "   %s → %s (%s)\n",
-				o.Start.Format(time.RFC3339), o.End.Format("15:04:05"), o.Duration.Round(time.Second))
+			note := ""
+			if o.Unclean {
+				// Start is a lower bound here: the hub died without logging it.
+				note = "  [kirli kapanış — hub stop kaydı yok, başlangıç en erken sınır]"
+			}
+			fmt.Fprintf(w, "   %s → %s (%s)%s\n",
+				o.Start.Format(time.RFC3339), o.End.Format("15:04:05"), o.Duration.Round(time.Second), note)
 		}
 	}
 

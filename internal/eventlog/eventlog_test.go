@@ -377,3 +377,22 @@ func TestLogAfterCloseIsIgnored(t *testing.T) {
 		t.Errorf("kapanıştan sonraki olay yazılmış: %v", events)
 	}
 }
+
+// Codex review, PR #103: the documented zero-value configuration must actually
+// log, not silently degrade to a no-op because MkdirAll("") fails.
+func TestNewWithEmptyDirUsesCurrentDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	l, err := New(Options{})
+	if err != nil {
+		t.Fatalf("New(Options{}): %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	l.Log(EventHubStarted)
+	l.Flush()
+
+	if _, err := os.Stat(fileName); err != nil {
+		t.Errorf("boş Dir geçerli dizine yazmadı: %v", err)
+	}
+}

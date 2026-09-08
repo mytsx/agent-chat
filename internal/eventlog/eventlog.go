@@ -43,6 +43,11 @@ const fileName = "events.jsonl"
 // large file from dominating the log.
 const maxContentBytes = 8 * 1024
 
+// MaxReadIDs bounds the per-read ID list. A read's limit is caller-supplied, so
+// this stops one huge read from dominating a record; beyond it the producer sets
+// AttrReadIDsTruncated and the analyzer falls back to the watermark.
+const MaxReadIDs = 512
+
 // Defaults sized for a desktop app: ~32 MB live plus at most 5 compressed
 // backups, discarded after 30 days.
 const (
@@ -142,13 +147,20 @@ type Logger struct {
 // can log the problem and keep running. A hub must never refuse to start
 // because its event log could not be opened.
 func New(opts Options) (*Logger, error) {
-	if err := os.MkdirAll(opts.Dir, 0700); err != nil {
+	// Documented: an empty Dir means the current directory. MkdirAll("") fails
+	// with ENOENT, so normalise before touching the filesystem — otherwise the
+	// documented zero-value configuration silently degrades to a no-op logger.
+	dir := opts.Dir
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return NopLogger(), err
 	}
 
 	// lumberjack creates the file lazily, so probe now: a caller that gets no
 	// error should be able to trust that events will actually land.
-	path := filepath.Join(opts.Dir, fileName)
+	path := filepath.Join(dir, fileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return NopLogger(), err

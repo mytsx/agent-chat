@@ -57,12 +57,26 @@ const (
 	// manager gateway can make different from the addressee. Read progress is
 	// tracked per delivery target, so an intercepted message counts against the
 	// manager who must act on it, not the agent it was addressed to.
-	AttrDeliveryTarget   = "agent_chat.delivery.target"
-	AttrMessageID        = "agent_chat.message.id"
-	AttrRerouteTarget    = "agent_chat.reroute.target"
-	AttrReadSinceID      = "agent_chat.read.since_id"
-	AttrReadReturned     = "agent_chat.read.returned"
-	AttrReadMaxID        = "agent_chat.read.max_id"
+	AttrDeliveryTarget = "agent_chat.delivery.target"
+	AttrMessageID      = "agent_chat.message.id"
+	AttrRerouteTarget  = "agent_chat.reroute.target"
+	AttrReadSinceID    = "agent_chat.read.since_id"
+	AttrReadReturned   = "agent_chat.read.returned"
+	AttrReadMaxID      = "agent_chat.read.max_id"
+	// AttrReadMessageIDs lists exactly which messages a read returned. A read is
+	// capped by its limit and returns only the newest matching tail, so the
+	// highest returned ID does NOT prove every lower one was shown — an older
+	// direct message can be pushed out by newer broadcasts. Read progress is
+	// therefore a set, not a watermark; AttrReadMaxID remains for streams written
+	// before this attribute and as a coarse fallback.
+	AttrReadMessageIDs = "agent_chat.read.message_ids"
+	// AttrReadIDsTruncated marks a read whose ID list exceeded maxReadIDs, in
+	// which case the analyzer falls back to the watermark for that record.
+	AttrReadIDsTruncated = "agent_chat.read.ids_truncated"
+	// AttrRoomGeneration distinguishes room lifetimes. clear_room resets message
+	// IDs to 1, so without a generation boundary the analyzer would treat reused
+	// IDs in the fresh room as already read.
+	AttrRoomLifecycle    = "agent_chat.room.lifecycle"
 	AttrContentTruncated = "agent_chat.content.truncated"
 	AttrEventsDropped    = "agent_chat.events.dropped"
 )
@@ -80,7 +94,11 @@ const (
 	EventMessageSent        = "agent_chat.message.sent"
 	EventMessageRerouted    = "agent_chat.message.rerouted"
 	EventMessagesRead       = "agent_chat.messages.read"
-	EventError              = "agent_chat.error"
+	// EventRoomReset marks a room whose message IDs restart from 1 (clear_room)
+	// or that ceased to exist (delete_room). The analyzer drops its accumulated
+	// read state for that room when it sees one.
+	EventRoomReset = "agent_chat.room.reset"
+	EventError     = "agent_chat.error"
 )
 
 // Values for AttrLeaveReason. Eviction is a separate event, not a reason,
@@ -88,6 +106,12 @@ const (
 const (
 	LeaveReasonDisconnect = "disconnect"
 	LeaveReasonExplicit   = "explicit"
+)
+
+// Values for AttrRoomLifecycle.
+const (
+	RoomLifecycleCleared = "cleared"
+	RoomLifecycleDeleted = "deleted"
 )
 
 // Values for AttrNetworkTransport, per OTel: "pipe" for stdio, "websocket" for
@@ -109,3 +133,7 @@ func Int64(key string, value int64) Attr     { return slog.Int64(key, value) }
 func Uint64(key string, value uint64) Attr   { return slog.Uint64(key, value) }
 func Bool(key string, value bool) Attr       { return slog.Bool(key, value) }
 func Float64(key string, value float64) Attr { return slog.Float64(key, value) }
+
+// Ints attaches a list of message IDs. slog encodes it through the JSON
+// handler as an array, which is what the analyzer reads back.
+func Ints(key string, values []int) Attr { return slog.Any(key, values) }

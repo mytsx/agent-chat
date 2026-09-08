@@ -163,22 +163,24 @@ MCP'nin görüp hub'ın göremediği tek sınıf olay var: "hub'a hiç bağlanam
 |---|---|---|
 | `agent_chat.hub.started` | `hub.Run` | `server.port`, `agent_chat.pid` |
 | `agent_chat.hub.stopped` | `hub.Shutdown` | `agent_chat.events.dropped` |
-| `agent_chat.client.connected` | `hub.go` register | `agent_chat.client.type`, `network.transport` |
+| `agent_chat.client.connected` | `protocol.go` `handleIdentify` | `agent_chat.client.type`, `network.transport` |
 | `agent_chat.client.disconnected` | `hub.go` unregister | `gen_ai.agent.name`, `error.type` |
 | `agent_chat.agent.joined` | `protocol.go` `handleJoinRoom` | `gen_ai.agent.name`, `agent_chat.agent.role` |
 | `agent_chat.agent.left` | unregister / explicit leave | `agent_chat.leave.reason` = `disconnect` \| `explicit` |
 | `agent_chat.agent.evicted` | `room.go` `cleanupStaleLocked` | `agent_chat.agent.idle_seconds` |
-| `agent_chat.message.sent` | `protocol.go` `handleSendMessage` | `agent_chat.recipient.name`, `agent_chat.recipient.in_room`, `agent_chat.message.id`, `gen_ai.input.messages` |
+| `agent_chat.message.sent` | `protocol.go` `handleSendMessage` | `agent_chat.recipient.name`, `agent_chat.recipient.in_room`, `agent_chat.delivery.target`, `agent_chat.message.id`, `gen_ai.input.messages` |
 | `agent_chat.message.rerouted` | manager gateway | `agent_chat.recipient.name`, `agent_chat.reroute.target` |
-| `agent_chat.messages.read` | `protocol.go` `handleGetMessages` | `agent_chat.read.since_id`, `agent_chat.read.returned`, `agent_chat.read.max_id` |
+| `agent_chat.messages.read` | `protocol.go` `handleGetMessages` **ve** `handleGetAllMessages` | `agent_chat.read.since_id`, `agent_chat.read.returned`, `agent_chat.read.message_ids`, `agent_chat.read.max_id` |
+| `agent_chat.room.reset` | `handleClearRoom`, `handleDeleteRoom` | `agent_chat.room.lifecycle` = `cleared` \| `deleted` |
 | `agent_chat.error` | ilgili hata dalları | `error.type`, `mcp.method.name` |
 
 Her kayıtta ortak: `gen_ai.conversation.id` (oda, varsa), `jsonrpc.request.id` (varsa), `trace_id` / `span_id` (varsa).
 
-İki alan analizi doğrudan mümkün kılıyor:
+Üç alan analizi doğrudan mümkün kılıyor:
 
-- **`agent_chat.recipient.in_room`** — gönderim anında alıcının roster'da olup olmadığı. Hub bunu zaten biliyor; kaydetmek bedava ve analiz tarafında roster'ı olay akışından yeniden kurmaya gerek bırakmıyor.
-- **`agent_chat.read.max_id`** — o okumanın gördüğü en yüksek mesaj kimliği. Agent başına ilerleme (high-water mark) bundan çıkar; "gönderildi ama okunmadı" sorusu buna dayanır.
+- **`agent_chat.recipient.name` + `.in_room`** — göndericinin yazdığı alıcı ve o adın roster'da olup olmadığı. Hub bunu gönderim anında zaten biliyor; kaydetmek bedava ve analiz tarafında roster'ı olay akışından yeniden kurmaya gerek bırakmıyor. 2. rapor buna dayanır.
+- **`agent_chat.delivery.target`** — mesajın *fiilen* kimin için kaydedildiği. Manager gateway araya girdiğinde bu, alıcıdan farklıdır (mesaj manager'a gider). Okuma ilerlemesi buna göre ölçülür; aksi halde manager'lı bir odadaki neredeyse tüm trafik sonsuza kadar "okunmamış" görünürdü.
+- **`agent_chat.read.message_ids`** — okumanın döndürdüğü mesajların **tam listesi**, yalnızca en yükseği değil. `ReadMessages` limit dolduğunda yalnızca en yeni kuyruğu döndürür, dolayısıyla en yüksek kimlik alttakilerin görüldüğünü kanıtlamaz: eski bir doğrudan mesaj yeni broadcast'lerce dışarı itilebilir. İlerleme bir **küme**dir, watermark değil. `read.max_id` yalnızca bu alandan önce yazılmış akışlar ve liste `MaxReadIDs`'i aştığında (`read.ids_truncated`) kaba yedek olarak kullanılır.
 
 ## Analiz aracı
 
