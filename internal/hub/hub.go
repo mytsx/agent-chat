@@ -103,7 +103,7 @@ type Hub struct {
 	// leave those entries alone.
 	departUntil map[string]time.Time
 	// graceWindow is how long a departure waits before it is written down. A
-	// client that reconnects inside it leaves no trace; see releaseAgent.
+	// client that reconnects inside it leaves no trace; see releaseAgentForClient.
 	graceWindow time.Duration
 
 	listener net.Listener
@@ -437,7 +437,10 @@ func (h *Hub) releaseLivenessKey(key string) {
 	h.connMu.Unlock()
 }
 
-// agentDisconnected releases one, removing the entry at zero.
+// agentDisconnected releases one claim by name, removing the entry at zero.
+// Production releases through releaseAgentForClient, which is per-connection and
+// arms the grace window in the same locked step; this raw form exists for tests
+// that drive the counter directly.
 func (h *Hub) agentDisconnected(room, agentName string) {
 	if room == "" || agentName == "" {
 		return
@@ -520,15 +523,13 @@ func (h *Hub) protectedFnFor(room string) func(string) bool {
 	return func(agentName string) bool { return h.isAgentProtected(room, agentName) }
 }
 
-// releaseAgent gives up one connection's claim on an agent and, if that was the
-// last one, schedules the departure after the grace window.
+// releaseAgentForClient gives up this connection's claim on an agent and, if it
+// was the last one, schedules the departure after the grace window.
 //
-// The departure is deferred rather than immediate because a reconnect that
-// lands inside the window should be invisible: previously every blip wrote a
-// leave and a join into the room, which the other agents read as a teammate
-// leaving and a stranger arriving.
-// releaseAgentForClient releases the claim this connection holds and then runs
-// the shared departure path.
+// The departure is deferred rather than immediate because a reconnect that lands
+// inside the window should be invisible: previously every blip wrote a leave and
+// a join into the room, which the other agents read as a teammate leaving and a
+// stranger arriving.
 func (h *Hub) releaseAgentForClient(c *Client, room, agentName string) {
 	if room == "" || agentName == "" {
 		return
@@ -579,41 +580,6 @@ func (h *Hub) startDepartureTimer(room, agentName string, gen uint64) {
 		return
 	}
 	time.AfterFunc(h.graceWindow, func() {
-		select {
-		case <-h.done:
-			return // shutting down; the roster is being torn down anyway
-		default:
-		}
-		h.finalizeDeparture(room, agentName, gen)
-	})
-}
-
-// scheduleDeparture defers the removal so a reconnect inside the window is
-// invisible.
-func (h *Hub) scheduleDeparture(room, agentName string) {
-	if h.isAgentConnected(room, agentName) {
-		return // another connection still holds this agent
-	}
-
-	// Each disconnect gets its own generation. A reconnect (claimLiveness) bumps
-	// it, retiring the timer this call is about to arm — otherwise an agent that
-	// flaps would be removed on the FIRST disconnect's old deadline instead of
-	// getting a fresh window from the latest one.
-	key := connKey(room, agentName)
-	grace := h.graceWindow
-	h.connMu.Lock()
-	h.departGen[key]++
-	gen := h.departGen[key]
-	if grace > 0 {
-		h.departUntil[key] = time.Now().Add(grace)
-	}
-	h.connMu.Unlock()
-
-	if grace <= 0 {
-		h.finalizeDeparture(room, agentName, gen)
-		return
-	}
-	time.AfterFunc(grace, func() {
 		select {
 		case <-h.done:
 			return // shutting down; the roster is being torn down anyway
