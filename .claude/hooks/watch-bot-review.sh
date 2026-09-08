@@ -87,16 +87,32 @@ done
 #   .lock — this run, while it polls. It keeps a second watcher off the same
 #           round without outliving the process that holds it.
 MARK="${MARK_DIR:-/tmp}/claude-${BOT}-watch-${REPO//\//-}-pr$n.last"
-LOCK="$MARK.lock"
+# Per-ROUND lock, so a watcher still polling an older SHA never blocks the round
+# a newer push just started.
+LOCK="$MARK.$SHA.lock"
 mkdir -p "$(dirname "$MARK")" 2>/dev/null
 if [ "$(cat "$MARK" 2>/dev/null)" = "$SHA" ]; then
   exit 0
 fi
-if [ "$(cat "$LOCK" 2>/dev/null)" = "$SHA" ]; then
-  exit 0
+
+# mkdir IS the acquisition: it is atomic, so two hooks racing for the same round
+# cannot both win and emit duplicate wake-ups — a read-then-write pair can.
+# A lock left behind by a force-killed watcher (its EXIT trap never ran) is
+# reclaimed by age; otherwise that SHA would be blocked forever.
+lock_age() {
+  now=$(date +%s)
+  mtime=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
+  echo $(( now - mtime ))
+}
+if ! mkdir "$LOCK" 2>/dev/null; then
+  STALE_AFTER=$(( TRIES * INTERVAL + 300 ))
+  if [ "$(lock_age)" -le "$STALE_AFTER" ]; then
+    exit 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  mkdir "$LOCK" 2>/dev/null || exit 0
 fi
-echo "$SHA" > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+trap 'rm -rf "$LOCK"' EXIT
 
 # Zaman penceresi. Bu hook, komutun TAMAMI bittikten sonra çalışıyor
 # (PostToolUse), yani `git push && <uzun görev>` biçiminde bir komutta bot
@@ -154,7 +170,19 @@ while [ "$i" -lt "$TRIES" ]; do
   # exists to exclude. original_commit_id keeps the commit the comment was
   # actually written against. (Review-level commit_id is NOT re-anchored, so the
   # review query above is fine.)
-  INLINE=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[]' 2>/dev/null \
+  # The comments request is retried and its FAILURE is kept: piping a failed
+  # request straight into jq turns it into an empty list, and the watcher would
+  # record the round as done while silently dropping every inline finding.
+  RAW=""
+  INLINE_OK=0
+  for _ in 1 2 3; do
+    if RAW=$(gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[]' 2>/dev/null); then
+      INLINE_OK=1
+      break
+    fi
+    sleep 5
+  done
+  INLINE=$(printf '%s' "$RAW" \
     | jq -s --argjson ids "$REVIEW_IDS" --arg login "$INLINE_LOGIN" --arg since "$T" --arg sha "$SHA" \
       '[.[] | select((.pull_request_review_id as $r | $ids | index($r))
                      or (.user.login == $login and .created_at > $since
@@ -167,6 +195,10 @@ while [ "$i" -lt "$TRIES" ]; do
   echo "## Review gövdesi"
   printf '%s' "$REVIEWS" | jq -r '.[] | "### \(.user.login) [\(.state)] @\(.submitted_at)\n\(.body)\n"'
   echo "## Satır-içi yorumlar"
+  if [ "$INLINE_OK" != "1" ]; then
+    echo "UYARI: satır-içi yorumlar ÇEKİLEMEDİ (API hatası, 3 deneme). Liste eksik;"
+    echo "turu kapatmadan önce PR'ı elle kontrol et."
+  fi
   printf '%s' "$INLINE" | jq -r '.[] | "- \(.path):\(.line)\n\(.body)\n"'
   echo
   echo "GÖREV: Bulguları değerlendir (adversarial — yanlış-pozitifleri gerekçeli reddet)."
