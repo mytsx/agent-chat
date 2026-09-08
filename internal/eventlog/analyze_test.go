@@ -1232,3 +1232,110 @@ func TestAnalyzeSeparatesRetryAttemptsFromFailedClients(t *testing.T) {
 		t.Errorf("kesinti etkisi = %+v, want 1 vazgeçen istemci", rep.Outages)
 	}
 }
+
+// #106/1: before #98 a failed DiscoverHubAddr called os.Exit(1), so every
+// "hub.port not found" line is one MCP process that died without ever reaching
+// the hub. Counting only the give-up marker undercounted affected clients by
+// ~30x in the shipped log. After #98 the same failure is waited out in the
+// background, and those lines must NOT count — the log holds both eras.
+func TestAnalyzeCountsFatalDiscoveryAsFailedClient(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		tick(time.Hour)
+		l.Log(EventHubUnavailable)
+		tick(time.Hour)
+		l.Log(EventHubStarted)
+	})
+
+	base := time.Date(2026, 9, 8, 9, 0, 0, 0, time.UTC)
+	line := func(at time.Time, msg string) string {
+		return "[MCP] " + at.In(time.Local).Format(legacyTimeLayout) + " x.go:1: " + msg + "\n"
+	}
+	lines := line(base.Add(70*time.Minute), "Hub discovery failed: hub.port not found: open /x/hub.port: no such file") +
+		line(base.Add(71*time.Minute), "Hub discovery failed: hub.port not found: open /x/hub.port: no such file") +
+		// Post-#98 shapes: the process stayed alive and kept dialling. Neither
+		// the startup line nor the supervisor's retries are a client dying.
+		line(base.Add(72*time.Minute), "Hub discovery failed, arka planda beklenecek: hub.port not found: open /x/hub.port: no such file") +
+		line(base.Add(73*time.Minute), "Hub connect failed, retrying: hub adresi çözülemedi: hub.port not found: open /x/hub.port: no such file") +
+		line(base.Add(74*time.Minute), "Hub connect failed, retrying: hub adresi çözülemedi: hub.port not found: open /x/hub.port: no such file")
+
+	legacy := filepath.Join(dir, "mcp-server.log")
+	if err := os.WriteFile(legacy, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, LegacyLog: legacy})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.LegacyUnreachable != 5 {
+		t.Errorf("ulaşılamayan satır = %d, want 5", rep.LegacyUnreachable)
+	}
+	if rep.LegacyClientsFailed != 2 {
+		t.Errorf("vazgeçen istemci = %d, want 2 (yalnız ölümcül açılış satırı; arka planda bekleyen ve süpervizör denemeleri sayılmaz)", rep.LegacyClientsFailed)
+	}
+	if len(rep.Outages) != 1 || rep.Outages[0].LegacyClientsFailed != 2 {
+		t.Errorf("kesinti etkisi = %+v, want 2 vazgeçen istemci", rep.Outages)
+	}
+}
+
+// #106/2: a shutdown that logs hub.unavailable and then dies before hub.stopped
+// used to inherit the PREVIOUS stop's "persisted" evidence, so the next start
+// opened no generation — although a half-finished shutdown can roll back to an
+// older snapshot and reuse message IDs exactly as a crash does. A message sent
+// before the crash must not be cleared by a read of the reused ID afterwards.
+func TestAnalyzeDoesNotInheritPersistEvidenceAcrossInterruptedShutdown(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventHubStarted)
+		// A clean, persisted stop — the evidence that must not survive.
+		l.Log(EventHubStopped, Bool(AttrPersistOK, true))
+		tick(time.Minute)
+		l.Log(EventHubStarted)
+		l.Log(EventMessageSent, room,
+			String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"),
+			String(AttrDeliveryTarget, "bob"),
+			Bool(AttrRecipientInRoom, true),
+			Int(AttrMessageID, 1))
+		// Shutdown begins and the process dies before hub.stopped.
+		l.Log(EventHubUnavailable)
+		tick(time.Minute)
+		l.Log(EventHubStarted)
+		// The rolled-back hub reuses ID 1; this read must not clear the send
+		// from the previous epoch.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Ints(AttrReadIDRanges, []int{1, 1}))
+	})
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Unread) != 1 {
+		t.Fatalf("okunmamış = %d, want 1 (yarım kapanış kimlikleri geri sardırabilir)", len(rep.Unread))
+	}
+	if rep.Unread[0].MessageID != 1 {
+		t.Errorf("okunmamış mesaj id = %d, want 1", rep.Unread[0].MessageID)
+	}
+}
+
+// #106/3: with --since past the newest record the window never opens, so no
+// baseline is set. The final banking still ran, which reported every pre-cutoff
+// loss and warned that an entirely empty report was incomplete.
+func TestAnalyzeEmptyWindowReportsNoInheritedLosses(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 42))
+	})
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: time.Now().Add(24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.Events != 0 {
+		t.Fatalf("kurulum hatası: pencerede %d kayıt var, 0 bekleniyordu", rep.Events)
+	}
+	if rep.Dropped != 0 {
+		t.Errorf("kayıp = %d, want 0 (pencere hiç açılmadı; kesim öncesi kayıplar bu rapora ait değil)", rep.Dropped)
+	}
+}
