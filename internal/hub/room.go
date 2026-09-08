@@ -737,7 +737,11 @@ func (r *RoomState) TouchManagerHeartbeat(agentName string) bool {
 // room with a configured manager, a connected agent, and no gateway. Nothing
 // retries: the client treats the refusal as a protocol rejection and keeps its
 // worker role, so even a reconnect replays the lesser role.
-func (r *RoomState) HandoffManager(managerAgent string) {
+// The bool reports whether the roster actually changed, so the caller can
+// publish it: the desktop UI refreshes its agent cache from roster events, and a
+// promotion that emits none leaves the agent displayed with its old role until
+// something unrelated happens in the room.
+func (r *RoomState) HandoffManager(managerAgent string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -745,6 +749,7 @@ func (r *RoomState) HandoffManager(managerAgent string) {
 	// replaying a role that predates the promotion (see below).
 	r.configuredManager = managerAgent
 
+	heldBySameAgent := sameAgentName(r.managerAgent, managerAgent) && r.managerLastSeen != 0
 	if !sameAgentName(r.managerAgent, managerAgent) {
 		if r.managerAgent != "" || r.managerLastSeen != 0 {
 			r.managerAgent = ""
@@ -754,7 +759,7 @@ func (r *RoomState) HandoffManager(managerAgent string) {
 	}
 
 	if managerAgent == "" {
-		return
+		return false
 	}
 
 	// The CONFIGURATION is the claim. Waiting for a refused join to leave one
@@ -772,17 +777,25 @@ func (r *RoomState) HandoffManager(managerAgent string) {
 	// install nothing.
 	key, inRoom := r.rosterKeyLocked(managerAgent)
 	if !inRoom {
-		return
+		return false
 	}
 	if r.connectedFn != nil && !r.connectedFn(key) {
-		return
+		return false
 	}
 	agent := r.agents[key]
+	changed := !strings.EqualFold(strings.TrimSpace(agent.Role), "manager")
 	agent.Role = "manager"
 	r.agents[key] = agent
+	// The heartbeat is NOT refreshed when the seat is already this agent's. The
+	// app re-sends the same manager on every team edit, and the client replays it
+	// after each desktop reconnect; letting either reset the 300s timer would
+	// keep routing through a manager that has done nothing for hours.
+	if !heldBySameAgent {
+		r.managerLastSeen = types.Now()
+	}
 	r.managerAgent = key
-	r.managerLastSeen = types.Now()
 	r.dirty = true
+	return changed
 }
 
 // rosterKeyLocked returns the roster key that denotes agentName, matching the

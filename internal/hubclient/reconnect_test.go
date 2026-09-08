@@ -126,6 +126,16 @@ func (h *fakeHub) acceptedCount() int {
 	return h.accepted
 }
 
+// requestsAfter returns the requests received after the first n, oldest first.
+func (h *fakeHub) requestsAfter(n int) []types.Request {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if n >= len(h.requests) {
+		return nil
+	}
+	return append([]types.Request(nil), h.requests[n:]...)
+}
+
 // requestTypes returns the types received so far, oldest first.
 func (h *fakeHub) requestTypes() []string {
 	h.mu.Lock()
@@ -1342,5 +1352,76 @@ func TestExternalJoinIsNotDiscardedByAnEarlierReplayRecord(t *testing.T) {
 	defer c.mu.Unlock()
 	if c.sess.joinRoom != "B" {
 		t.Errorf("kayıtlı oda = %q, want B (sonradan çağrılan join bayat sayılmamalı)", c.sess.joinRoom)
+	}
+}
+
+// Codex review round 6, PR #113: two SetManager calls for the same room can
+// reach the hub as A then B while B's goroutine resumes first. Without a
+// reservation A wins the replay cache, and the next reconnect silently reverts
+// the newer choice.
+func TestOverlappingConfigurationRecordsInCallOrder(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// A reserves first, B second — B is the newer call.
+	revA := c.reserveConfig("manager:r1", true)
+	revB := c.reserveConfig("manager:r1", true)
+
+	// B's outcome is recorded first, A's afterwards (reversed completion).
+	c.rememberManager("r1", "B", revB)
+	c.rememberManager("r1", "A", revA)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.sess.managers["r1"]; got != "B" {
+		t.Errorf("kayıtlı manager = %q, want B (sonra çağrılan kazanmalı)", got)
+	}
+}
+
+// Codex review round 6, PR #113: the hub creates a room on demand, so replaying
+// a deleted room's configuration resurrects it — the deletion would not survive
+// a socket blip.
+func TestDeletedRoomIsNotResurrectedByReplay(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.Identify("desktop", "", "", "tok"); err != nil {
+		t.Fatalf("Identify: %v", err)
+	}
+	if err := c.SetManager("olu-oda", "yonetici"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.Subscribe([]string{"olu-oda"}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	if err := c.DeleteRoom("olu-oda"); err != nil {
+		t.Fatalf("DeleteRoom: %v", err)
+	}
+
+	before := len(h.requestTypes())
+	h.dropAll()
+	waitFor(t, "yeniden bağlanma", func() bool { return h.acceptedCount() >= 2 })
+	waitFor(t, "oturumun geri yüklenmesi", func() bool {
+		for _, r := range h.requestTypes()[before:] {
+			if r == "identify" {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	for _, r := range h.requestsAfter(before) {
+		if (r.Type == "set_manager" || r.Type == "set_observers" || r.Type == "subscribe") && r.Room == "olu-oda" {
+			t.Fatalf("silinmiş oda replay edildi: %s room=%s", r.Type, r.Room)
+		}
+		if r.Type == "subscribe" && strings.Contains(string(r.Data), "olu-oda") {
+			t.Fatal("silinmiş oda abonelik replay'inde geri geldi")
+		}
 	}
 }

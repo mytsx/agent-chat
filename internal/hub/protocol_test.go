@@ -1756,3 +1756,108 @@ func TestPromotionRaceWithConcurrentSend(t *testing.T) {
 		t.Error("terfi sonrası bağlantı hâlâ salt-okunur")
 	}
 }
+
+// Codex review round 6, PR #113: the desktop re-sends the same manager on every
+// team edit, and the client replays it after each reconnect. Letting either
+// reset the 300s heartbeat would keep routing through a manager that has done
+// nothing for hours.
+func TestSetManagerDoesNotRefreshAnIdleManagersHeartbeat(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredManager("r1", "yonetici")
+
+	mgr := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(mgr, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "yonetici", "role": "manager"}),
+	})
+	readResponse(t, mgr, "join_room")
+
+	// The manager goes quiet past the routing timeout.
+	room := h.getOrCreateRoom("r1")
+	room.mu.Lock()
+	room.managerLastSeen = types.Now() - 400
+	stale := room.managerLastSeen
+	room.mu.Unlock()
+
+	// A team edit re-sends the very same manager.
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "yonetici"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	room.mu.Lock()
+	got := room.managerLastSeen
+	room.mu.Unlock()
+	if got != stale {
+		t.Errorf("managerLastSeen = %v, want %v (aynı manager'ın yeniden gönderimi kalp atışını tazelememeli)", got, stale)
+	}
+	if active := room.GetActiveManager(); active != "" {
+		t.Errorf("aktif manager = %q, want boş (zaman aşımı geçmiş olmalı)", active)
+	}
+}
+
+// A promotion that changes the roster must be published, or the desktop keeps
+// showing the agent with the role it had before.
+func TestPromotionBroadcastsUpdatedRoster(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+
+	sub := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.mu.Lock()
+	if h.subs["r1"] == nil {
+		h.subs["r1"] = make(map[*Client]bool)
+	}
+	h.subs["r1"][sub] = true
+	h.mu.Unlock()
+
+	worker := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(worker, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	readResponse(t, worker, "join_room")
+	drain(sub)
+
+	h.handleSetManager(desktop, types.Request{
+		ID: "sm", Type: "set_manager", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"manager_agent": "isci"}),
+	})
+	readResponse(t, desktop, "set_manager")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case payload := <-sub.send:
+			var ev struct {
+				Event string `json:"event"`
+				Data  struct {
+					Agents map[string]types.Agent `json:"agents"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(payload, &ev) != nil || ev.Event != "agent_joined" {
+				continue
+			}
+			if ev.Data.Agents["isci"].Role == "manager" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("terfi sonrası roster yayını gelmedi; arayüz eski rolü göstermeye devam eder")
+		}
+	}
+}
+
+// drain empties a client's pending frames so a test can assert on what comes
+// after a specific action.
+func drain(c *Client) {
+	for {
+		select {
+		case <-c.send:
+		default:
+			return
+		}
+	}
+}

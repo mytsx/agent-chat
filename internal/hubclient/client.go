@@ -80,6 +80,11 @@ type session struct {
 	// room silently loses its manager gateway.
 	managers  map[string]string
 	observers map[string][]string
+	// configRev orders overlapping configuration calls for the SAME room. Two
+	// SetManager calls can reach the hub as A then B while B's goroutine resumes
+	// first; without a reservation A would then win the replay cache and the next
+	// reconnect would silently revert the newer choice.
+	configRev map[string]uint64
 	// pendingLeave is a departure the gate refused; restoration performs it.
 	pendingLeave *pendingLeave
 	// joinRev counts membership changes only (join intent recorded, leave). The
@@ -1037,6 +1042,7 @@ func (c *HubClient) SetManager(room, managerAgent string) error {
 }
 
 func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error {
+	myRev := c.reserveConfig("manager:"+room, !bypassGate)
 	data, _ := json.Marshal(map[string]string{"manager_agent": managerAgent})
 	resp, err := c.send(types.Request{Type: "set_manager", Room: room, Data: data}, bypassGate)
 
@@ -1052,7 +1058,7 @@ func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error
 	// while this replay was in flight would be overwritten by the older one —
 	// the next pass would then replay the stale value again and settle on it.
 	if !bypassGate && (err != nil || (resp != nil && resp.Success)) {
-		c.rememberManager(room, managerAgent)
+		c.rememberManager(room, managerAgent, myRev)
 	}
 	if err != nil {
 		return err
@@ -1060,9 +1066,31 @@ func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error
 	return ensureSuccess("set_manager", resp)
 }
 
-func (c *HubClient) rememberManager(room, managerAgent string) {
+// reserveConfig claims the next revision for a configuration key, so an outcome
+// recorded later can tell whether it is still the newest call. Replays do not
+// reserve: they carry no new intent.
+func (c *HubClient) reserveConfig(key string, external bool) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.sess.configRev == nil {
+		c.sess.configRev = map[string]uint64{}
+	}
+	if external {
+		c.sess.configRev[key]++
+	}
+	return c.sess.configRev[key]
+}
+
+func (c *HubClient) configIsCurrentLocked(key string, myRev uint64) bool {
+	return c.sess.configRev[key] == myRev
+}
+
+func (c *HubClient) rememberManager(room, managerAgent string, myRev uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.configIsCurrentLocked("manager:"+room, myRev) {
+		return
+	}
 	if c.sess.managers == nil {
 		c.sess.managers = map[string]string{}
 	}
@@ -1077,10 +1105,11 @@ func (c *HubClient) SetObservers(room string, observers []string) error {
 }
 
 func (c *HubClient) setObservers(room string, observers []string, bypassGate bool) error {
+	myRev := c.reserveConfig("observers:"+room, !bypassGate)
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
 	resp, err := c.send(types.Request{Type: "set_observers", Room: room, Data: data}, bypassGate)
 	if !bypassGate && (err != nil || (resp != nil && resp.Success)) {
-		c.rememberObservers(room, observers)
+		c.rememberObservers(room, observers, myRev)
 	}
 	if err != nil {
 		return err
@@ -1088,9 +1117,12 @@ func (c *HubClient) setObservers(room string, observers []string, bypassGate boo
 	return ensureSuccess("set_observers", resp)
 }
 
-func (c *HubClient) rememberObservers(room string, observers []string) {
+func (c *HubClient) rememberObservers(room string, observers []string, myRev uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.configIsCurrentLocked("observers:"+room, myRev) {
+		return
+	}
 	if c.sess.observers == nil {
 		c.sess.observers = map[string][]string{}
 	}
@@ -1100,7 +1132,22 @@ func (c *HubClient) rememberObservers(room string, observers []string) {
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
 func (c *HubClient) DeleteRoom(room string) error {
-	return c.sendExpectSuccess("delete_room", types.Request{Type: "delete_room", Room: room})
+	if err := c.sendExpectSuccess("delete_room", types.Request{Type: "delete_room", Room: room}); err != nil {
+		return err
+	}
+	// Drop every trace of the room from the replay state. The hub creates a room
+	// on demand, so a reconnect replaying its manager or observers would
+	// resurrect the one this call just deleted — and the deletion would not
+	// survive a socket blip.
+	c.mu.Lock()
+	delete(c.sess.managers, room)
+	delete(c.sess.observers, room)
+	delete(c.sess.configRev, "manager:"+room)
+	delete(c.sess.configRev, "observers:"+room)
+	c.sess.subs = slices.DeleteFunc(c.sess.subs, func(s string) bool { return s == room })
+	c.sess.rev++
+	c.mu.Unlock()
+	return nil
 }
 
 // JoinRoom joins a room.

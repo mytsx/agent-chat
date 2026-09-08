@@ -232,7 +232,7 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 	h.setConfiguredManager(room, managerAgent)
 
 	roomState := h.getOrCreateRoom(room)
-	roomState.HandoffManager(managerAgent)
+	rosterChanged := roomState.HandoffManager(managerAgent)
 
 	// A live observer promoted to manager keeps its CONNECTION-bound read-only
 	// flag, which only a fresh join clears — and its client replays "observer"
@@ -248,6 +248,16 @@ func (h *Hub) handleSetManager(c *Client, req types.Request) {
 		text = fmt.Sprintf("'%s' odası manager'ı '%s' olarak ayarlandı.", room, managerAgent)
 	}
 	c.sendText(req.ID, req.Type, text)
+
+	// A promotion that changed the roster must be published: the desktop
+	// refreshes its agent cache from roster events, so without one the agent
+	// keeps its old role on screen until something unrelated happens in the room.
+	if rosterChanged {
+		h.broadcastEvent(room, "agent_joined", map[string]any{
+			"agent_name": managerAgent,
+			"agents":     roomState.GetAgents(),
+		})
+	}
 }
 
 // handleSetObservers replaces the desktop-authorized observer set for a room (#17).
