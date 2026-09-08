@@ -202,6 +202,12 @@ func (h *Hub) Shutdown() {
 	// "enqueue-after-drain" shutdown races.
 	if h.listener != nil {
 		h.listener.Close()
+		// The hub is unreachable from here on, but the stopped record is only
+		// written after draining and persistence — potentially seconds later.
+		// Connections refused in between belong to the outage, so mark its real
+		// start now. Written synchronously: a crash mid-shutdown must not lose
+		// the boundary, and there may be no later event to carry it.
+		h.events.LogSync(eventlog.EventHubUnavailable)
 	}
 	h.requestMu.Lock()
 	h.requestsClosed = true
@@ -313,6 +319,9 @@ func (h *Hub) runClientManager() {
 
 		case client := <-h.unregister:
 			var joinedRoom, agentName, clientType string
+			// readPump has returned by the time it sends on unregister, so this
+			// is safe to read without a lock.
+			closeCause := client.closeCause
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
@@ -351,6 +360,9 @@ func (h *Hub) runClientManager() {
 				eventlog.String(eventlog.AttrAgentName, agentName),
 				eventlog.String(eventlog.AttrConversationID, joinedRoom),
 				eventlog.String(eventlog.AttrClientType, clientType),
+				// Answers "did it leave or did it fall over" — the distinction
+				// the whole stream exists to make (#98).
+				eventlog.String(eventlog.AttrErrorType, closeCause),
 			)
 			h.logger.Printf("Client disconnected (total: %d)", len(h.clients))
 		}
@@ -399,12 +411,17 @@ func (h *Hub) evictFnFor(room string) func(string, float64) {
 // resetFnFor builds the per-room callback that records a clear as a generation
 // boundary. Safe under the room lock for the same reason evictFn is: an event-log
 // append is a non-blocking channel send.
-func (h *Hub) resetFnFor(room string) func(int) {
-	return func(maxID int) {
+func (h *Hub) resetFnFor(room string) func(int, int) {
+	return func(maxID, generation int) {
 		h.events.Log(eventlog.EventRoomReset,
 			eventlog.String(eventlog.AttrConversationID, room),
 			eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleCleared),
 			eventlog.Int(eventlog.AttrRoomResetMaxID, maxID),
+			// The generation this clear ENDED, stamped under the room lock. The
+			// analyzer would otherwise reconstruct it by counting boundaries,
+			// which drifts once rotation discards an older clear or a rollback
+			// reloads an earlier generation.
+			eventlog.Int(eventlog.AttrRoomGeneration, generation),
 		)
 	}
 }

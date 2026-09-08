@@ -217,7 +217,7 @@ func readFile(path string, since time.Time) (recs []Record, corrupted, tornTail 
 // attributeToOutage credits one unreachable-hub timestamp to the outage window
 // containing it, reporting whether any did. An ongoing outage has no end, so it
 // claims everything at or after its start.
-func attributeToOutage(outages []Outage, t time.Time) bool {
+func attributeToOutage(outages []Outage, t time.Time, gaveUp bool) bool {
 	for i := range outages {
 		o := &outages[i]
 		if t.Before(o.Start) {
@@ -225,6 +225,9 @@ func attributeToOutage(outages []Outage, t time.Time) bool {
 		}
 		if o.Ongoing || !t.After(o.End) {
 			o.LegacyHits++
+			if gaveUp {
+				o.LegacyClientsFailed++
+			}
 			return true
 		}
 	}
@@ -319,11 +322,12 @@ type Outage struct {
 	// is then only a lower bound (the last event the dead instance produced),
 	// which is precisely the failure this report exists to surface.
 	Unclean bool `json:"unclean"`
-	// LegacyHits is how many "could not reach the hub" lines in the plain-text
-	// log fall inside this window — the outage's actual impact on MCP clients,
-	// which is the question report 4 exists to answer. Only populated when the
-	// legacy log is scanned.
-	LegacyHits int `json:"legacy_hits,omitempty"`
+	// LegacyHits counts plain-text "could not reach the hub" LINES inside this
+	// window; LegacyClientsFailed counts the MCP processes that gave up in it.
+	// The two differ by the retry factor, so the impact figure is the latter.
+	// Only populated when the legacy log is scanned.
+	LegacyHits          int `json:"legacy_hits,omitempty"`
+	LegacyClientsFailed int `json:"legacy_clients_failed,omitempty"`
 }
 
 // Report answers the four questions #101 was opened to answer.
@@ -350,7 +354,12 @@ type Report struct {
 	// this is the only place they appear. LegacyOutsideOutages counts the ones
 	// that fall in no reconstructed outage — a hub that was up and still
 	// unreachable is a different problem from one that was down.
+	// LegacyUnreachable counts LOG LINES, not clients: one MCP process that
+	// exhausts ConnectWithRetry(5) writes five attempt lines plus a final
+	// give-up line. LegacyClientsFailed counts those give-up lines, which is one
+	// per process that actually lost the hub — the client-impact number.
 	LegacyUnreachable    int `json:"legacy_unreachable"`
+	LegacyClientsFailed  int `json:"legacy_clients_failed"`
 	LegacyOutsideOutages int `json:"legacy_outside_outages"`
 
 	LegacyFirst time.Time `json:"legacy_first,omitempty"`
@@ -586,14 +595,22 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			if !roomOK {
 				break
 			}
-			rs := readFor(reads, key(r.Room(), genOf(r), r.Str(AttrAgentName)))
+			readGen := genOf(r)
+			agent := r.Str(AttrAgentName)
 			ids := DecodeIDRanges(r.Ints(AttrReadIDRanges))
 			if len(ids) == 0 {
 				ids = r.Ints(AttrReadMessageIDs)
 			}
+			// Each ID walks the same survivor boundaries its send does. A read
+			// can observe a message added after the clear took its snapshot but
+			// before ClearArchived ran, and be logged after the boundary with the
+			// older generation — the mirror of the late-send case. Without this
+			// the send advances and the read does not, and a delivered, read
+			// message is reported unread.
 			for _, id := range ids {
-				rs.ids[id] = true
+				readFor(reads, key(r.Room(), survivorGen(r.Room(), readGen, id), agent)).ids[id] = true
 			}
+			rs := readFor(reads, key(r.Room(), readGen, agent))
 			// Only a record that could not list its IDs contributes a watermark.
 			// A read returns just the newest matching tail, so treating its
 			// highest ID as "everything below was seen" would silently mark
@@ -624,7 +641,14 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			room := r.Room()
 			survivedAbove, haveWatermark := r.Attrs[AttrRoomResetMaxID]
 			deleted := r.Str(AttrRoomLifecycle) == RoomLifecycleDeleted
+			// Prefer the generation the hub stamped on the boundary itself; the
+			// counted fallback drifts once rotation discards an older clear or a
+			// rollback reloads an earlier generation.
 			oldGen := clearCount[room] + lifetimeBase[room]
+			if g, ok := r.Attrs[AttrRoomGeneration].(float64); ok {
+				oldGen = int(g) + lifetimeBase[room]
+				clearCount[room] = int(g)
+			}
 			if oldGen > maxGenSeen[room] {
 				maxGenSeen[room] = oldGen
 			}
@@ -660,8 +684,20 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 				runDropped = uint64(f)
 			}
 
+		case EventHubUnavailable:
+			// The listener is closed: refusals start now, not when the stopped
+			// record is finally written.
+			if stoppedAt.IsZero() {
+				stoppedAt = r.Time
+			}
+			hubRunning = false
+
 		case EventHubStopped:
-			stoppedAt = r.Time
+			// Keep the earlier unavailable boundary if we have one; this record
+			// remains authoritative for the drop and persistence counts.
+			if stoppedAt.IsZero() {
+				stoppedAt = r.Time
+			}
 			hubRunning = false
 			lastStopPersisted, _ = r.Attrs[AttrPersistOK].(bool)
 			if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > runDropped {
@@ -831,7 +867,7 @@ func migrateSurvivors(
 
 // isHubLifecycle reports whether a record drives hub up/down state.
 func isHubLifecycle(name string) bool {
-	return name == EventHubStarted || name == EventHubStopped
+	return name == EventHubStarted || name == EventHubStopped || name == EventHubUnavailable
 }
 
 // applyHubLifecycle advances outage-reconstruction state for a record outside
@@ -843,8 +879,15 @@ func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDrop
 		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
 			*runDropped = uint64(f)
 		}
+	case EventHubUnavailable:
+		if stoppedAt.IsZero() {
+			*stoppedAt = r.Time
+		}
+		*hubRunning = false
 	case EventHubStopped:
-		*stoppedAt = r.Time
+		if stoppedAt.IsZero() {
+			*stoppedAt = r.Time
+		}
 		*hubRunning = false
 		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
 			*runDropped = uint64(f)
@@ -871,8 +914,12 @@ const legacyTimeLayout = "2006/01/02 15:04:05"
 var legacyUnreachableMarkers = []string{
 	"hub.port not found",
 	"connect: connection refused",
-	"failed to connect to hub after",
+	legacyGaveUpMarker,
 }
+
+// legacyGaveUpMarker is written once per MCP process that exhausted its retries,
+// so counting it gives affected CLIENTS rather than attempts.
+const legacyGaveUpMarker = "failed to connect to hub after"
 
 // scanLegacyLog counts unreachable-hub lines in the old plain-text log and
 // attributes each to the outage window it falls in, so the report can say how
@@ -921,6 +968,10 @@ func scanLegacyLog(path string, since time.Time, rep *Report) error {
 		}
 
 		rep.LegacyUnreachable++
+		gaveUp := strings.Contains(line, legacyGaveUpMarker)
+		if gaveUp {
+			rep.LegacyClientsFailed++
+		}
 		if stamp.IsZero() {
 			continue
 		}
@@ -930,7 +981,7 @@ func scanLegacyLog(path string, since time.Time, rep *Report) error {
 		if stamp.After(rep.LegacyLast) {
 			rep.LegacyLast = stamp
 		}
-		if !attributeToOutage(rep.Outages, stamp) {
+		if !attributeToOutage(rep.Outages, stamp, gaveUp) {
 			rep.LegacyOutsideOutages++
 		}
 	}

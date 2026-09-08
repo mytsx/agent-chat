@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"desktop/internal/eventlog"
 	"desktop/internal/types"
@@ -646,5 +650,61 @@ func TestRoomGenerationSurvivesPersistRoundTrip(t *testing.T) {
 	}
 	if gen != 2 {
 		t.Errorf("yeniden yüklenen odada kuşak = %d, want 2", gen)
+	}
+}
+
+// Codex review round 8, PR #103: the disconnect event must say WHY the
+// connection ended. Without a cause the stream cannot tell an orderly leave
+// from a transport failure — the distinction #98 turns on.
+func TestClassifyCloseErrorIsLowCardinality(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"normal kapanış", &websocket.CloseError{Code: websocket.CloseNormalClosure}, closeCauseNormal},
+		{"going away", &websocket.CloseError{Code: websocket.CloseGoingAway}, closeCauseGoingAway},
+		{"anormal kapanış", &websocket.CloseError{Code: websocket.CloseAbnormalClosure}, closeCauseAbnormal},
+		{"okuma zaman aşımı", os.ErrDeadlineExceeded, closeCauseTimeout},
+		{"diğer okuma hatası", errors.New("boom"), closeCauseReadErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCloseError(tc.err); got != tc.want {
+				t.Errorf("classifyCloseError = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEventLogDisconnectCarriesCloseCause(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	joinAgent(t, h, c, "r1", "alice")
+
+	// The client manager must be receiving before unregister is sent — that
+	// channel is unbuffered.
+	go h.runClientManager()
+	t.Cleanup(func() { close(h.done) })
+
+	h.mu.Lock()
+	h.clients[c] = true
+	h.mu.Unlock()
+	c.closeCause = closeCauseAbnormal
+	h.unregister <- c
+
+	// The manager handles the unregister asynchronously; poll (not spin) for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := eventsNamed(loggedEvents(t, h, dir), eventlog.EventClientDisconnected)
+		if len(got) > 0 {
+			if cause := got[0][eventlog.AttrErrorType]; cause != closeCauseAbnormal {
+				t.Fatalf("%s = %v, want %q", eventlog.AttrErrorType, cause, closeCauseAbnormal)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("disconnect olayı yazılmadı")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

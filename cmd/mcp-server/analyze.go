@@ -166,9 +166,13 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 			}
 			impact := ""
 			if o.LegacyHits > 0 {
-				// What the outage actually cost: MCP clients that could not
-				// reach the hub while it was down.
-				impact = fmt.Sprintf("  — %d ulaşamayan MCP bağlantısı", o.LegacyHits)
+				// Attempts and clients are different numbers: one process that
+				// exhausts its retries writes six lines. Report both rather than
+				// letting a retry factor masquerade as impact.
+				impact = fmt.Sprintf("  — %d bağlantı denemesi başarısız", o.LegacyHits)
+				if o.LegacyClientsFailed > 0 {
+					impact += fmt.Sprintf(", %d MCP süreci vazgeçti", o.LegacyClientsFailed)
+				}
 			}
 			if o.Ongoing {
 				fmt.Fprintf(w, "   %s → (sürüyor)%s\n", o.Start.Format(time.RFC3339), impact)
@@ -190,8 +194,8 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 }
 
 func writeLegacy(w io.Writer, rep eventlog.Report) {
-	fmt.Fprintf(w, "\nEski düz metin log: hub'a hiç ulaşamayan %d satır (%s – %s).\n",
-		rep.LegacyUnreachable,
+	fmt.Fprintf(w, "\nEski düz metin log: %d başarısız bağlantı denemesi satırı, %d MCP süreci hub'a hiç ulaşamadan vazgeçti (%s – %s).\n",
+		rep.LegacyUnreachable, rep.LegacyClientsFailed,
 		rep.LegacyFirst.Format(time.RFC3339), rep.LegacyLast.Format(time.RFC3339))
 	fmt.Fprintln(w, "Bu satırlar yapısal akışta görünemez: o MCP instance'larının hub'a bağlantısı hiç kurulmadı.")
 	if rep.LegacyOutsideOutages > 0 {

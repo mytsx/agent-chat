@@ -49,7 +49,7 @@ type RoomState struct {
 	// restart at ID 1, and a boundary logged after that would leave them on the
 	// wrong side of it. Like evictFn this must not block — the wired callback is
 	// a non-blocking event-log append.
-	resetFn func(maxID int)
+	resetFn func(maxID, generation int)
 	// generation counts how many times this room has been cleared. Stamped on
 	// send and read events UNDER the room lock so the analyzer never has to
 	// infer a message's generation from log ordering — a send that stores just
@@ -76,7 +76,7 @@ func (r *RoomState) SetEvictFn(fn func(agentName string, idleSeconds float64)) {
 
 // SetResetFn installs the callback invoked from inside ClearArchived, under the
 // room lock. Passing nil disables it. Safe to call concurrently.
-func (r *RoomState) SetResetFn(fn func(maxID int)) {
+func (r *RoomState) SetResetFn(fn func(maxID, generation int)) {
 	r.mu.Lock()
 	r.resetFn = fn
 	r.mu.Unlock()
@@ -564,7 +564,9 @@ func (r *RoomState) ClearArchived(maxID int) {
 	// message the cleared room can accept, including the ID-1 message a client
 	// that is still joined may send the instant the lock is released.
 	if r.resetFn != nil {
-		r.resetFn(maxID)
+		// The generation the clear ended: r.generation was just incremented, so
+		// the boundary belongs to the one before it.
+		r.resetFn(maxID, r.generation-1)
 	}
 }
 

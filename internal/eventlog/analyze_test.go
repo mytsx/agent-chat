@@ -1119,3 +1119,116 @@ func TestAnalyzeAttributesLegacyFailuresToOutages(t *testing.T) {
 		t.Errorf("kesinti dışı = %d, want 1 (hub ayaktayken ulaşılamamış)", rep.LegacyOutsideOutages)
 	}
 }
+
+// Codex review round 8, PR #103: a read can observe a message added after the
+// clear's snapshot but before ClearArchived, and be logged after the boundary
+// with the older generation — the mirror of the late-send case. Advancing only
+// the send reports a delivered, read message as unread.
+func TestAnalyzeAdvancesLateReadThroughSurvivorBoundary(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 5), Int(AttrRoomGeneration, 0))
+		// Both survived the clear; both logged after the boundary with gen 0.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 9),
+			Int(AttrRoomGeneration, 0))
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrRoomGeneration, 0), Int(AttrReadMaxID, 9),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{9})))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("geç loglanan okuma sağ kalan sınırından geçirilmedi: %+v", got)
+	}
+}
+
+// Codex review round 8: the reset's own generation must come from the hub's
+// stamp; counting boundaries drifts once rotation discards an older clear.
+func TestAnalyzeUsesStampedGenerationOnResetBoundary(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		// Rotation dropped generations 0 and 1; the stream starts at 2.
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 9),
+			Int(AttrRoomGeneration, 2))
+		tick(time.Second)
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 5), Int(AttrRoomGeneration, 2))
+		tick(time.Second)
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrRoomGeneration, 3), Int(AttrReadMaxID, 9),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{9})))
+	})
+
+	if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+		t.Errorf("sınır yanlış kuşağa yazıldı, sağ kalan eşleşemedi: %+v", got)
+	}
+}
+
+// Codex review round 8: the listener closes at the START of shutdown; refusals
+// begin there, not when the stopped record is finally written.
+func TestAnalyzeOutageStartsWhenListenerCloses(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Hour)
+		l.Log(EventHubUnavailable) // 10:00 — dinleyici kapandı
+		tick(5 * time.Minute)
+		l.Log(EventHubStopped, Bool(AttrPersistOK, true)) // 10:05 — drain/persist bitti
+		tick(5 * time.Minute)
+		l.Log(EventHubStarted) // 10:10
+	})
+
+	rep := analyzeDir(t, dir)
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1", len(rep.Outages))
+	}
+	if got := rep.Outages[0].Duration; got != 10*time.Minute {
+		t.Errorf("süre = %v, want 10m (dinleyici kapanışından itibaren)", got)
+	}
+}
+
+// Codex review round 8: one MCP process that exhausts ConnectWithRetry writes
+// several attempt lines plus a give-up line. Presenting the line count as
+// "clients affected" inflates the impact roughly sixfold.
+func TestAnalyzeSeparatesRetryAttemptsFromFailedClients(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Hour)
+		l.Log(EventHubUnavailable)
+		tick(time.Hour)
+		l.Log(EventHubStarted)
+	})
+
+	base := time.Date(2026, 9, 8, 9, 0, 0, 0, time.UTC)
+	line := func(at time.Time, msg string) string {
+		return "[MCP] " + at.In(time.Local).Format(legacyTimeLayout) + " x.go:1: " + msg + "\n"
+	}
+	var lines string
+	for i := range 5 {
+		lines += line(base.Add(time.Duration(70+i)*time.Minute),
+			"Hub connect attempt failed: connect: connection refused")
+	}
+	lines += line(base.Add(76*time.Minute), "Hub connect failed: failed to connect to hub after 5 attempts")
+
+	legacy := filepath.Join(dir, "mcp-server.log")
+	if err := os.WriteFile(legacy, []byte(lines), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, LegacyLog: legacy})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.LegacyUnreachable != 6 {
+		t.Errorf("deneme satırı = %d, want 6", rep.LegacyUnreachable)
+	}
+	if rep.LegacyClientsFailed != 1 {
+		t.Errorf("vazgeçen istemci = %d, want 1 (altı satır tek süreçten)", rep.LegacyClientsFailed)
+	}
+	if len(rep.Outages) != 1 || rep.Outages[0].LegacyClientsFailed != 1 {
+		t.Errorf("kesinti etkisi = %+v, want 1 vazgeçen istemci", rep.Outages)
+	}
+}

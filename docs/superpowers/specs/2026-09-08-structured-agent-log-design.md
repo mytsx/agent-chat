@@ -162,9 +162,10 @@ MCP'nin görüp hub'ın göremediği tek sınıf olay var: "hub'a hiç bağlanam
 | `event.name` | Yer | Ek alanlar |
 |---|---|---|
 | `agent_chat.hub.started` | `hub.Run` | `server.port`, `agent_chat.pid` |
-| `agent_chat.hub.stopped` | `hub.Shutdown` | `agent_chat.events.dropped` |
+| `agent_chat.hub.unavailable` | `hub.Shutdown`, dinleyici kapanınca | — |
+| `agent_chat.hub.stopped` | `hub.Shutdown` sonu | `agent_chat.events.dropped`, `agent_chat.persist.ok` |
 | `agent_chat.client.connected` | `protocol.go` `handleIdentify` | `agent_chat.client.type`, `network.transport` |
-| `agent_chat.client.disconnected` | `hub.go` unregister | `gen_ai.agent.name`, `error.type` |
+| `agent_chat.client.disconnected` | `hub.go` unregister | `gen_ai.agent.name`, `agent_chat.client.type`, `error.type` (`normal_close` / `going_away` / `abnormal_close` / `read_timeout` / `read_error` / `hub_shutdown`) |
 | `agent_chat.agent.joined` | `protocol.go` `handleJoinRoom` | `gen_ai.agent.name`, `agent_chat.agent.role` |
 | `agent_chat.agent.left` | unregister / explicit leave | `agent_chat.leave.reason` = `disconnect` \| `explicit` |
 | `agent_chat.agent.evicted` | `room.go` `cleanupStaleLocked` | `agent_chat.agent.idle_seconds` |

@@ -119,6 +119,11 @@ const (
 	// or that ceased to exist (delete_room). The analyzer drops its accumulated
 	// read state for that room when it sees one.
 	EventRoomReset = "agent_chat.room.reset"
+	// EventHubUnavailable marks the hub closing its listener. Shutdown drains
+	// and persists after that, which can take seconds during which connections
+	// are already refused, so this — not hub.stopped — is where an outage
+	// actually begins.
+	EventHubUnavailable = "agent_chat.hub.unavailable"
 	// EventEventsDropped is a durable marker that the buffer discarded events.
 	// It is written as soon as the writer notices the count grew, so a crash
 	// cannot hide the loss the way waiting for hub.stopped would.
