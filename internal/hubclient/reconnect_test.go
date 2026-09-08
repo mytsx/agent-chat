@@ -374,31 +374,19 @@ func TestBootstrapRunsOnceWhenHubAppears(t *testing.T) {
 // room until the model happened to retry on its own.
 func TestJoinBeforeConnectIsReplayedOnceHubAppears(t *testing.T) {
 	h := newFakeHub(t)
-	var addrMu sync.Mutex
-	addr := "ws://127.0.0.1:1/ws"
+	c := newTestClient(t, h)
 
-	c := New(addr, log.New(io.Discard, "", 0))
-	c.minBackoff = 5 * time.Millisecond
-	c.maxBackoff = 20 * time.Millisecond
-	c.SetAddrResolver(func() (string, error) {
-		addrMu.Lock()
-		defer addrMu.Unlock()
-		return addr, nil
-	})
-	t.Cleanup(c.Close)
-
-	c.StartBackgroundConnect()
-
-	// The hub is not up yet, so this fails at the transport.
+	// No connection has been made at all yet, so this fails at the transport —
+	// exactly the window a background connect opens for the agent. Ordering the
+	// join before the dial (rather than racing the two) keeps the test about the
+	// behaviour instead of about scheduling.
 	if _, err := c.JoinRoom("r1", "alice", ""); err == nil {
 		t.Fatal("bağlantı yokken join başarılı görünmemeli")
 	}
 
-	addrMu.Lock()
-	addr = h.url()
-	addrMu.Unlock()
+	c.StartBackgroundConnect()
 
-	waitFor(t, "hub açılınca join'in replay edilmesi", func() bool {
+	waitFor(t, "bağlantı kurulunca join'in replay edilmesi", func() bool {
 		for _, typ := range h.requestTypes() {
 			if typ == "join_room" {
 				return true

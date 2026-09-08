@@ -190,10 +190,14 @@ func (c *HubClient) runBootstrap() {
 func (c *HubClient) StartBackgroundConnect() {
 	go func() {
 		if err := c.Connect(); err != nil {
-			c.superviseReconnect() // keeps trying, then bootstraps
+			c.superviseReconnect() // keeps trying, then establishes the session
 			return
 		}
-		c.runBootstrap()
+		if err := c.afterConnect(); err != nil {
+			c.logger.Printf("Hub session setup failed, retrying: %v", err)
+			c.dropConn()
+			c.superviseReconnect()
+		}
 	}()
 }
 
@@ -299,17 +303,13 @@ func (c *HubClient) superviseReconnect() {
 			c.logger.Printf("Hub reconnect failed, retrying: %v", err)
 			continue
 		}
-		if err := c.restoreSession(); err != nil {
+		if err := c.afterConnect(); err != nil {
 			// The socket is up but the hub would not have us back. Drop it and
 			// let the loop try again rather than pretending we are joined.
 			c.logger.Printf("Hub session restore failed, retrying: %v", err)
 			c.dropConn()
 			continue
 		}
-		// Nothing recorded yet means this is the first connection the client
-		// ever made (the hub was down at startup), so the session still has to
-		// be established.
-		c.runBootstrap()
 
 		// The socket can die WHILE the session is being replayed. Its read loop
 		// calls superviseReconnect, which this still-running supervisor would
@@ -339,6 +339,22 @@ func (c *HubClient) dropConn() {
 	if conn != nil {
 		conn.Close()
 	}
+}
+
+// afterConnect brings a freshly dialled socket up to the session the caller
+// expects, whichever path got here.
+//
+// Both paths need BOTH steps: an agent can record a join before any connection
+// exists (the background-connect window), so even a first-try success has state
+// to replay — running only the bootstrap there silently dropped that join.
+func (c *HubClient) afterConnect() error {
+	if err := c.restoreSession(); err != nil {
+		return err
+	}
+	// Nothing recorded means this client has never established a session, so it
+	// still has to.
+	c.runBootstrap()
+	return nil
 }
 
 // restoreSession replays identity, membership and subscriptions onto a fresh
