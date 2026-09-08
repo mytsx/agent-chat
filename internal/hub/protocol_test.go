@@ -2,9 +2,11 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1215,7 +1217,7 @@ func TestObserverToWorkerRejoinClearsConnectionState(t *testing.T) {
 	if resp := join("observer"); !resp.Success {
 		t.Fatalf("observer join başarısız: %s", resp.Error)
 	}
-	if !c.isObserver {
+	if !c.isObserver.Load() {
 		t.Fatal("observer join sonrası bağlantı observer işaretlenmedi")
 	}
 
@@ -1224,7 +1226,7 @@ func TestObserverToWorkerRejoinClearsConnectionState(t *testing.T) {
 	if resp := join(""); !resp.Success {
 		t.Fatalf("worker rejoin başarısız: %s", resp.Error)
 	}
-	if c.isObserver {
+	if c.isObserver.Load() {
 		t.Fatal("worker olarak yeniden join sonrası bağlantı hâlâ observer; send_message reddedilmeye devam eder")
 	}
 
@@ -1624,7 +1626,7 @@ func TestPromotedObserverCanSendAfterSetManager(t *testing.T) {
 	if resp := readResponse(t, obs, "join_room"); !resp.Success {
 		t.Fatalf("observer join başarısız: %s", resp.Error)
 	}
-	if !obs.isObserver {
+	if !obs.isObserver.Load() {
 		t.Fatal("kurulum hatası: bağlantı observer işaretlenmedi")
 	}
 
@@ -1638,7 +1640,7 @@ func TestPromotedObserverCanSendAfterSetManager(t *testing.T) {
 		t.Fatalf("set_manager başarısız: %s", resp.Error)
 	}
 
-	if obs.isObserver {
+	if obs.isObserver.Load() {
 		t.Error("terfi sonrası bağlantı hâlâ salt-okunur; manager cevap veremez")
 	}
 
@@ -1673,10 +1675,84 @@ func TestPromotedObserverRejoinIsNotLockedOutByTheObserverGate(t *testing.T) {
 	if !resp.Success {
 		t.Fatalf("terfi edilmiş agent'ın replay join'i reddedildi: %s", resp.Error)
 	}
-	if c.isObserver {
+	if c.isObserver.Load() {
 		t.Error("düşürülen rol yine de observer olarak bağlandı")
 	}
 	if got := h.getOrCreateRoom("r1").GetAgents()["gozcu"].Role; got == "observer" {
 		t.Error("roster rolü observer kaldı")
+	}
+}
+
+// Codex review round 5, PR #113: a promoted agent whose roster entry aged out
+// while it was away comes back through the FRESH-join path, replaying its lesser
+// role. Seating the configured manager only in Takeover left the room configured
+// with a manager and no gateway until some later reconnect found an entry to
+// take over.
+func TestConfiguredManagerTakesFreeSeatOnFreshJoin(t *testing.T) {
+	h, c, _ := newEventHub(t)
+	room := h.getOrCreateRoom("r1")
+	h.setConfiguredManager("r1", "isci")
+	room.HandoffManager("isci") // odada kimse yok: koltuk boş kalır
+
+	// Roster'da hiç kayıt yok — taze join yolu.
+	h.handleJoinRoom(c, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "isci", "role": ""}),
+	})
+	if resp := readResponse(t, c, "join_room"); !resp.Success {
+		t.Fatalf("join başarısız: %s", resp.Error)
+	}
+
+	if got := room.GetActiveManager(); got != "isci" {
+		t.Errorf("manager kilidi = %q, want isci (taze join yolunda da koltuk verilmeli)", got)
+	}
+	if got := room.GetAgents()["isci"].Role; got != "manager" {
+		t.Errorf("roster rolü = %q, want manager", got)
+	}
+}
+
+// Codex review round 5, PR #113: promoting a live observer writes another
+// client's connection-bound flag from the desktop's goroutine while that
+// client's own goroutine may be reading it inside send_message.
+//
+// The race is real by inspection (the write is under h.mu, the read is not) and
+// the flag is now atomic. This exercise reproduces it only sometimes — with the
+// non-atomic field it took ~10 runs to get one detector report — so treat a
+// single green run as a smoke test, not as proof of absence.
+func TestPromotionRaceWithConcurrentSend(t *testing.T) {
+	h, desktop, _ := newEventHub(t)
+	desktop.clientType = "desktop"
+	desktop.desktopAuthed = true
+	h.setConfiguredObservers("r1", []string{"gozcu"})
+
+	obs := &Client{hub: h, send: make(chan []byte, 4096), rooms: make(map[string]bool)}
+	h.handleJoinRoom(obs, types.Request{
+		ID: "join-obs", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "gozcu", "role": "observer"}),
+	})
+	readResponse(t, obs, "join_room")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 300; i++ {
+			h.handleSendMessage(obs, types.Request{
+				ID: fmt.Sprintf("m%d", i), Type: "send_message", Room: "r1",
+				Data: mustRawJSON(t, map[string]string{"from": "gozcu", "to": "all", "content": "x"}),
+			})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		h.handleSetManager(desktop, types.Request{
+			ID: "sm", Type: "set_manager", Room: "r1",
+			Data: mustRawJSON(t, map[string]string{"manager_agent": "gozcu"}),
+		})
+	}()
+	wg.Wait()
+
+	if obs.isObserver.Load() {
+		t.Error("terfi sonrası bağlantı hâlâ salt-okunur")
 	}
 }

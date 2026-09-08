@@ -323,7 +323,7 @@ func (h *Hub) bindClientToRoom(c *Client, room, agentName, role string) {
 	// and nothing but a reconnect could reconcile them. The observer role is a
 	// restriction, not a privilege — dropping it grants nothing that the
 	// desktop-gated join did not already allow.
-	c.isObserver = role == roleObserver
+	c.isObserver.Store(role == roleObserver)
 	if h.subs[room] == nil {
 		h.subs[room] = make(map[*Client]bool)
 	}
@@ -340,7 +340,7 @@ func (h *Hub) clearObserverBinding(room, agentName string) {
 	defer h.mu.Unlock()
 	for c := range h.subs[room] {
 		if sameAgentName(c.agentName, agentName) {
-			c.isObserver = false
+			c.isObserver.Store(false)
 		}
 	}
 }
@@ -575,7 +575,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 	//     a different role.
 	// Both key on join-bound identity (c.agentName, pinned by the from== check), so a
 	// forged `from` can't bypass the gate.
-	if c.isObserver || h.isConfiguredObserver(room, c.agentName) {
+	if c.isObserver.Load() || h.isConfiguredObserver(room, c.agentName) {
 		c.sendError(req.ID, req.Type, "\U0001f441️ observer rolündeki agent mesaj gönderemez; yalnızca odayı izleyebilir")
 		return
 	}

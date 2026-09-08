@@ -1047,8 +1047,12 @@ func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error
 	// replaying; one it rejected is not. Without this a manager set during a
 	// reconnect was reported as applied while the hub kept the old routing
 	// configuration for the rest of the session.
-	if err != nil || (resp != nil && resp.Success) {
-		c.rememberManager(room, managerAgent, !bypassGate)
+	// Only a CALLER's own configuration is recorded. A replay is putting back
+	// what is already in the map, and a newer value recorded behind the gate
+	// while this replay was in flight would be overwritten by the older one —
+	// the next pass would then replay the stale value again and settle on it.
+	if !bypassGate && (err != nil || (resp != nil && resp.Success)) {
+		c.rememberManager(room, managerAgent)
 	}
 	if err != nil {
 		return err
@@ -1056,16 +1060,14 @@ func (c *HubClient) setManager(room, managerAgent string, bypassGate bool) error
 	return ensureSuccess("set_manager", resp)
 }
 
-func (c *HubClient) rememberManager(room, managerAgent string, external bool) {
+func (c *HubClient) rememberManager(room, managerAgent string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sess.managers == nil {
 		c.sess.managers = map[string]string{}
 	}
 	c.sess.managers[room] = managerAgent
-	if external {
-		c.sess.rev++
-	}
+	c.sess.rev++
 }
 
 // SetObservers configures the desktop-authorized observer set for a room (#17).
@@ -1077,8 +1079,8 @@ func (c *HubClient) SetObservers(room string, observers []string) error {
 func (c *HubClient) setObservers(room string, observers []string, bypassGate bool) error {
 	data, _ := json.Marshal(map[string][]string{"observers": observers})
 	resp, err := c.send(types.Request{Type: "set_observers", Room: room, Data: data}, bypassGate)
-	if err != nil || (resp != nil && resp.Success) {
-		c.rememberObservers(room, observers, !bypassGate)
+	if !bypassGate && (err != nil || (resp != nil && resp.Success)) {
+		c.rememberObservers(room, observers)
 	}
 	if err != nil {
 		return err
@@ -1086,16 +1088,14 @@ func (c *HubClient) setObservers(room string, observers []string, bypassGate boo
 	return ensureSuccess("set_observers", resp)
 }
 
-func (c *HubClient) rememberObservers(room string, observers []string, external bool) {
+func (c *HubClient) rememberObservers(room string, observers []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.sess.observers == nil {
 		c.sess.observers = map[string][]string{}
 	}
 	c.sess.observers[room] = append([]string(nil), observers...)
-	if external {
-		c.sess.rev++
-	}
+	c.sess.rev++
 }
 
 // DeleteRoom removes an orphan room's state from the hub (desktop-authorized).
@@ -1114,7 +1114,17 @@ func (c *HubClient) joinRoom(room, agentName, role string, bypassGate bool) (*ty
 		"role":       role,
 	})
 	c.mu.Lock()
-	startGen, startJoinRev := c.sess.gen, c.sess.joinRev
+	startGen := c.sess.gen
+	// A caller's join RESERVES the membership revision before it is sent, rather
+	// than advancing it when the outcome is recorded. Otherwise a replay that
+	// records first would make this later call look stale and discard it — and
+	// because a replay's record does not advance sess.rev, restoration would see
+	// no change, open the gate on the old membership, and lose the caller's
+	// intent for good.
+	if !bypassGate {
+		c.sess.joinRev++
+	}
+	startJoinRev := c.sess.joinRev
 	c.mu.Unlock()
 
 	resp, err := c.send(types.Request{Type: "join_room", Room: room, Data: data}, bypassGate)
@@ -1166,7 +1176,6 @@ func (c *HubClient) recordJoinIfCurrent(startGen, startJoinRev uint64, room, age
 		c.sess.joinRoom = room
 		c.sess.joinAgent = agentName
 		c.sess.joinRole = role
-		c.sess.joinRev++
 		if external {
 			c.sess.rev++
 		}

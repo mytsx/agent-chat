@@ -959,14 +959,18 @@ func TestStaleReplaySuccessDoesNotOverwriteNewerJoinIntent(t *testing.T) {
 	c := newTestClient(t, newFakeHub(t))
 
 	c.mu.Lock()
-	startGen, startRev := c.sess.gen, c.sess.rev
+	startGen := c.sess.gen
+	replayRev := c.sess.joinRev // the replay of A snapshotted this
+	// The corrected join for B reserves the membership revision before sending,
+	// exactly as joinRoom does for a caller's own join.
+	c.sess.joinRev++
+	externalRev := c.sess.joinRev
 	c.mu.Unlock()
 
-	// The corrected join lands while the replay is in flight.
-	c.recordJoinIfCurrent(startGen, startRev, "B", "alice", "", false, true, true)
+	c.recordJoinIfCurrent(startGen, externalRev, "B", "alice", "", false, true, true)
 
 	// The in-flight replay of A now succeeds, carrying the older revision.
-	c.recordJoinIfCurrent(startGen, startRev, "A", "alice", "", true, false)
+	c.recordJoinIfCurrent(startGen, replayRev, "A", "alice", "", true, false)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1277,5 +1281,66 @@ func TestConfigurationRefusedByGateIsReplayed(t *testing.T) {
 	})
 	if got := h.acceptedCount(); got != 1 {
 		t.Errorf("kabul edilen bağlantı = %d, want 1", got)
+	}
+}
+
+// Codex review round 5, PR #113: a replay must not write configuration intent.
+// A newer value recorded behind the gate while the replay was in flight would be
+// overwritten by the older one, and the next pass would replay the stale value
+// and settle on it — the app persists a manager the hub never routes through.
+func TestReplayedConfigurationDoesNotOverwriteNewerValue(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := c.SetManager("r1", "eski"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+
+	// The caller updates the configuration; then a replay of the OLD value
+	// (bypassing the gate, as restoration does) lands afterwards.
+	if err := c.SetManager("r1", "yeni"); err != nil {
+		t.Fatalf("SetManager: %v", err)
+	}
+	if err := c.setManager("r1", "eski", true); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.sess.managers["r1"]; got != "yeni" {
+		t.Errorf("kayıtlı manager = %q, want yeni (replay yeni değeri ezmemeli)", got)
+	}
+}
+
+// Codex review round 5, PR #113: a caller's join must reserve the membership
+// revision BEFORE sending. Advancing it only when the outcome is recorded let a
+// replay record first and made the later external call look stale — and since a
+// replay's record does not advance sess.rev, restoration saw no change and
+// opened the gate on the old membership.
+func TestExternalJoinIsNotDiscardedByAnEarlierReplayRecord(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	c.mu.Lock()
+	startGen := c.sess.gen
+	replayRev := c.sess.joinRev
+	c.mu.Unlock()
+
+	// The caller's join for B is invoked (and reserves) while the replay of A is
+	// still awaiting its response.
+	if _, err := c.joinRoom("B", "alice", "", false); err == nil {
+		t.Fatal("JoinRoom() = nil error, want transport failure (bağlantı yok)")
+	}
+
+	// The replay of A now records its success, carrying the older revision.
+	c.recordJoinIfCurrent(startGen, replayRev, "A", "alice", "", true, false)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sess.joinRoom != "B" {
+		t.Errorf("kayıtlı oda = %q, want B (sonradan çağrılan join bayat sayılmamalı)", c.sess.joinRoom)
 	}
 }

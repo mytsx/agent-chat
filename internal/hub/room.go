@@ -333,6 +333,19 @@ func (r *RoomState) join(agentName, role string, claim func()) (types.Message, m
 			r.mu.Unlock()
 			return types.Message{}, nil, fmt.Errorf("bu odada aktif manager var: %s", active)
 		}
+	}
+	// The configured manager takes a free seat here too, not only on the
+	// takeover path. A promoted agent whose roster entry aged out while it was
+	// away comes back through THIS path replaying its lesser role; seating it
+	// only in Takeover left the room configured with a manager and no gateway
+	// until some later reconnect happened to find an entry to take over.
+	if !isObserver && !isManager && sameAgentName(r.configuredManager, agentName) {
+		if active := r.getActiveManagerLocked(); active == "" || sameAgentName(active, agentName) {
+			isManager = true
+			role = "manager"
+		}
+	}
+	if isManager {
 		r.managerAgent = agentName
 		r.managerLastSeen = types.Now()
 	}
