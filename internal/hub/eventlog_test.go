@@ -444,3 +444,42 @@ func TestSendMessageWithPresenceReportsRosterAtStoreTime(t *testing.T) {
 		t.Errorf("SendMessage: %v", err)
 	}
 }
+
+// Codex review round 3, PR #103: clear_room only wipes up to the ID it
+// archived. The event must carry that watermark so the analyzer can keep the
+// messages that survived the clear.
+func TestEventLogRoomResetCarriesClearedMaxID(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	// clear_room needs the active manager (or an authorized desktop).
+	h.setConfiguredManager("r1", "alice")
+	h.handleJoinRoom(alice, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, alice, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	h.handleSendMessage(alice, types.Request{
+		ID: "send", Type: "send_message", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "all", "content": "merhaba"}),
+	})
+	readResponse(t, alice, "send_message")
+
+	msgs := h.getOrCreateRoom("r1").GetMessages()
+	wantMax := float64(msgs[len(msgs)-1].ID)
+
+	h.handleClearRoom(alice, types.Request{
+		ID: "clear", Type: "clear_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{}),
+	})
+	readResponse(t, alice, "clear_room")
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventRoomReset)
+	if e[eventlog.AttrRoomLifecycle] != eventlog.RoomLifecycleCleared {
+		t.Errorf("%s = %v", eventlog.AttrRoomLifecycle, e[eventlog.AttrRoomLifecycle])
+	}
+	if got := e[eventlog.AttrRoomResetMaxID]; got != wantMax {
+		t.Errorf("%s = %v, want %v (arşivlenen son id)", eventlog.AttrRoomResetMaxID, got, wantMax)
+	}
+}

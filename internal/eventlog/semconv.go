@@ -76,7 +76,11 @@ const (
 	// AttrRoomLifecycle distinguishes room lifetimes. clear_room resets message
 	// IDs to 1, so without a generation boundary the analyzer would treat reused
 	// IDs in the fresh room as already read.
-	AttrRoomLifecycle    = "agent_chat.room.lifecycle"
+	AttrRoomLifecycle = "agent_chat.room.lifecycle"
+	// AttrRoomResetMaxID is the highest message ID the clear actually wiped.
+	// clear_room keeps anything that arrived while its archive I/O ran, so
+	// messages above this survive into the new room and must follow it.
+	AttrRoomResetMaxID   = "agent_chat.room.reset.max_id"
 	AttrContentTruncated = "agent_chat.content.truncated"
 	AttrEventsDropped    = "agent_chat.events.dropped"
 )

@@ -61,27 +61,36 @@ func (r Record) Bool(key string) bool {
 // Room is the conversation this event belongs to.
 func (r Record) Room() string { return r.Str(AttrConversationID) }
 
-// Read returns every event in dir at or after since, oldest first. Rotated
-// backups (including gzipped ones) are included, so a report is not limited to
-// whatever happens to be in the live file.
+// Read returns every event in dir at or after since, oldest first, plus a count
+// of unparseable records. Rotated backups (including gzipped ones) are included,
+// so a report is not limited to whatever happens to be in the live file.
 //
 // A missing stream is not an error: nothing logged yet is a normal state.
-func Read(dir string, since time.Time) ([]Record, error) {
+func Read(dir string, since time.Time) ([]Record, int, error) {
 	paths, err := streamFiles(dir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	var corrupted int
 
 	var out []Record
 	for _, p := range paths {
-		recs, err := readFile(p, since)
+		recs, corrupt, err := readFile(p, since)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Base(p), err)
+			// A backup listed a moment ago can be compressed or deleted by
+			// lumberjack before we open it while the hub is live. Losing that
+			// race must not fail the whole report — the live stream and the
+			// remaining backups are still readable.
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, 0, fmt.Errorf("%s: %w", filepath.Base(p), err)
 		}
+		corrupted += corrupt
 		out = append(out, recs...)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
-	return out, nil
+	return out, corrupted, nil
 }
 
 // streamFiles lists the live stream plus lumberjack's backups. Backup names are
@@ -109,10 +118,10 @@ func streamFiles(dir string) ([]string, error) {
 	return paths, nil
 }
 
-func readFile(path string, since time.Time) ([]Record, error) {
+func readFile(path string, since time.Time) ([]Record, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
@@ -120,13 +129,17 @@ func readFile(path string, since time.Time) ([]Record, error) {
 	if strings.HasSuffix(path, ".gz") {
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		defer gz.Close()
 		r = gz
 	}
 
 	var out []Record
+	// pendingBad defers judgement on an unparseable line: a torn LAST line is
+	// the expected result of a killed process, but a bad line with valid records
+	// after it is real corruption the report must not hide.
+	var pendingBad, corrupted int
 	sc := bufio.NewScanner(r)
 	// A captured message can be 8 KB, so the default 64 KB line cap is raised
 	// rather than silently truncating events into unparseable halves.
@@ -137,22 +150,39 @@ func readFile(path string, since time.Time) ([]Record, error) {
 			continue
 		}
 		var attrs map[string]any
-		// A torn final line (killed mid-write) must not fail the whole report.
 		if err := json.Unmarshal(line, &attrs); err != nil {
+			pendingBad++
 			continue
 		}
 		ts, _ := attrs["time"].(string)
 		t, err := time.Parse(time.RFC3339Nano, ts)
 		if err != nil {
+			pendingBad++
 			continue
 		}
+		// A readable record after a bad one proves the bad one was not just a
+		// torn tail.
+		corrupted += pendingBad
+		pendingBad = 0
 		if !since.IsZero() && t.Before(since) {
 			continue
 		}
 		name, _ := attrs[AttrEventName].(string)
 		out = append(out, Record{Time: t, Name: name, Attrs: attrs})
 	}
-	return out, sc.Err()
+	// A single unparseable trailing line is tolerated as a torn tail; more than
+	// one means real damage.
+	if pendingBad > 1 {
+		corrupted += pendingBad - 1
+	}
+	return out, corrupted, sc.Err()
+}
+
+// sentMsg is one message awaiting proof that its delivery target read it.
+type sentMsg struct {
+	rec    Record
+	id     int
+	target string
 }
 
 // AgentDrops counts how one agent left a room, split by mechanism. The split is
@@ -216,9 +246,14 @@ type Report struct {
 	From   time.Time `json:"from"`
 	To     time.Time `json:"to"`
 	Events int       `json:"events"`
-	// Dropped is what the hub itself reported losing to a full buffer, so a
-	// report never quietly presents an incomplete picture as complete.
+	// Dropped is what the hub itself reported losing to a full buffer or a
+	// failing sink, so a report never quietly presents an incomplete picture as
+	// complete. Read from the durable marker as well as the shutdown record, so
+	// a crash cannot hide it.
 	Dropped uint64 `json:"dropped"`
+	// Corrupted counts unreadable records that were NOT a torn final line. Those
+	// events are lost from the report just as surely as dropped ones.
+	Corrupted int `json:"corrupted"`
 
 	Drops        []AgentDrops   `json:"drops"`
 	Misaddressed []Misaddressed `json:"misaddressed"`
@@ -249,7 +284,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// time would discard the hub lifecycle events an outage spanning the cutoff
 	// is reconstructed from: a stop 25 hours ago followed by a restart one hour
 	// ago must still show up under --since 24h.
-	recs, err := Read(opts.Dir, time.Time{})
+	recs, corrupted, err := Read(opts.Dir, time.Time{})
 	if err != nil {
 		return Report{}, err
 	}
@@ -271,7 +306,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		return opts.Since.IsZero() || !r.Time.Before(opts.Since)
 	}
 
-	rep := Report{}
+	rep := Report{Corrupted: corrupted}
 	for _, r := range recs {
 		if !inWindow(r) {
 			continue
@@ -296,13 +331,6 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		return d
 	}
 
-	// sent indexes messages by (room, recipient) so unread detection is a single
-	// pass against each recipient's high-water mark.
-	type sentMsg struct {
-		rec    Record
-		id     int
-		target string
-	}
 	// generation numbers a room's lifetime. clear_room restarts message IDs at 1,
 	// so read progress must not cross that boundary — but deleting the room's
 	// pending sends would erase genuinely unread messages from before the clear,
@@ -332,6 +360,11 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		return rs
 	}
 
+	// runDropped is the highest loss count seen within the current hub run. Both
+	// the durable marker and hub.stopped report a cumulative figure, so the run's
+	// contribution is their maximum, not their sum; runs are summed at each
+	// restart and at end of stream.
+	var runDropped uint64
 	var stoppedAt time.Time
 	// hubRunning tracks whether a hub instance is believed to be up, so a start
 	// with no intervening stop can be reported as an unclean restart.
@@ -339,13 +372,17 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	var lastEventAt time.Time
 
 	for _, r := range recs {
-		// Outside the window only hub lifecycle records are processed, and only
-		// to keep outage reconstruction correct across the boundary.
-		if !inWindow(r) && !isHubLifecycle(r.Name) {
-			continue
-		}
+		// Outside the window a record contributes no finding, but it still has
+		// to advance the reconstruction clock: an unclean outage is bounded by
+		// the last evidence the dead hub was alive, and that evidence is often
+		// an ordinary event just before the crash. Dropping it here would stretch
+		// a short outage back to the previous lifecycle record.
 		if !inWindow(r) {
-			applyHubLifecycle(r, &stoppedAt, &hubRunning)
+			// Loss is loss regardless of the window: a run that dropped events
+			// before the cutoff still produced an incomplete stream.
+			if isHubLifecycle(r.Name) || r.Name == EventEventsDropped {
+				applyHubLifecycle(r, &stoppedAt, &hubRunning, &runDropped, &rep)
+			}
 			lastEventAt = r.Time
 			continue
 		}
@@ -416,17 +453,35 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// Start a new generation rather than discarding state: messages the
 			// clear wiped unread stay reportable, while their IDs can no longer
 			// be matched by reads in the fresh room.
+			//
+			// clear_room only wipes up to the ID it archived, deliberately
+			// keeping anything that arrived while the archive I/O ran. Those
+			// messages survive into the new room and stay readable, so they must
+			// move with it — otherwise they would be reported unread forever.
+			survivedAbove := r.Int(AttrRoomResetMaxID)
+			old := key(r.Room(), "")
 			generation[r.Room()]++
+			if survivedAbove > 0 {
+				migrateSurvivors(sent, r.Room(), survivedAbove, old, key)
+			}
+
+		case EventEventsDropped:
+			// The durable marker exists so a crash cannot hide the loss; the
+			// analyzer has to actually read it.
+			if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > runDropped {
+				runDropped = uint64(f)
+			}
 
 		case EventHubStopped:
 			stoppedAt = r.Time
 			hubRunning = false
-			if d := r.Attrs[AttrEventsDropped]; d != nil {
-				if f, ok := d.(float64); ok {
-					rep.Dropped += uint64(f)
-				}
+			if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > runDropped {
+				runDropped = uint64(f)
 			}
 		case EventHubStarted:
+			// A new hub process starts its counter over, so bank the old run's.
+			rep.Dropped += runDropped
+			runDropped = 0
 			switch {
 			case !stoppedAt.IsZero():
 				rep.Outages = append(rep.Outages, Outage{
@@ -446,6 +501,9 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		}
 		lastEventAt = r.Time
 	}
+
+	// Bank the final (or only) run's losses.
+	rep.Dropped += runDropped
 
 	// A stop with no matching start means the hub is still down as far as this
 	// stream knows — the most interesting outage of all, so never dropped.
@@ -506,19 +564,54 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	return rep, nil
 }
 
+// migrateSurvivors moves sends with an ID above the cleared watermark into the
+// room's new generation, keyed by their delivery target. Messages at or below it
+// were wiped and stay in the old generation as permanently unread findings.
+func migrateSurvivors(sent map[string][]sentMsg, room string, above int, oldPrefix string, key func(string, string) string) {
+	for k, msgs := range sent {
+		if !strings.HasPrefix(k, oldPrefix) {
+			continue
+		}
+		var stay, move []sentMsg
+		for _, m := range msgs {
+			if m.id > above {
+				move = append(move, m)
+			} else {
+				stay = append(stay, m)
+			}
+		}
+		if len(move) == 0 {
+			continue
+		}
+		sent[k] = stay
+		nk := key(room, move[0].target)
+		sent[nk] = append(sent[nk], move...)
+	}
+}
+
 // isHubLifecycle reports whether a record drives hub up/down state.
 func isHubLifecycle(name string) bool {
 	return name == EventHubStarted || name == EventHubStopped
 }
 
-// applyHubLifecycle advances outage-reconstruction state without recording a
-// finding. Used for records that fall outside the --since window.
-func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool) {
+// applyHubLifecycle advances outage-reconstruction state for a record outside
+// the --since window. It records no finding, but loss counts are still banked:
+// events dropped by a hub that ran before the cutoff were still lost.
+func applyHubLifecycle(r Record, stoppedAt *time.Time, hubRunning *bool, runDropped *uint64, rep *Report) {
 	switch r.Name {
+	case EventEventsDropped:
+		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
+			*runDropped = uint64(f)
+		}
 	case EventHubStopped:
 		*stoppedAt = r.Time
 		*hubRunning = false
+		if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > *runDropped {
+			*runDropped = uint64(f)
+		}
 	case EventHubStarted:
+		rep.Dropped += *runDropped
+		*runDropped = 0
 		*stoppedAt = time.Time{}
 		*hubRunning = true
 	}

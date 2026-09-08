@@ -32,7 +32,7 @@ func TestReadRecordsInTimeOrder(t *testing.T) {
 		l.Log(EventAgentJoined, String(AttrAgentName, "alice"))
 	})
 
-	recs, err := Read(dir, time.Time{})
+	recs, _, err := Read(dir, time.Time{})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestReadHonoursSince(t *testing.T) {
 	})
 
 	cut := time.Date(2026, 9, 8, 9, 30, 0, 0, time.UTC)
-	recs, err := Read(dir, cut)
+	recs, _, err := Read(dir, cut)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -522,5 +522,162 @@ func TestAnalyzeDropsOutagesEntirelyBeforeCutoff(t *testing.T) {
 	}
 	if len(rep.Outages) != 0 {
 		t.Errorf("pencere dışı kesinti raporlanmış: %+v", rep.Outages)
+	}
+}
+
+// Codex review round 3, PR #103: the durable drop marker exists so a crash
+// cannot hide loss — the analyzer has to actually read it.
+func TestAnalyzeConsumesDurableDropMarker(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		tick(time.Minute)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 12))
+		tick(time.Minute)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 30))
+		// Hiç hub.stopped yok: çökme.
+	})
+
+	rep := analyzeDir(t, dir)
+	// Both markers are cumulative, so the run contributes their maximum.
+	if rep.Dropped != 30 {
+		t.Errorf("Dropped = %d, want 30 (kümülatif işaretlerin en büyüğü)", rep.Dropped)
+	}
+}
+
+func TestAnalyzeSumsDropsAcrossHubRuns(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 5))
+		l.Log(EventHubStopped, Uint64(AttrEventsDropped, 5)) // aynı tur, kümülatif
+		tick(time.Minute)
+		l.Log(EventHubStarted) // yeni süreç, sayaç sıfırdan
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 7))
+	})
+
+	if got := analyzeDir(t, dir).Dropped; got != 12 {
+		t.Errorf("Dropped = %d, want 12 (5 + 7; tur içi çift sayılmamalı)", got)
+	}
+}
+
+// Codex review round 3: clear_room keeps messages that arrived while its
+// archive I/O ran. Those survive into the new room and stay readable, so they
+// must move to the new generation instead of being stranded as unread.
+func TestAnalyzeMigratesClearRaceSurvivors(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		send := func(id int) {
+			l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+				String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+				String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, id))
+		}
+		send(5) // arşivlendi, silindi
+		send(9) // arşiv I/O sırasında geldi → clear'dan sağ çıkar
+		tick(time.Second)
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 5))
+		tick(time.Second)
+		// bob rejoins and reads the surviving message.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrReadMaxID, 9), Ints(AttrReadMessageIDs, []int{9}))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 {
+		t.Fatalf("okunmamış sayısı = %d, want 1: %+v", len(got), got)
+	}
+	// 9 survived and was read; only the wiped 5 stays unread.
+	if got[0].MessageID != 5 {
+		t.Errorf("okunmamış id = %d, want 5 (sağ kalan 9 okundu sayılmalı)", got[0].MessageID)
+	}
+}
+
+// Codex review round 3: an ordinary pre-cutoff event is the last evidence the
+// dead hub was alive; skipping it stretches a short outage back to the previous
+// lifecycle record.
+func TestAnalyzeUncleanOutageUsesLastPreCutoffEvent(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted) // 09:00
+		tick(2 * time.Hour)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice")) // 11:00
+		tick(time.Hour)
+		l.Log(EventHubStarted) // 12:00 — stop yok: çökmüş
+	})
+
+	cut := time.Date(2026, 9, 8, 11, 30, 0, 0, time.UTC)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(rep.Outages) != 1 {
+		t.Fatalf("kesinti sayısı = %d, want 1: %+v", len(rep.Outages), rep.Outages)
+	}
+	// From the join at 11:00, not the start at 09:00.
+	if got := rep.Outages[0].Duration; got != time.Hour {
+		t.Errorf("süre = %v, want 1h (son canlılık kanıtından)", got)
+	}
+}
+
+// Codex review round 3: a torn final line is expected after a kill, but a bad
+// record with valid ones after it is real damage the report must disclose.
+func TestReadCountsCorruptionButToleratesTornTail(t *testing.T) {
+	t.Run("ortadaki bozuk kayıt bildirilir", func(t *testing.T) {
+		dir := t.TempDir()
+		lines := `{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.started"}
+{bozuk
+{"time":"2026-09-08T09:01:00Z","event.name":"agent_chat.hub.stopped"}
+`
+		if err := os.WriteFile(filepath.Join(dir, fileName), []byte(lines), 0600); err != nil {
+			t.Fatal(err)
+		}
+		recs, corrupted, err := Read(dir, time.Time{})
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if len(recs) != 2 {
+			t.Errorf("okunan kayıt = %d, want 2", len(recs))
+		}
+		if corrupted != 1 {
+			t.Errorf("bozuk sayısı = %d, want 1", corrupted)
+		}
+	})
+
+	t.Run("yarım kalan son satır hoş görülür", func(t *testing.T) {
+		dir := t.TempDir()
+		lines := `{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.started"}
+{"time":"2026-09-08T09:01:00Z","eve`
+		if err := os.WriteFile(filepath.Join(dir, fileName), []byte(lines), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, corrupted, err := Read(dir, time.Time{})
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if corrupted != 0 {
+			t.Errorf("bozuk sayısı = %d, want 0 (yarım son satır normaldir)", corrupted)
+		}
+	})
+}
+
+// Codex review round 3: lumberjack can remove a rotated backup between listing
+// and opening it while the hub is live; that race must not fail the report.
+func TestReadToleratesBackupRemovedMidRun(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, fileName),
+		[]byte(`{"time":"2026-09-08T09:00:00Z","event.name":"agent_chat.hub.started"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A backup that vanishes before it is opened: simulated by a dangling symlink,
+	// which lists fine and fails to open with ENOENT exactly as a deleted file does.
+	backup := filepath.Join(dir, "events-2026-09-08T08-00-00.000.jsonl")
+	if err := os.Symlink(filepath.Join(dir, "gitti.jsonl"), backup); err != nil {
+		t.Skipf("symlink desteklenmiyor: %v", err)
+	}
+
+	recs, _, err := Read(dir, time.Time{})
+	if err != nil {
+		t.Fatalf("kaybolan yedek tüm raporu düşürdü: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("okunan kayıt = %d, want 1 (canlı akış okunabilmeli)", len(recs))
 	}
 }

@@ -895,9 +895,14 @@ func (h *Hub) handleClearRoom(c *Client, req types.Request) {
 
 	// Same reason the analyzer must forget its read state: with IDs restarting
 	// at 1, a recipient's earlier progress would make reused IDs look read.
+	// max_id is what the clear actually wiped: anything above it arrived while
+	// the archive I/O ran and survives into the new room, so the analyzer must
+	// carry those messages across the generation boundary instead of stranding
+	// them as permanently unread.
 	h.events.Log(eventlog.EventRoomReset,
 		eventlog.String(eventlog.AttrConversationID, room),
 		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleCleared),
+		eventlog.Int(eventlog.AttrRoomResetMaxID, maxID),
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 	)
 

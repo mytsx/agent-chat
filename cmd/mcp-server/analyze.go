@@ -75,18 +75,24 @@ func dataDir() string {
 
 func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 	if rep.Events == 0 {
-		fmt.Fprintln(w, "Olay akışında kayıt yok. Hub bir kez çalıştıktan sonra tekrar deneyin.")
-		if rep.LegacyUnreachable > 0 {
-			writeLegacy(w, rep)
+		fmt.Fprintln(w, "Seçilen pencerede olay kaydı yok.")
+		// An outage reconstructed from a pre-cutoff stop is exactly the finding
+		// this report exists for — a hub that is down right now produces no
+		// events at all, so returning early here would hide it.
+		if len(rep.Outages) == 0 && rep.LegacyUnreachable == 0 {
+			fmt.Fprintln(w, "Hub bir kez çalıştıktan sonra tekrar deneyin.")
+			return
 		}
-		return
+	} else {
+		fmt.Fprintf(w, "Olay akışı: %d kayıt, %s – %s\n",
+			rep.Events, rep.From.Format(time.RFC3339), rep.To.Format(time.RFC3339))
 	}
-
-	fmt.Fprintf(w, "Olay akışı: %d kayıt, %s – %s\n",
-		rep.Events, rep.From.Format(time.RFC3339), rep.To.Format(time.RFC3339))
 	if rep.Dropped > 0 {
 		// Never present a partial picture as complete.
-		fmt.Fprintf(w, "UYARI: tampon dolduğu için %d olay kaydedilemedi; rapor eksik olabilir.\n", rep.Dropped)
+		fmt.Fprintf(w, "UYARI: %d olay kaydedilemedi (tampon doldu ya da yazma başarısız); rapor eksik.\n", rep.Dropped)
+	}
+	if rep.Corrupted > 0 {
+		fmt.Fprintf(w, "UYARI: %d kayıt okunamadı (bozuk satır); rapor eksik.\n", rep.Corrupted)
 	}
 
 	fmt.Fprintln(w, "\n1) Agent düşmeleri (sebebe göre)")
