@@ -1252,8 +1252,11 @@ func TestAnalyzeCountsFatalDiscoveryAsFailedClient(t *testing.T) {
 	}
 	lines := line(base.Add(70*time.Minute), "Hub discovery failed: hub.port not found: open /x/hub.port: no such file") +
 		line(base.Add(71*time.Minute), "Hub discovery failed: hub.port not found: open /x/hub.port: no such file") +
-		// Post-#98 shape: the process stayed alive and kept dialling.
-		line(base.Add(72*time.Minute), "Hub discovery failed, arka planda beklenecek: hub.port not found: open /x/hub.port: no such file")
+		// Post-#98 shapes: the process stayed alive and kept dialling. Neither
+		// the startup line nor the supervisor's retries are a client dying.
+		line(base.Add(72*time.Minute), "Hub discovery failed, arka planda beklenecek: hub.port not found: open /x/hub.port: no such file") +
+		line(base.Add(73*time.Minute), "Hub connect failed, retrying: hub adresi çözülemedi: hub.port not found: open /x/hub.port: no such file") +
+		line(base.Add(74*time.Minute), "Hub connect failed, retrying: hub adresi çözülemedi: hub.port not found: open /x/hub.port: no such file")
 
 	legacy := filepath.Join(dir, "mcp-server.log")
 	if err := os.WriteFile(legacy, []byte(lines), 0600); err != nil {
@@ -1264,11 +1267,11 @@ func TestAnalyzeCountsFatalDiscoveryAsFailedClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
-	if rep.LegacyUnreachable != 3 {
-		t.Errorf("ulaşılamayan satır = %d, want 3", rep.LegacyUnreachable)
+	if rep.LegacyUnreachable != 5 {
+		t.Errorf("ulaşılamayan satır = %d, want 5", rep.LegacyUnreachable)
 	}
 	if rep.LegacyClientsFailed != 2 {
-		t.Errorf("vazgeçen istemci = %d, want 2 (ölümcül keşif iki kez; arka planda bekleyen sayılmaz)", rep.LegacyClientsFailed)
+		t.Errorf("vazgeçen istemci = %d, want 2 (yalnız ölümcül açılış satırı; arka planda bekleyen ve süpervizör denemeleri sayılmaz)", rep.LegacyClientsFailed)
 	}
 	if len(rep.Outages) != 1 || rep.Outages[0].LegacyClientsFailed != 2 {
 		t.Errorf("kesinti etkisi = %+v, want 2 vazgeçen istemci", rep.Outages)

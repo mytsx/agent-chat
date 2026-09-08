@@ -936,18 +936,23 @@ var legacyUnreachableMarkers = []string{
 // so counting it gives affected CLIENTS rather than attempts.
 const legacyGaveUpMarker = "failed to connect to hub after"
 
-// legacyDiscoveryMarker is a hub the process could not even locate. Before #98
-// that was fatal — DiscoverHubAddr failing called os.Exit(1) — so each such line
-// is one MCP process that died without ever reaching the hub, not one attempt.
-// Counting only legacyGaveUpMarker undercounted affected clients by ~30x in the
-// shipped log (12.765 discovery lines against 431 give-up lines).
+// legacyDiscoveryMarker is a hub the process could not even locate.
 const legacyDiscoveryMarker = "hub.port not found"
 
-// legacyBackgroundWaitMarker distinguishes the SAME discovery failure after #98,
-// where startup no longer exits and the supervisor keeps dialling. Those lines
-// are not a client giving up and must not be counted as one — the log holds both
-// eras.
-const legacyBackgroundWaitMarker = "arka planda beklenecek"
+// legacyFatalDiscoveryMarker is the exact line the PRE-#98 startup wrote before
+// calling os.Exit(1), so each one is an MCP process that died without ever
+// reaching the hub — a client, not an attempt. Counting only legacyGaveUpMarker
+// undercounted affected clients by ~30x in the shipped log (12.775 of these
+// against 431 give-up lines).
+//
+// It is matched POSITIVELY, on the fatal line's own shape. Excluding the
+// post-#98 shapes instead would have missed the supervisor's own retries
+// ("Hub connect failed, retrying: hub adresi çözülemedi: hub.port not found"),
+// which carry the same discovery text without the startup phrasing — one live
+// client redialling would then have been counted as a process death per attempt.
+// The trailing colon matters: the surviving startup line reads
+// "Hub discovery failed, arka planda beklenecek: ...".
+const legacyFatalDiscoveryMarker = "Hub discovery failed: "
 
 // scanLegacyLog counts unreachable-hub lines in the old plain-text log and
 // attributes each to the outage window it falls in, so the report can say how
@@ -997,8 +1002,7 @@ func scanLegacyLog(path string, since time.Time, rep *Report) error {
 
 		rep.LegacyUnreachable++
 		gaveUp := strings.Contains(line, legacyGaveUpMarker) ||
-			(strings.Contains(line, legacyDiscoveryMarker) &&
-				!strings.Contains(line, legacyBackgroundWaitMarker))
+			strings.Contains(line, legacyFatalDiscoveryMarker)
 		if gaveUp {
 			rep.LegacyClientsFailed++
 		}
