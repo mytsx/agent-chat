@@ -131,12 +131,20 @@ plain-text `mcp-server.log` stays alongside it as a fallback.
   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too).
   Truncated at 8 KB on a rune boundary. Deliberate deviation from OTel's
   default-off stance — documented in the design spec.
-- **Read progress is a set, not a watermark.** `agent_chat.read.message_ids`
-  lists exactly what a read returned, because `RoomState.ReadMessages` returns
-  only the newest matching tail once its limit bites. Both `get_messages` and
-  `get_all_messages` (which managers poll) record it. `agent_chat.room.reset`
-  makes the analyzer drop read state when `clear_room`/`delete_room` restarts
-  message IDs at 1.
+- **Read progress is a set, not a watermark.** `agent_chat.read.id_ranges`
+  carries exactly what a read returned, as contiguous `[start,end]` pairs,
+  because `RoomState.ReadMessages` returns only the newest matching tail once
+  its limit bites. Ranges mean no cap is needed — which matters because manager
+  and observer joins bypass the room's truncation, so a room can exceed 500 and
+  `read_all_messages(limit=1000)` can exceed any fixed one. Both `get_messages`
+  and `get_all_messages` (which managers poll) record it.
+- **Generations are stamped, not inferred.** `agent_chat.room.generation` is
+  captured under the room lock on send and read; `clear_room` increments it from
+  inside `ClearArchived`, still holding the lock, so a boundary can never land
+  on the wrong side of a racing send. `delete_room` emits its boundary while
+  `h.mu` still excludes recreation. An unclean restart — or a clean one whose
+  `agent_chat.persist.ok` is not true — starts a new epoch, because a rolled-back
+  snapshot can reuse message IDs.
 - **`agent_chat.delivery.target`** is who a message was actually stored for; the
   manager gateway makes it differ from `recipient.name`. Report 2 (#99) uses the
   addressee, report 3 uses the delivery target, so neither corrupts the other.

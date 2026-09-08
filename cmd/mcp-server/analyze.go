@@ -81,7 +81,11 @@ func writeReport(w io.Writer, rep eventlog.Report, limit int) {
 		// An outage reconstructed from a pre-cutoff stop is exactly the finding
 		// this report exists for — a hub that is down right now produces no
 		// events at all, so returning early here would hide it.
-		if len(rep.Outages) == 0 && rep.LegacyUnreachable == 0 {
+		// Integrity warnings must survive this return too: telling the operator
+		// to retry while the stream is known to be lossy or damaged would hide
+		// exactly the global evidence the room filter was changed to preserve.
+		if len(rep.Outages) == 0 && rep.LegacyUnreachable == 0 &&
+			rep.Dropped == 0 && rep.Corrupted == 0 {
 			fmt.Fprintln(w, "Hub bir kez çalıştıktan sonra tekrar deneyin.")
 			return
 		}

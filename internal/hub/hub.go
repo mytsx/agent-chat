@@ -231,8 +231,10 @@ func (h *Hub) Shutdown() {
 	}
 	h.drainArchiveBacklog()
 
-	// Persist all state
-	h.persistAll()
+	// Persist all state. Whether it succeeded is continuity evidence: a failed
+	// persist leaves the next process loading an older snapshot, free to reuse
+	// message IDs exactly as a crash does.
+	persisted := h.persistAll()
 
 	// Close all client connections
 	h.mu.Lock()
@@ -252,6 +254,7 @@ func (h *Hub) Shutdown() {
 	h.events.Drain()
 	h.events.LogSync(eventlog.EventHubStopped,
 		eventlog.Uint64(eventlog.AttrEventsDropped, h.events.Dropped()),
+		eventlog.Bool(eventlog.AttrPersistOK, persisted),
 	)
 	if err := h.events.Close(); err != nil {
 		h.logger.Printf("Olay logu kapatılamadı: %v", err)

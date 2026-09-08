@@ -101,7 +101,11 @@ func (h *Hub) persistDirtyRooms() {
 // under the lock and releases it BEFORE calling persistRoom, because persistRoom now
 // takes h.mu.RLock itself — holding it here would be a recursive RLock (deadlock-prone
 // if a writer arrives between the two acquisitions).
-func (h *Hub) persistAll() {
+// persistAll writes every room's snapshot and reports whether they ALL landed.
+// The result is continuity evidence for the event log: a failed persist leaves
+// the next process loading an older snapshot, free to reuse message IDs exactly
+// as a crash does, so the analyzer must not treat that restart as continuous.
+func (h *Hub) persistAll() bool {
 	type entry struct {
 		name string
 		room *RoomState
@@ -113,12 +117,17 @@ func (h *Hub) persistAll() {
 	}
 	h.mu.RUnlock()
 
+	ok := true
 	for _, e := range entries {
-		h.persistRoom(e.name, e.room)
+		if !h.persistRoom(e.name, e.room) {
+			ok = false
+		}
 	}
+	return ok
 }
 
-func (h *Hub) persistRoom(name string, room *RoomState) {
+// persistRoom writes one room's snapshot, reporting whether it reached disk.
+func (h *Hub) persistRoom(name string, room *RoomState) bool {
 	// name becomes the hub-state/{name}.json path segment below. Every other
 	// file-touching path (session.go, summary.go, archive.go, delete_room) already
 	// rejects traversal names; this is the last write path that could turn an
@@ -127,7 +136,7 @@ func (h *Hub) persistRoom(name string, room *RoomState) {
 	// guard is defense-in-depth and should never fire in normal operation.
 	if err := validation.ValidateName(name); err != nil {
 		h.logger.Printf("persistRoom: geçersiz oda adı %q atlanıyor: %v", name, err)
-		return
+		return false
 	}
 
 	stateDir := filepath.Join(h.dataDir, "hub-state")
@@ -137,7 +146,7 @@ func (h *Hub) persistRoom(name string, room *RoomState) {
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		h.logger.Printf("Failed to marshal room %s: %v", name, err)
-		return
+		return false
 	}
 
 	// Atomic write: temp file + rename
@@ -152,19 +161,21 @@ func (h *Hub) persistRoom(name string, room *RoomState) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.deletedRooms[name] {
-		return
+		// A tombstoned room is deliberately not persisted; that is not a failure.
+		return true
 	}
 
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		h.logger.Printf("Failed to write temp file for room %s: %v", name, err)
-		return
+		return false
 	}
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		h.logger.Printf("Failed to rename temp file for room %s: %v", name, err)
 		os.Remove(tmpPath)
-		return
+		return false
 	}
 
 	room.MarkClean()
+	return true
 }

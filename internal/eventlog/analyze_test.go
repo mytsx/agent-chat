@@ -881,3 +881,111 @@ func TestReadTornTailForgivenOnlyInFinalStreamFile(t *testing.T) {
 		t.Errorf("bozuk sayısı = %d, want 1 (yedekteki yarım satır hasar sayılmalı)", corrupted)
 	}
 }
+
+// Codex review round 6, PR #103: the generation must come from the hub's
+// locked stamp, not from where the event landed relative to the boundary — a
+// send that stored just before a concurrent clear is logged after it.
+func TestAnalyzeUsesStampedGenerationNotLogOrder(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		room := String(AttrConversationID, "r1")
+		// The clear is logged FIRST; the send that belongs to generation 0
+		// lands after it, exactly as the race produces.
+		l.Log(EventRoomReset, room, String(AttrRoomLifecycle, RoomLifecycleCleared),
+			Int(AttrRoomResetMaxID, 10))
+		l.Log(EventMessageSent, room, String(AttrAgentName, "alice"),
+			String(AttrRecipientName, "bob"), Bool(AttrRecipientInRoom, true),
+			String(AttrDeliveryTarget, "bob"), Int(AttrMessageID, 7),
+			Int(AttrRoomGeneration, 0))
+		tick(time.Second)
+		// A read in the fresh room reuses ID 7.
+		l.Log(EventMessagesRead, room, String(AttrAgentName, "bob"),
+			Int(AttrRoomGeneration, 1), Int(AttrReadMaxID, 7),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{7})))
+	})
+
+	got := analyzeDir(t, dir).Unread
+	if len(got) != 1 || got[0].MessageID != 7 {
+		t.Errorf("clear'dan önce saklanan mesaj, yeni kuşaktaki okumayla kapatılmış: %+v", got)
+	}
+}
+
+// Codex review round 6: --since must bound losses too, or a healthy window
+// inherits months-old drops and calls its own report incomplete.
+func TestAnalyzeDropsBaselineAtSinceCutoff(t *testing.T) {
+	dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+		l.Log(EventHubStarted)
+		l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 100)) // pencere öncesi
+		tick(10 * time.Hour)
+		l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+	})
+
+	cut := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if rep.Dropped != 0 {
+		t.Errorf("Dropped = %d, want 0 (kayıplar pencereden önce oldu)", rep.Dropped)
+	}
+
+	t.Run("pencere içindeki artış sayılır", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			l.Log(EventHubStarted)
+			l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 100))
+			tick(10 * time.Hour)
+			l.Log(EventAgentJoined, String(AttrConversationID, "r1"), String(AttrAgentName, "alice"))
+			l.Log(EventEventsDropped, Uint64(AttrEventsDropped, 130)) // +30 pencere içinde
+		})
+		rep, err := Analyze(AnalyzeOptions{Dir: dir, Since: cut})
+		if err != nil {
+			t.Fatalf("Analyze: %v", err)
+		}
+		if rep.Dropped != 30 {
+			t.Errorf("Dropped = %d, want 30 (yalnız pencere içi artış)", rep.Dropped)
+		}
+	})
+}
+
+// Codex review round 6: a clean stop only guarantees continuity if it actually
+// persisted; otherwise the next process rolls back and can reuse IDs.
+func TestAnalyzeSeparatesGenerationsAfterFailedPersist(t *testing.T) {
+	send := func(l *Logger) {
+		l.Log(EventMessageSent, String(AttrConversationID, "r1"),
+			String(AttrAgentName, "alice"), String(AttrRecipientName, "bob"),
+			Bool(AttrRecipientInRoom, true), String(AttrDeliveryTarget, "bob"),
+			Int(AttrMessageID, 10))
+	}
+	read := func(l *Logger) {
+		l.Log(EventMessagesRead, String(AttrConversationID, "r1"),
+			String(AttrAgentName, "bob"), Int(AttrReadMaxID, 10),
+			Ints(AttrReadIDRanges, EncodeIDRanges([]int{10})))
+	}
+
+	t.Run("persist başarısızsa kuşak ayrılır", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			l.Log(EventHubStarted)
+			send(l)
+			l.Log(EventHubStopped, Bool(AttrPersistOK, false))
+			tick(time.Minute)
+			l.Log(EventHubStarted)
+			read(l) // yeniden kullanılan kimlik
+		})
+		if got := analyzeDir(t, dir).Unread; len(got) != 1 {
+			t.Errorf("geri sarma sonrası okuma, kaybolan mesajı kapatmış: %+v", got)
+		}
+	})
+
+	t.Run("persist başarılıysa süreklilik korunur", func(t *testing.T) {
+		dir := writeStream(t, func(l *Logger, tick func(time.Duration)) {
+			l.Log(EventHubStarted)
+			send(l)
+			l.Log(EventHubStopped, Bool(AttrPersistOK, true))
+			tick(time.Minute)
+			l.Log(EventHubStarted)
+			read(l)
+		})
+		if got := analyzeDir(t, dir).Unread; len(got) != 0 {
+			t.Errorf("temiz ve kalıcılaşmış kapanışta okuma sayılmadı: %+v", got)
+		}
+	})
+}

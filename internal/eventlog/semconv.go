@@ -70,6 +70,13 @@ const (
 	// therefore a set, not a watermark; AttrReadMaxID remains for streams written
 	// before this attribute and as a coarse fallback.
 	AttrReadMessageIDs = "agent_chat.read.message_ids"
+	// AttrReadIDRanges is the read's returned IDs as flattened inclusive
+	// [start,end] pairs. A read is almost always a contiguous tail, so this is
+	// two numbers however many messages came back — which means no cap, and
+	// therefore no case where the record has to fall back to a watermark it
+	// cannot make true. Supersedes AttrReadMessageIDs, which is still read for
+	// streams written before it.
+	AttrReadIDRanges = "agent_chat.read.id_ranges"
 	// AttrReadIDsTruncated marks a read whose ID list exceeded maxReadIDs, in
 	// which case the analyzer falls back to the watermark for that record.
 	AttrReadIDsTruncated = "agent_chat.read.ids_truncated"
@@ -80,7 +87,17 @@ const (
 	// AttrRoomResetMaxID is the highest message ID the clear actually wiped.
 	// clear_room keeps anything that arrived while its archive I/O ran, so
 	// messages above this survive into the new room and must follow it.
-	AttrRoomResetMaxID   = "agent_chat.room.reset.max_id"
+	AttrRoomResetMaxID = "agent_chat.room.reset.max_id"
+	// AttrRoomGeneration is how many times the room had been cleared when the
+	// event's message was stored or read, captured UNDER the room lock. Being
+	// explicit is what makes it race-free: inferring it from where the event
+	// lands relative to the boundary record misattributes a send that stored
+	// just before a concurrent clear.
+	AttrRoomGeneration = "agent_chat.room.generation"
+	// AttrPersistOK reports whether the hub's shutdown persisted room state. A
+	// failed persist rolls the next process back to an older snapshot, which can
+	// reuse message IDs exactly as a crash does.
+	AttrPersistOK        = "agent_chat.persist.ok"
 	AttrContentTruncated = "agent_chat.content.truncated"
 	AttrEventsDropped    = "agent_chat.events.dropped"
 )

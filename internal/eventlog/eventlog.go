@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,10 +45,45 @@ const fileName = "events.jsonl"
 // large file from dominating the log.
 const maxContentBytes = 8 * 1024
 
-// MaxReadIDs bounds the per-read ID list. A read's limit is caller-supplied, so
-// this stops one huge read from dominating a record; beyond it the producer sets
-// AttrReadIDsTruncated and the analyzer falls back to the watermark.
-const MaxReadIDs = 512
+// DecodeIDRanges expands flattened inclusive [start,end] pairs back into IDs.
+// A malformed (odd-length or inverted) run is ignored rather than guessed at.
+func DecodeIDRanges(pairs []int) []int {
+	var out []int
+	for i := 0; i+1 < len(pairs); i += 2 {
+		lo, hi := pairs[i], pairs[i+1]
+		if hi < lo {
+			continue
+		}
+		for id := lo; id <= hi; id++ {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// EncodeIDRanges compresses a set of message IDs into flattened inclusive
+// [start,end] pairs, so a record stays small however many messages a read
+// returned. Reads are contiguous tails in practice, so this is usually one pair.
+// Input need not be sorted; the result is ascending and duplicate-free.
+func EncodeIDRanges(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	sorted := append([]int(nil), ids...)
+	sort.Ints(sorted)
+
+	var out []int
+	start, prev := sorted[0], sorted[0]
+	for _, id := range sorted[1:] {
+		if id == prev || id == prev+1 {
+			prev = id
+			continue
+		}
+		out = append(out, start, prev)
+		start, prev = id, id
+	}
+	return append(out, start, prev)
+}
 
 // Defaults sized for a desktop app: ~32 MB live plus at most 5 compressed
 // backups, discarded after 30 days.

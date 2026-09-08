@@ -398,14 +398,27 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// which are among the most interesting findings the report has. Keying by
 	// generation keeps that history while making old IDs unmatchable by new reads.
 	generation := map[string]int{}
+	// deletes counts delete_room boundaries. A recreated room is a fresh
+	// RoomState whose stamped generation restarts at zero, so the hub's counter
+	// alone cannot separate it from its predecessor.
+	deletes := map[string]int{}
 	// epoch separates hub runs that rolled back. Room state is persisted only
 	// every five seconds, so an unclean restart can reload a snapshot that is
 	// behind the log and REUSE message IDs. Without this boundary, a read of a
 	// reused ID in the new run would clear the pre-crash message that was
 	// actually lost — hiding exactly the data loss the report exists to find.
 	epoch := 0
-	key := func(room string, agent string) string {
-		return fmt.Sprintf("%s\x00%d\x00%d\x00%s", room, epoch, generation[room], agent)
+	// genOf prefers the generation the hub stamped under the room lock; only a
+	// stream written before that attribute falls back to counting boundaries,
+	// which is ordering-dependent and therefore racy.
+	genOf := func(r Record) int {
+		if g, ok := r.Attrs[AttrRoomGeneration].(float64); ok {
+			return int(g) + deletes[r.Room()]
+		}
+		return generation[r.Room()]
+	}
+	key := func(room string, gen int, agent string) string {
+		return fmt.Sprintf("%s\x00%d\x00%d\x00%s", room, epoch, gen, agent)
 	}
 
 	sent := map[string][]sentMsg{}
@@ -416,10 +429,19 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 	// contribution is their maximum, not their sum; runs are summed at each
 	// restart and at end of stream.
 	var runDropped uint64
+	// runBaseline is the loss count a run had already accumulated when the
+	// --since window opened. Only growth past it belongs to the selected
+	// interval: otherwise a healthy window inherits months-old drops and warns
+	// that its own report is incomplete.
+	var runBaseline uint64
+	baselineSet := false
 	var stoppedAt time.Time
 	// hubRunning tracks whether a hub instance is believed to be up, so a start
 	// with no intervening stop can be reported as an unclean restart.
 	var hubRunning bool
+	// lastStopPersisted records whether the most recent clean stop confirmed it
+	// persisted room state.
+	var lastStopPersisted bool
 	var lastEventAt time.Time
 
 	for _, r := range recs {
@@ -437,6 +459,12 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			lastEventAt = r.Time
 			continue
 		}
+		if !baselineSet {
+			// First in-window record: everything the run lost before this point
+			// happened outside the selected interval.
+			runBaseline, baselineSet = runDropped, true
+		}
+
 		// Findings below are room-scoped; global state above is not.
 		roomOK := inRoom(r)
 
@@ -492,7 +520,7 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// message did reach the manager regardless of the addressee.
 			undelivered := target == to && !r.Bool(AttrRecipientInRoom)
 			if target != "" && target != "all" && !undelivered {
-				k := key(r.Room(), target)
+				k := key(r.Room(), genOf(r), target)
 				sent[k] = append(sent[k], sentMsg{rec: r, id: r.Int(AttrMessageID), target: target})
 			}
 
@@ -500,8 +528,11 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			if !roomOK {
 				break
 			}
-			rs := readFor(reads, key(r.Room(), r.Str(AttrAgentName)))
-			ids := r.Ints(AttrReadMessageIDs)
+			rs := readFor(reads, key(r.Room(), genOf(r), r.Str(AttrAgentName)))
+			ids := DecodeIDRanges(r.Ints(AttrReadIDRanges))
+			if len(ids) == 0 {
+				ids = r.Ints(AttrReadMessageIDs)
+			}
 			for _, id := range ids {
 				rs.ids[id] = true
 			}
@@ -533,11 +564,20 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 			// a stream written before this attribute existed cannot say what
 			// survived, so it migrates nothing rather than guessing.
 			survivedAbove, haveWatermark := r.Attrs[AttrRoomResetMaxID]
-			oldPrefix := key(r.Room(), "")
-			generation[r.Room()]++
-			if haveWatermark && r.Str(AttrRoomLifecycle) != RoomLifecycleDeleted {
+			deleted := r.Str(AttrRoomLifecycle) == RoomLifecycleDeleted
+			oldGen := generation[r.Room()] + deletes[r.Room()]
+			oldPrefix := key(r.Room(), oldGen, "")
+			if deleted {
+				deletes[r.Room()]++
+			} else {
+				generation[r.Room()]++
+			}
+			if haveWatermark && !deleted {
 				above, _ := survivedAbove.(float64)
-				migrateSurvivors(sent, reads, r.Room(), int(above), oldPrefix, key)
+				newKey := func(room, agent string) string {
+					return key(room, oldGen+1, agent)
+				}
+				migrateSurvivors(sent, reads, r.Room(), int(above), oldPrefix, newKey)
 			}
 
 		case EventEventsDropped:
@@ -550,19 +590,29 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		case EventHubStopped:
 			stoppedAt = r.Time
 			hubRunning = false
+			lastStopPersisted, _ = r.Attrs[AttrPersistOK].(bool)
 			if f, ok := r.Attrs[AttrEventsDropped].(float64); ok && uint64(f) > runDropped {
 				runDropped = uint64(f)
 			}
 		case EventHubStarted:
-			// A new hub process starts its counter over, so bank the old run's.
-			rep.Dropped += runDropped
-			runDropped = 0
+			// A new hub process starts its counter over, so bank the old run's
+			// in-window growth.
+			rep.Dropped += runDropped - min(runBaseline, runDropped)
+			runDropped, runBaseline = 0, 0
 			switch {
 			case !stoppedAt.IsZero():
 				rep.Outages = append(rep.Outages, Outage{
 					Start: stoppedAt, End: r.Time, Duration: r.Time.Sub(stoppedAt),
 				})
 				stoppedAt = time.Time{}
+				// A clean stop only guarantees continuity if it actually
+				// persisted. A failed persist rolls the next process back to an
+				// older snapshot and lets it reuse message IDs, exactly like a
+				// crash — so treat anything but a confirmed persist as a
+				// generation boundary.
+				if !lastStopPersisted {
+					epoch++
+				}
 			case hubRunning:
 				// A start with no stop before it: the previous instance crashed
 				// or was killed and never logged its exit. We only know it was
@@ -581,8 +631,8 @@ func Analyze(opts AnalyzeOptions) (Report, error) {
 		lastEventAt = r.Time
 	}
 
-	// Bank the final (or only) run's losses.
-	rep.Dropped += runDropped
+	// Bank the final (or only) run's in-window losses.
+	rep.Dropped += runDropped - min(runBaseline, runDropped)
 
 	// A stop with no matching start means the hub is still down as far as this
 	// stream knows — the most interesting outage of all, so never dropped.
@@ -656,7 +706,7 @@ func migrateSurvivors(
 	sent map[string][]sentMsg,
 	reads map[string]*readState,
 	room string, above int, oldPrefix string,
-	key func(string, string) string,
+	newKey func(room, agent string) string,
 ) {
 	for k, msgs := range sent {
 		if !strings.HasPrefix(k, oldPrefix) {
@@ -674,7 +724,7 @@ func migrateSurvivors(
 			continue
 		}
 		sent[k] = stay
-		nk := key(room, move[0].target)
+		nk := newKey(room, move[0].target)
 		sent[nk] = append(sent[nk], move...)
 	}
 
@@ -689,14 +739,14 @@ func migrateSurvivors(
 				continue
 			}
 			if moved == nil {
-				moved = readFor(reads, key(room, agent))
+				moved = readFor(reads, newKey(room, agent))
 			}
 			moved.ids[id] = true
 			delete(rs.ids, id)
 		}
 		if rs.watermark > above {
 			if moved == nil {
-				moved = readFor(reads, key(room, agent))
+				moved = readFor(reads, newKey(room, agent))
 			}
 			if rs.watermark > moved.watermark {
 				moved.watermark = rs.watermark

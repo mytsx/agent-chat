@@ -499,7 +499,7 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 
 	// Presence is captured under the same lock as the store: a separate lookup
 	// afterwards could see a roster a concurrent join/leave already changed.
-	msg, recipientPresent, err := roomState.SendMessageWithPresence(
+	msg, recipientPresent, roomGen, err := roomState.SendMessageWithPresence(
 		data.From, to, data.Content, data.ExpectsReply, data.Priority, opts, data.To)
 	if err != nil {
 		c.sendError(req.ID, req.Type, err.Error())
@@ -520,6 +520,10 @@ func (h *Hub) handleSendMessage(c *Client, req types.Request) {
 		// addressee; recording both keeps "wrote to an absent agent" and "nobody
 		// read this" answerable without either question corrupting the other.
 		eventlog.String(eventlog.AttrDeliveryTarget, to),
+		// Stamped from the locked store, not inferred from log order: a clear
+		// racing this send would otherwise put the event on the wrong side of
+		// the generation boundary.
+		eventlog.Int(eventlog.AttrRoomGeneration, roomGen),
 		eventlog.Int(eventlog.AttrMessageID, msg.ID),
 		eventlog.String(eventlog.AttrRequestID, req.ID),
 		eventlog.String(eventlog.AttrInputMessages, data.Content),
@@ -575,11 +579,11 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 
 	roomState := h.getOrCreateRoom(room)
 	roomState.TouchManagerHeartbeat(c.agentName)
-	filtered, totalCount := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
+	filtered, totalCount, roomGen := roomState.ReadMessages(data.AgentName, data.SinceID, data.Limit, data.UnreadOnly)
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
-		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, nil)
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, roomGen, nil)
 		return
 	}
 
@@ -587,7 +591,7 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 	// client buffer drops it, and marking those IDs read would erase from the
 	// report the very messages the agent never received.
 	if c.sendText(req.ID, req.Type, formatAgentMessages(filtered, totalCount, data.Limit)) {
-		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, filtered)
+		h.logMessagesRead(room, data.AgentName, req.ID, data.SinceID, roomGen, filtered)
 	}
 }
 
@@ -597,16 +601,9 @@ func (h *Hub) handleGetMessages(c *Client, req types.Request) {
 // capped by its limit and returns only the newest matching tail, so an older
 // direct message can be pushed out by newer broadcasts. Treating the highest
 // returned ID as a watermark would mark that unseen message as read.
-func (h *Hub) logMessagesRead(room, agentName, requestID string, sinceID int, msgs []types.Message) {
+func (h *Hub) logMessagesRead(room, agentName, requestID string, sinceID, roomGen int, msgs []types.Message) {
 	if agentName == "" {
 		return // unauthenticated read: no agent whose progress this advances
-	}
-	attrs := []eventlog.Attr{
-		eventlog.String(eventlog.AttrConversationID, room),
-		eventlog.String(eventlog.AttrAgentName, agentName),
-		eventlog.Int(eventlog.AttrReadSinceID, sinceID),
-		eventlog.Int(eventlog.AttrReadReturned, len(msgs)),
-		eventlog.String(eventlog.AttrRequestID, requestID),
 	}
 
 	maxID := 0
@@ -617,13 +614,23 @@ func (h *Hub) logMessagesRead(room, agentName, requestID string, sinceID int, ms
 		}
 		ids = append(ids, m.ID)
 	}
-	attrs = append(attrs, eventlog.Int(eventlog.AttrReadMaxID, maxID))
-	// A read whose limit was huge would otherwise bloat one record; past the cap
-	// the analyzer is told to fall back to the watermark for this read only.
-	if len(ids) > eventlog.MaxReadIDs {
-		attrs = append(attrs, eventlog.Bool(eventlog.AttrReadIDsTruncated, true))
-	} else if len(ids) > 0 {
-		attrs = append(attrs, eventlog.Ints(eventlog.AttrReadMessageIDs, ids))
+
+	attrs := []eventlog.Attr{
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrAgentName, agentName),
+		eventlog.Int(eventlog.AttrRoomGeneration, roomGen),
+		eventlog.Int(eventlog.AttrReadSinceID, sinceID),
+		eventlog.Int(eventlog.AttrReadReturned, len(msgs)),
+		eventlog.Int(eventlog.AttrReadMaxID, maxID),
+		eventlog.String(eventlog.AttrRequestID, requestID),
+	}
+	// Ranges, not a capped ID list: a read is almost always a contiguous tail,
+	// so this collapses to one pair, and an oversized read no longer has to fall
+	// back to the watermark — which cannot express "these IDs specifically".
+	// A manager's read_all_messages(limit=1000) can exceed any fixed cap because
+	// manager and observer joins deliberately bypass the room's truncation.
+	if r := eventlog.EncodeIDRanges(ids); len(r) > 0 {
+		attrs = append(attrs, eventlog.Ints(eventlog.AttrReadIDRanges, r))
 	}
 
 	h.events.Log(eventlog.EventMessagesRead, attrs...)
@@ -656,21 +663,21 @@ func (h *Hub) handleGetAllMessages(c *Client, req types.Request) {
 		return
 	}
 	var filtered []types.Message
-	totalCount := 0
+	totalCount, roomGen := 0, 0
 	if roomState != nil {
-		filtered, totalCount = roomState.ReadAllMessages(data.SinceID, data.Limit)
+		filtered, totalCount, roomGen = roomState.ReadAllMessages(data.SinceID, data.Limit)
 	}
 
 	if len(filtered) == 0 {
 		c.sendText(req.ID, req.Type, "\U0001f4ed Yeni mesaj yok.")
-		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, nil)
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, roomGen, nil)
 		return
 	}
 
 	// Managers are told to poll read_all_messages, so this path must record
 	// progress too — but, as above, only for a response that was actually queued.
 	if c.sendText(req.ID, req.Type, formatAllMessages(filtered, totalCount, data.Limit)) {
-		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, filtered)
+		h.logMessagesRead(room, c.agentName, req.ID, data.SinceID, roomGen, filtered)
 	}
 }
 
@@ -1205,6 +1212,15 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 	delete(h.subs, room)
 	delete(h.roomManager, room)
 	delete(h.roomObservers, room)
+	// Emitted while h.mu still excludes recreation: a room recreated in this gap
+	// restarts its message IDs, and its events would otherwise be logged before
+	// the boundary and stranded in the deleted room's generation. (No disk I/O
+	// here — an event-log append is a non-blocking channel send.)
+	h.events.Log(eventlog.EventRoomReset,
+		eventlog.String(eventlog.AttrConversationID, room),
+		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleDeleted),
+		eventlog.String(eventlog.AttrRequestID, req.ID),
+	)
 	h.mu.Unlock()
 
 	// Forget the room's last-snapshot signature so a later room reusing this name isn't
@@ -1226,14 +1242,6 @@ func (h *Hub) handleDeleteRoom(c *Client, req types.Request) {
 		h.logger.Printf("delete_room: state dosyası kaldırılamadı (%s): %v", room, err)
 	}
 	os.Remove(stateFile + ".tmp")
-
-	// A room recreated under this name starts its message IDs over, so the
-	// analyzer must drop the old room's read state along with it.
-	h.events.Log(eventlog.EventRoomReset,
-		eventlog.String(eventlog.AttrConversationID, room),
-		eventlog.String(eventlog.AttrRoomLifecycle, eventlog.RoomLifecycleDeleted),
-		eventlog.String(eventlog.AttrRequestID, req.ID),
-	)
 
 	text := fmt.Sprintf("\U0001f5d1️ '%s' odası silindi.", room)
 	c.sendText(req.ID, req.Type, text)

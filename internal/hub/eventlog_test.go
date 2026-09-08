@@ -324,16 +324,31 @@ func TestEventLogRecordsExactReadIDs(t *testing.T) {
 	readResponse(t, bob, "get_messages")
 
 	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventMessagesRead)
-	ids, ok := e[eventlog.AttrReadMessageIDs].([]any)
-	if !ok {
-		t.Fatalf("%s alanı yok veya liste değil: %v", eventlog.AttrReadMessageIDs, e[eventlog.AttrReadMessageIDs])
-	}
+	ids := decodeReadIDs(t, e)
 	if len(ids) != 2 {
 		t.Errorf("kaydedilen id sayısı = %d, want 2 (limit kadar)", len(ids))
 	}
 	if got := e[eventlog.AttrReadReturned]; got != float64(len(ids)) {
-		t.Errorf("returned = %v, id listesi uzunluğu = %d", got, len(ids))
+		t.Errorf("returned = %v, id sayısı = %d", got, len(ids))
 	}
+}
+
+// decodeReadIDs expands the range-encoded IDs a read event carries.
+func decodeReadIDs(t *testing.T, e map[string]any) []int {
+	t.Helper()
+	raw, ok := e[eventlog.AttrReadIDRanges].([]any)
+	if !ok {
+		t.Fatalf("%s alanı yok veya liste değil: %v", eventlog.AttrReadIDRanges, e[eventlog.AttrReadIDRanges])
+	}
+	pairs := make([]int, 0, len(raw))
+	for _, v := range raw {
+		f, ok := v.(float64)
+		if !ok {
+			t.Fatalf("aralık değeri sayı değil: %v", v)
+		}
+		pairs = append(pairs, int(f))
+	}
+	return eventlog.DecodeIDRanges(pairs)
 }
 
 // Codex review, PR #103: managers are told to poll read_all_messages, so that
@@ -368,8 +383,8 @@ func TestEventLogRecordsReadAllProgress(t *testing.T) {
 	if e[eventlog.AttrAgentName] != "yonetici" {
 		t.Errorf("%s = %v, want yonetici", eventlog.AttrAgentName, e[eventlog.AttrAgentName])
 	}
-	if got, ok := e[eventlog.AttrReadMessageIDs].([]any); !ok || len(got) == 0 {
-		t.Errorf("read_all okuma ilerlemesi kaydetmedi: %v", e[eventlog.AttrReadMessageIDs])
+	if len(decodeReadIDs(t, e)) == 0 {
+		t.Error("read_all okuma ilerlemesi kaydetmedi")
 	}
 }
 
@@ -419,7 +434,7 @@ func TestEventLogSkipsReadWhenResponseIsDropped(t *testing.T) {
 	})
 
 	for _, e := range eventsNamed(loggedEvents(t, h, dir), eventlog.EventMessagesRead) {
-		if ids, ok := e[eventlog.AttrReadMessageIDs].([]any); ok && len(ids) > 0 {
+		if ids, ok := e[eventlog.AttrReadIDRanges].([]any); ok && len(ids) > 0 {
 			t.Errorf("yanıt kuyruğa girmediği hâlde okuma kaydedilmiş: %v", ids)
 		}
 	}
@@ -433,10 +448,10 @@ func TestSendMessageWithPresenceReportsRosterAtStoreTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, present, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "bob"); err != nil || !present {
+	if _, present, _, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "bob"); err != nil || !present {
 		t.Errorf("odadaki alıcı için present=%v err=%v, want true/nil", present, err)
 	}
-	if _, present, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "hayalet"); err != nil || present {
+	if _, present, _, err := r.SendMessageWithPresence("alice", "bob", "m", false, "", SendOptions{}, "hayalet"); err != nil || present {
 		t.Errorf("odada olmayan alıcı için present=%v err=%v, want false/nil", present, err)
 	}
 	// The plain SendMessage wrapper must stay behaviour-compatible.
@@ -535,5 +550,72 @@ func TestEventLogRoomResetPrecedesPostClearMessages(t *testing.T) {
 		if order[i] != want[i] {
 			t.Fatalf("olay sırası = %v, want %v", order, want)
 		}
+	}
+}
+
+// Codex review round 6, PR #103: the sent event must carry the generation the
+// message was STORED in, captured under the room lock — not one inferred from
+// where the event lands relative to the boundary record.
+func TestEventLogStampsRoomGeneration(t *testing.T) {
+	h, alice, dir := newEventHub(t)
+	h.setConfiguredManager("r1", "alice")
+	h.handleJoinRoom(alice, types.Request{
+		ID: "join", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice", "role": "manager"}),
+	})
+	if resp := readResponse(t, alice, "join_room"); !resp.Success {
+		t.Fatalf("manager join başarısız: %s", resp.Error)
+	}
+
+	send := func(id string) {
+		h.handleSendMessage(alice, types.Request{
+			ID: id, Type: "send_message", Room: "r1",
+			Data: mustRawJSON(t, map[string]any{"from": "alice", "to": "all", "content": id}),
+		})
+		readResponse(t, alice, "send_message")
+	}
+	send("once")
+	h.handleClearRoom(alice, types.Request{
+		ID: "clear", Type: "clear_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]any{}),
+	})
+	readResponse(t, alice, "clear_room")
+	send("sonra")
+
+	sent := eventsNamed(loggedEvents(t, h, dir), eventlog.EventMessageSent)
+	if len(sent) != 2 {
+		t.Fatalf("message.sent sayısı = %d, want 2", len(sent))
+	}
+	if got := sent[0][eventlog.AttrRoomGeneration]; got != float64(0) {
+		t.Errorf("clear öncesi kuşak = %v, want 0", got)
+	}
+	if got := sent[1][eventlog.AttrRoomGeneration]; got != float64(1) {
+		t.Errorf("clear sonrası kuşak = %v, want 1", got)
+	}
+}
+
+// Codex review round 6: the delete boundary must be ordered while h.mu still
+// excludes recreation, or a room recreated in the gap logs its low-ID messages
+// on the wrong side of it.
+func TestEventLogDeleteResetOrderedUnderHubLock(t *testing.T) {
+	h, c, dir := newEventHub(t)
+	c.clientType = "desktop"
+	c.desktopAuthed = true
+	h.getOrCreateRoom("silinecek")
+
+	h.handleDeleteRoom(c, types.Request{
+		ID: "del", Type: "delete_room", Room: "silinecek",
+		Data: mustRawJSON(t, map[string]any{}),
+	})
+	if resp := readResponse(t, c, "delete_room"); !resp.Success {
+		t.Fatalf("delete_room başarısız: %s", resp.Error)
+	}
+
+	e := onlyEvent(t, loggedEvents(t, h, dir), eventlog.EventRoomReset)
+	if e[eventlog.AttrRoomLifecycle] != eventlog.RoomLifecycleDeleted {
+		t.Errorf("%s = %v, want deleted", eventlog.AttrRoomLifecycle, e[eventlog.AttrRoomLifecycle])
+	}
+	if e[eventlog.AttrConversationID] != "silinecek" {
+		t.Errorf("%s = %v", eventlog.AttrConversationID, e[eventlog.AttrConversationID])
 	}
 }

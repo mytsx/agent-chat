@@ -517,3 +517,60 @@ func TestDrainIsIdempotentAndCloseStillWorks(t *testing.T) {
 	}
 	l.Log(EventMessageSent) // kapanıştan sonra sessizce yutulmalı
 }
+
+// Codex review round 6, PR #103: an oversized read must keep its exact IDs.
+// Ranges make that possible without a cap — a read is a contiguous tail, so it
+// costs two numbers however many messages came back.
+func TestIDRangeRoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		ids       []int
+		wantPairs int
+	}{
+		{"bitişik kuyruk", []int{4, 5, 6, 7}, 2},
+		{"boşluklu", []int{1, 2, 5, 9, 10}, 6},
+		{"tek", []int{42}, 2},
+		{"sırasız ve tekrarlı", []int{7, 5, 6, 5}, 2},
+		{"boş", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pairs := EncodeIDRanges(tc.ids)
+			if len(pairs) != tc.wantPairs {
+				t.Errorf("aralık uzunluğu = %d, want %d (%v)", len(pairs), tc.wantPairs, pairs)
+			}
+			got := DecodeIDRanges(pairs)
+			want := map[int]bool{}
+			for _, id := range tc.ids {
+				want[id] = true
+			}
+			if len(got) != len(want) {
+				t.Fatalf("çözülen = %v, want kümesi %v", got, tc.ids)
+			}
+			for _, id := range got {
+				if !want[id] {
+					t.Errorf("beklenmeyen id %d", id)
+				}
+			}
+		})
+	}
+
+	t.Run("büyük bitişik okuma iki sayıya sığar", func(t *testing.T) {
+		ids := make([]int, 0, 1000)
+		for i := 1; i <= 1000; i++ {
+			ids = append(ids, i)
+		}
+		if pairs := EncodeIDRanges(ids); len(pairs) != 2 {
+			t.Errorf("1000 kimlik %d sayıya kodlandı, want 2", len(pairs))
+		}
+	})
+
+	t.Run("bozuk aralık tahmin edilmez", func(t *testing.T) {
+		if got := DecodeIDRanges([]int{5, 3}); len(got) != 0 {
+			t.Errorf("ters aralık çözülmüş: %v", got)
+		}
+		if got := DecodeIDRanges([]int{1}); len(got) != 0 {
+			t.Errorf("tek sayılı aralık çözülmüş: %v", got)
+		}
+	})
+}
