@@ -791,9 +791,19 @@ func TestQuickReconnectLeavesNoDepartureNoise(t *testing.T) {
 
 	msgsBefore := len(h.getOrCreateRoom("r1").GetMessages())
 
-	// The socket dies and the client is back before the window closes.
-	h.releaseAgent("r1", "alice")
-	h.agentConnected("r1", "alice")
+	// The socket dies and the client is back before the window closes — through
+	// the REAL join path. Calling h.agentConnected directly would bypass
+	// RoomState.Join and hide a rejoin the hub actually refuses (Copilot review,
+	// PR #107).
+	h.releaseAgentForClient(c, "r1", "alice")
+	replacement := &Client{hub: h, send: make(chan []byte, 64), rooms: make(map[string]bool)}
+	h.handleJoinRoom(replacement, types.Request{
+		ID: "rejoin", Type: "join_room", Room: "r1",
+		Data: mustRawJSON(t, map[string]string{"agent_name": "alice"}),
+	})
+	if resp := readResponse(t, replacement, "join_room"); !resp.Success {
+		t.Fatalf("pencere içinde yeniden katılım reddedildi: %s", resp.Error)
+	}
 
 	time.Sleep(400 * time.Millisecond)
 
@@ -815,7 +825,7 @@ func TestAgentGoneAfterGraceWindow(t *testing.T) {
 	h.graceWindow = 100 * time.Millisecond
 	joinAgent(t, h, c, "r1", "alice")
 
-	h.releaseAgent("r1", "alice")
+	h.releaseAgentForClient(c, "r1", "alice")
 	time.Sleep(300 * time.Millisecond)
 
 	if h.getOrCreateRoom("r1").HasAgent("alice") {

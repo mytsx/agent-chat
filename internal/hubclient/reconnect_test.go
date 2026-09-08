@@ -437,3 +437,45 @@ func TestRejectedJoinIsNotReplayed(t *testing.T) {
 		}
 	}
 }
+
+// Copilot review, PR #107: the fake hub always answered Success, so no test
+// drove restoreSession to failure — which is how the "rejected replay counts as
+// restored" bug survived. Here the hub refuses the REPLAYED join, so the
+// supervisor must keep retrying instead of declaring victory.
+func TestSupervisorRetriesWhenReplayIsRejected(t *testing.T) {
+	h := newFakeHub(t)
+	c := newTestClient(t, h)
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.JoinRoom("r1", "alice", "manager"); err != nil {
+		t.Fatalf("JoinRoom: %v", err)
+	}
+
+	// From now on the hub refuses joins, as it would while the desktop has not
+	// restored a manager's authorization yet.
+	h.mu.Lock()
+	h.rejectJoin = true
+	h.mu.Unlock()
+
+	h.dropAll()
+	// The supervisor must not settle: each attempt is refused, so it keeps
+	// dialling rather than leaving the client connected-but-unjoined.
+	waitFor(t, "reddedilen replay sonrası yeniden deneme", func() bool { return h.acceptedCount() >= 3 })
+
+	// Once the hub relents, the session is restored for real.
+	h.mu.Lock()
+	h.rejectJoin = false
+	h.mu.Unlock()
+
+	waitFor(t, "izin verilince katılım", func() bool {
+		var joins int
+		for _, typ := range h.requestTypes() {
+			if typ == "join_room" {
+				joins++
+			}
+		}
+		return joins >= 2
+	})
+}
