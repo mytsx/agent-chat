@@ -50,17 +50,32 @@ ec=$(printf '%s' "$PAYLOAD" | jq -r '.tool_response.exit_code // .tool_response.
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0
 b=$(git branch --show-current 2>/dev/null)
 [ -n "$b" ] || exit 0
-SHA=$(git rev-parse HEAD 2>/dev/null)
-[ -n "$SHA" ] || exit 0
-
 # PR henüz açılmamış olabilir (ilk push PR'dan önce gelir) — kısa süre bekle.
+# Boş sonuç bu gh sürümünde boş çıktı veriyor (ölçüldü), ama "null" basan
+# sürümlere karşı ikisi de eleniyor: "null" boş olmadığı için döngüyü kırar ve
+# izleyici tüm zaman aşımı boyunca pulls/null'u yoklardı.
 n=""
 for _ in 1 2 3 4 5 6; do
   n=$(gh pr list --repo "$REPO" --head "$b" --state open --json number --jq '.[0].number' 2>/dev/null)
-  [ -n "$n" ] && break
+  case "$n" in ""|null) n="" ;; *) break ;; esac
   sleep 10
 done
 [ -n "$n" ] || exit 0
+
+# Tur SHA'sı PR'ın uzak head'inden alınıyor, lokal HEAD'den değil: `git push`
+# rastgele refspec kabul ediyor (`git push origin HEAD~1:dal`, yalnız tag
+# push'u, ya da push'tan sonra tekrar commit'leyen bileşik komut), o durumlarda
+# lokal HEAD PR'a giden commit DEĞİL — izleyici yanlış SHA'yı yoklar ve
+# işaretiyle o commit'in gerçek push'unu bastırırdı. Bu push PR head'ini hiç
+# değiştirmediyse SHA öncekiyle aynı kalır, çift-bildirim koruması devreye girer
+# ve hook doğru biçimde hiçbir şey yapmaz.
+SHA=""
+for _ in 1 2 3 4 5 6; do
+  SHA=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)
+  case "$SHA" in ""|null) SHA="" ;; *) break ;; esac
+  sleep 5
+done
+[ -n "$SHA" ] || exit 0
 
 # Çift-bildirim koruması: bot+PR başına son izlenen head SHA saklanır — aynı
 # commit'i iki kez iten bir tur (retry, --force-with-lease) iki bildirim üretmesin.
