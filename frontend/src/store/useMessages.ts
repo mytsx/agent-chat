@@ -23,6 +23,28 @@ export const useMessages = create<MessagesState>((set) => ({
   addMessages: (chatDir, newMessages) => {
     set((s) => {
       const existing = s.messages[chatDir] ?? EMPTY_MESSAGES;
+      if (newMessages.length === 0) return s;
+
+      if (existing.length === 0) {
+        return {
+          messages: {
+            ...s.messages,
+            [chatDir]: newMessages.slice(),
+          },
+        };
+      }
+
+      const lastExistingID = existing[existing.length - 1].id;
+      const appendOnly = newMessages.every((m) => m.id > lastExistingID);
+      if (appendOnly) {
+        return {
+          messages: {
+            ...s.messages,
+            [chatDir]: [...existing, ...newMessages],
+          },
+        };
+      }
+
       const existingIDs = new Set(existing.map((m) => m.id));
       const uniqueNew = newMessages.filter((m) => !existingIDs.has(m.id));
       if (uniqueNew.length === 0) return s;
