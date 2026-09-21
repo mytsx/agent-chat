@@ -1,6 +1,6 @@
 module desktop
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/creack/pty v1.1.24
@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/mark3labs/mcp-go v1.0.0
 	github.com/wailsapp/wails/v2 v2.15.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
