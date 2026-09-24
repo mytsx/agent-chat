@@ -57,16 +57,35 @@ function createDefaultLayoutItem(order: number, sessionID: string): LayoutItem {
   });
 }
 
-function layoutSignature(layout: readonly LayoutItem[]): string {
-  return layout
-    .map((item) => normalizeLayout(item))
-    .sort((a, b) => a.i.localeCompare(b.i))
-    .map((item) => `${item.i}:${item.x}:${item.y}:${item.w}:${item.h}`)
-    .join("|");
-}
-
 function layoutsEqual(a: readonly LayoutItem[], b: readonly LayoutItem[]): boolean {
-  return layoutSignature(a) === layoutSignature(b);
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  const otherByID = new Map<string, LayoutItem>();
+  for (const item of b) {
+    const normalized = normalizeLayout(item);
+    otherByID.set(normalized.i, normalized);
+  }
+
+  for (const item of a) {
+    const normalized = normalizeLayout(item);
+    const other = otherByID.get(normalized.i);
+    if (!other) {
+      return false;
+    }
+
+    if (
+      normalized.x !== other.x ||
+      normalized.y !== other.y ||
+      normalized.w !== other.w ||
+      normalized.h !== other.h
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function syncLayoutWithSessions(layout: LayoutItem[], sessions: TerminalSession[]): LayoutItem[] {
@@ -114,9 +133,13 @@ function buildFixedGridSlotRows(
 }
 
 function nextCustomSlotIndex(sessions: TerminalSession[]): number {
-  return sessions.length > 0
-    ? Math.max(...sessions.map((session) => session.slotIndex)) + 1
-    : 0;
+  let maxSlotIndex = -1;
+  for (const session of sessions) {
+    if (session.slotIndex > maxSlotIndex) {
+      maxSlotIndex = session.slotIndex;
+    }
+  }
+  return maxSlotIndex + 1;
 }
 
 function gridSlotKey(slot: GridSlot): string {
