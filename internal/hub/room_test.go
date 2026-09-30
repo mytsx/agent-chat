@@ -156,3 +156,23 @@ func TestRoomSendMessage_InterceptionMetadata(t *testing.T) {
 		t.Fatalf("expected to=manager, got %q", msg.To)
 	}
 }
+
+func TestRoomReadAllMessagesStartsAfterSinceID(t *testing.T) {
+	r := NewRoomState()
+	r.mu.Lock()
+	r.messages = []types.Message{
+		{ID: 1, Content: "old"},
+		{ID: 2, Content: "prompt", Type: types.MsgTypeUserPrompt},
+		{ID: 3, Content: "reply"},
+		{ID: 4, Content: "latest"},
+	}
+	r.mu.Unlock()
+
+	got, total, _ := r.ReadAllMessages(2, 1)
+	if total != 2 {
+		t.Fatalf("total = %d, want 2", total)
+	}
+	if len(got) != 1 || got[0].ID != 4 {
+		t.Fatalf("messages = %#v, want only the newest message (id 4)", got)
+	}
+}
