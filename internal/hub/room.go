@@ -567,11 +567,11 @@ func (r *RoomState) ReadAllMessages(sinceID, limit int) ([]types.Message, int, i
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var filtered []types.Message
-	for _, m := range r.messages {
-		if m.ID <= sinceID {
-			continue
-		}
+	start := sort.Search(len(r.messages), func(i int) bool {
+		return r.messages[i].ID > sinceID
+	})
+	filtered := make([]types.Message, 0, len(r.messages)-start)
+	for _, m := range r.messages[start:] {
 		// Exclude transcript-only user_prompt records from the manager's read too,
 		// so a polling manager doesn't re-route a prompt the user already gave an
 		// agent directly (#29). Still present in raw read + summary transcript.
